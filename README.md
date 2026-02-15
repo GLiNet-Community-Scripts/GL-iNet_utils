@@ -96,7 +96,7 @@ System Benchmarks
 System Configuation Viewer
 
 ```
-  Wireless Networks
+1️⃣  Wireless Networks
 2️⃣  Network Configuration
 3️⃣  VPN Configuration
 4️⃣  System Settings

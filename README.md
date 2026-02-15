@@ -18,16 +18,19 @@
 
 ## Features
 
-- 🖥️ **Hardware Information** – Detailed system, CPU, memory, storage, crypto acceleration, network & wireless info (paged navigation)
-- ⚙️ **AdGuardHome Management** – Enable/disable UI auto-updates, install/remove custom blocklists & allowlists
-- ⚙️ **AdGuardHome Maintenance** – A dedicated hub to manage service status, create/restore backups, monitor hardware-specific storage limits, and view live logs.
-- 💾 **Zram Swap** – Install, enable, disable or uninstall compressed RAM swap (great for low-RAM models)
-- 📊 **Benchmarks** – CPU stress test (stress-ng), OpenSSL speed, disk I/O read/write performance
-- 📋 **UCI Config Viewer** – View wireless SSIDs/passwords, network, VPN, system, GoodCloud settings safely
-- 🔄 **Self-updating** – Checks GitHub for new versions and offers easy upgrade
-- 🆓 Licensed under **GPL-3.0**
+- 🚀 Key Features
+- 🖥️ Deep Hardware Insights – Total visibility into your CPU, RAM, and storage. Includes paged navigation for network interfaces and wireless radio details.
+- 🛡️ VPN Crypto Audit – Instantly verify if your hardware acceleration (AES-CE, NEON) is actually active for OpenVPN and WireGuard.
+- 🛠️ AdGuardHome Control Center – A central hub to toggle the service, manage UI auto-updates, and bulk-import blocklists or allowlists.
+- 🆘 Fail-Safe Recovery – "Industrial" self-healing logic. If your AGH binary or init script goes missing, the script can pull pristine copies directly from the device's /rom to fix the install.
+- 📦 Surgical Backups – Precision-tracked backups with 2-digit decimal accuracy. Create, manage, and restore configurations with automated timestamping.
+- 💾 Zram Swap Management – Essential for low-RAM travel routers. Easily install and tune compressed RAM swap to prevent out-of-memory crashes.
+- 📊 Performance Benchmarks – Real-world testing including stress-ng CPU cycles, OpenSSL throughput, and raw Disk I/O speeds.
+- 📋 Secure UCI Viewer – Quick, read-only access to your system config. Check SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
+- 🔄 Native Self-Updater – Stay current without manual downloads. The script checks GitHub on launch and can update itself in place.
+- 🆓 GPL-3.0 Licensed – Free, open, and community-driven.
 
-Tested on various GL.iNet models (BE3600, MT3000, etc.) running recent firmware.
+Tested on various GL.iNet models (Beryl, Beryl AX, Beryl BE, Slate 7, Flint 3, Flint 3e, Brume 3, etc.) running recent firmware.
 
 ---
 
@@ -60,16 +63,48 @@ Options may vary as new utilities are added, but generally include:
 
 ```
 1️⃣  Show Hardware Information
-2️⃣  Manage AdGuardHome UI Updates
-3️⃣  Manage AdGuardHome Storage
-4️⃣  Manage AdGuardHome Lists
-5️⃣  Backup/Restore AdGuardHome
-6️⃣  Manage Zram Swap
-7️⃣  System Benchmarks (CPU & Disk)
-8️⃣  View System Configuration (UCI)
-9️⃣  Check for Update
+2️⃣  AdGuardHome Control Center
+3️⃣  Manage Zram Swap
+4️⃣  System Benchmarks (CPU & Disk)
+5️⃣  View System Configuration (UCI)
+6️⃣  Check for Update
 0️⃣  Exit
+
 ```
+
+AdGuardHome Control Center
+
+```
+1️⃣  Manage Allow/Blocklists
+2️⃣  Setup, Access & UI Updates
+3️⃣  Backup & Recovery Suite
+4️⃣  Service, Logs & Cache Purge
+🆑 Reset to Factory Settings (Start Over)
+0️⃣  Back to Main Menu
+❓ Help
+```
+
+System Benchmarks
+
+```
+1️⃣  CPU Stress Test
+2️⃣  CPU Benchmark (OpenSSL)
+3️⃣  Disk I/O Benchmark
+0️⃣  Main menu
+```
+
+System Configuation Viewer
+
+```
+  Wireless Networks
+2️⃣  Network Configuration
+3️⃣  VPN Configuration
+4️⃣  System Settings
+5️⃣  Cloud Services
+0️⃣  Main menu
+```
+
+
 
 Most sections include built-in help text and confirmation prompts for safety.
 

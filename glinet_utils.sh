@@ -326,18 +326,32 @@ show_hardware_info() {
                 printf " %b\n" "${CYAN}Storage:${RESET}"
                 # 1. Check for eMMC (Brume 2/3, Flint 2/3, etc.)
                 if [ -b /dev/mmcblk0 ]; then
-                    # Get size in bytes and convert to GiB
-                    mmc_bytes=$(cat /sys/block/mmcblk0/size) # Size in 512-byte blocks
-                    mmc_gib=$(awk -v b="$mmc_bytes" 'BEGIN { printf "%.1f", (b * 512) / 1024 / 1024 / 1024 }')
-                    printf "   Physical eMMC: %b%s GiB%b\n" "${GREEN}" "$mmc_gib" "${RESET}"
+                    mmc_blocks=$(cat /sys/block/mmcblk0/size)
+                    # Convert 512-byte blocks to MiB
+                    mmc_mib=$((mmc_blocks * 512 / 1024 / 1024))
+                    
+                    if [ "$mmc_mib" -ge 1000 ]; then
+                        mmc_gib=$(( (mmc_mib + 512) / 1024 ))
+                        printf "   Physical eMMC: %b%d GiB%b\n" "${GREEN}" "$mmc_gib" "${RESET}"
+                    else
+                        printf "   Physical eMMC: %b%d MiB%b\n" "${GREEN}" "$mmc_mib" "${RESET}"
+                    fi
 
-                # 2. Fallback to MTD (Beryl, Slate, old routers)
+                # 2. Fallback to MTD (Slate 7 Pro, Beryl, etc.)
                 elif [ -f /proc/mtd ]; then
-                    # Sum all MTD partitions to get the total flash size
-                    flash_total=$(awk 'NR>1 {sum += strtonum("0x"$2)} END {print sum}' /proc/mtd)
-                    if [ -n "$flash_total" ] && [ "$flash_total" -gt 0 ]; then
-                        flash_mib=$((flash_total / 1024 / 1024))
-                        printf "   Total Physical Flash: %b%d MiB%b\n" "${GREEN}" "$flash_mib" "${RESET}"
+                    max_hex=$(awk 'NR>1 {print $2}' /proc/mtd | sort -r | head -n 1)
+                    
+                    if [ -n "$max_hex" ]; then
+                        # Convert Hex to Decimal bytes using shell printf
+                        flash_bytes=$(printf "%d" "0x$max_hex")
+                        flash_mib=$((flash_bytes / 1024 / 1024))
+                        
+                        if [ "$flash_mib" -ge 1000 ]; then
+                            flash_gib=$(( (flash_mib + 512) / 1024 ))
+                            printf "   Physical NAND: %b%d GiB%b\n" "${GREEN}" "$flash_gib" "${RESET}"
+                        else
+                            printf "   Physical NAND: %b%d MiB%b\n" "${GREEN}" "$flash_mib" "${RESET}"
+                        fi
                     fi
                 else
                     printf "   Physical Storage: %bUnknown%b\n" "${RED}" "${RESET}"

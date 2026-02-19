@@ -2109,6 +2109,9 @@ benchmark_system() {
         
         case $bench_choice in
             1)
+                clear
+                print_centered_header "CPU Thermal Stress Test"
+                
                 if ! command -v stress >/dev/null 2>&1; then
                     print_warning "stress not found, installing..."
                     if [ "$opkg_updated" -eq 0 ]; then
@@ -2178,6 +2181,9 @@ benchmark_system() {
                 press_any_key
                 ;;
             2)
+                clear
+                print_centered_header "OpenSSL CPU Benchmark"
+
                 if ! command -v openssl >/dev/null 2>&1; then
                     print_error "OpenSSL not found"
                     press_any_key
@@ -2259,7 +2265,8 @@ EOF
                 press_any_key
                 ;;
             3)
-                printf "%b\n" "${CYAN}🔧 Disk I/O Benchmark${RESET}\n"
+                clear
+                print_centered_header "Disk I/O Benchmark"
                 
                 # --- Beryl 7 (MT7981) Baselines (MB/s) ---
                 BASE_W=119.05
@@ -2327,7 +2334,8 @@ EOF
                 press_any_key
                 ;;
             4)
-                printf "%b\n" "${CYAN}🔧 Memory I/O Benchmark${RESET}\n"
+                clear
+                print_centered_header "Memory I/O Benchmark"
                 
                 # --- Beryl 7 (MT7981) Memory Baseline (MB/s) ---
                 # Based on internal DDR bandwidth tests
@@ -2374,7 +2382,9 @@ EOF
                 press_any_key
                 ;;
             5)
-                printf "\n"
+                clear
+                print_centered_header "DNS Benchmark"
+
                 print_info "Starting Comprehensive DNS Benchmark...\n"
                 
                 # Pre-check: Can we resolve anything at all?

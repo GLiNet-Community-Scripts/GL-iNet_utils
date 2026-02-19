@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-02-15
+# Version: 2026-02-19
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -2419,7 +2419,7 @@ EOF
                     done
 
                     avg=$(awk -v t="$total" 'BEGIN { printf "%.2f", t / 10 }')
-                    
+
                     COLOR=$CYAN
                     if [ $(awk -v a="$avg" 'BEGIN {print (a < 15.0 ? 1 : 0)}') -eq 1 ]; then 
                         COLOR=$GREEN

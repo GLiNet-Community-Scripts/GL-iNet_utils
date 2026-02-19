@@ -238,8 +238,15 @@ get_agh_workdir() {
 }
 
 is_agh_running() {
-    pidof AdGuardHome >/dev/null 2>&1
-    return $?
+    if ! pidof AdGuardHome >/dev/null 2>&1; then
+        return 1
+    fi
+
+    if netstat -tunlp | grep -q "AdGuardHome"; then
+        return 0
+    fi
+
+    return 1
 }
 
 # -----------------------------
@@ -252,7 +259,7 @@ show_hardware_info() {
     while true; do
         clear
         print_centered_header "Hardware Information"
-        printf " ────────────────────────────────────────────────────────────────────\n"
+        printf " ──────────────────────────────────────────────────────────────────────────────\n"
         case $page in
             1)
                 printf " %b%bPage 1 of $total_pages: System Overview%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
@@ -317,13 +324,23 @@ show_hardware_info() {
                 printf "\n"
                 
                 printf " %b\n" "${CYAN}Storage:${RESET}"
-                if [ -f /proc/mtd ]; then
-                    hex=$(awk 'NR==2 {print $2}' /proc/mtd)
-                    if [ -n "$hex" ]; then
-                        flash_total=$(printf "%d" "0x$hex" 2>/dev/null)
+                # 1. Check for eMMC (Brume 2/3, Flint 2/3, etc.)
+                if [ -b /dev/mmcblk0 ]; then
+                    # Get size in bytes and convert to GiB
+                    mmc_bytes=$(cat /sys/block/mmcblk0/size) # Size in 512-byte blocks
+                    mmc_gib=$(awk -v b="$mmc_bytes" 'BEGIN { printf "%.1f", (b * 512) / 1024 / 1024 / 1024 }')
+                    printf "   Physical eMMC: %b%s GiB%b\n" "${GREEN}" "$mmc_gib" "${RESET}"
+
+                # 2. Fallback to MTD (Beryl, Slate, old routers)
+                elif [ -f /proc/mtd ]; then
+                    # Sum all MTD partitions to get the total flash size
+                    flash_total=$(awk 'NR>1 {sum += strtonum("0x"$2)} END {print sum}' /proc/mtd)
+                    if [ -n "$flash_total" ] && [ "$flash_total" -gt 0 ]; then
                         flash_mib=$((flash_total / 1024 / 1024))
                         printf "   Total Physical Flash: %b%d MiB%b\n" "${GREEN}" "$flash_mib" "${RESET}"
                     fi
+                else
+                    printf "   Physical Storage: %bUnknown%b\n" "${RED}" "${RESET}"
                 fi
                 
                 printf "\n %b\n" "${CYAN}Filesystem Usage:${RESET}"
@@ -369,31 +386,80 @@ show_hardware_info() {
             3)
                 printf " %b%bPage 3 of $total_pages: Network Interfaces%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
-                printf " %b\n" "${CYAN}Ethernet Interfaces:${RESET}"
+                # --- 1. Map Discovery ---
+                port_map="|"
+                sw_list=$(swconfig list 2>/dev/null)
+                if [ -n "$sw_list" ] && [ -f "/etc/board.json" ]; then
+                    lan_ports=$(grep -B 1 '"role": "lan"' /etc/board.json | grep '"num":' | grep -oE '[0-9]+' | tr '\n' ' ')
+                    current_label=1
+                    for p in $(echo "$lan_ports" | tr ' ' '\n' | sort -rn); do
+                        port_map="${port_map}P${p}:LAN${current_label}|"
+                        current_label=$((current_label + 1))
+                    done
+                    wan_p=$(grep -B 1 '"role": "wan"' /etc/board.json | grep '"num":' | grep -oE '[0-9]+' | head -n 1)
+                    [ -n "$wan_p" ] && port_map="${port_map}P${wan_p}:WAN|"
+                fi
+
+                # --- 2. Logical Interfaces ---
+                printf " %b\n" "${CYAN}Network Interfaces (Logical/DSA):${RESET}"
                 ip -br link show 2>/dev/null | grep -E "eth|lan|wan|br-" | while read iface state rest; do
-                    speed=""
-                    if [ -f "/sys/class/net/$iface/speed" ]; then
-                        speed=$(cat /sys/class/net/$iface/speed 2>/dev/null)
-                        if [ "$speed" != "-1" ] && [ -n "$speed" ]; then
-                            speed=" (${speed}Mbps)"
-                        else
-                            speed=""
-                        fi
+                    base_iface=$(echo "$iface" | cut -d'@' -f1 | cut -d. -f1)
+                    speed_raw=$(cat "/sys/class/net/$base_iface/speed" 2>/dev/null)
+                    
+                    # Format Speed string safely
+                    if [ "$speed_raw" = "10000" ]; then spd="10Gbps"
+                    elif [ -n "$speed_raw" ] && [ "$speed_raw" != "-1" ]; then spd="${speed_raw}Mbps"
+                    else spd=""; fi
+
+                    # Use printf with variables outside the format string to prevent escape char errors
+                    if [ -n "$spd" ] && [ "$speed_raw" -ge 5000 ]; then
+                        printf "   %-17s: %b%-5s%b %-12s %b%s%b\n" "$iface" "${GREEN}" "$state" "${RESET}" "$spd" "${CYAN}" "[Internal Trunk]" "${RESET}"
+                    elif [ -n "$spd" ]; then
+                        printf "   %-17s: %b%-5s%b %-12s\n" "$iface" "${GREEN}" "$state" "${RESET}" "$spd"
+                    else
+                        printf "   %-17s: %b%-5s%b\n" "$iface" "${GREEN}" "$state" "${RESET}"
                     fi
-                    printf "   %s: %b%s%s%b\n" "$iface" "${GREEN}" "$state" "$speed" "${RESET}"
                 done
                 
-                if command -v swconfig >/dev/null 2>&1; then
-                    printf "\n %b\n" "${CYAN}Switch Configuration:${RESET}"
-                    switch_info=$(swconfig list 2>/dev/null)
-                    if [ -n "$switch_info" ]; then
-                        printf "   %s\n" "$switch_info"
-                    else
-                        printf "   No switch detected\n"
-                    fi
+                # --- 3. Physical Switch ---
+                if [ -n "$sw_list" ]; then
+                    printf "\n %b\n" "${CYAN}Physical Chassis Ports (The Truth):${RESET}"
+                    echo "$sw_list" | awk '{print $2}' | while read sw; do
+                        sw_model=$(echo "$sw_list" | grep "$sw" | awk -F' - ' '{print $2}')
+                        p_count=$(swconfig dev "$sw" help 2>&1 | grep -oE "ports: [0-9]+" | awk '{print $2}')
+                        
+                        printf "   %b%s (%s)%b\n" "${YELLOW}" "$sw" "$sw_model" "${RESET}"
+                        printf "     Map: [ "
+                        for i in $(seq 0 $((p_count - 1))); do
+                            if swconfig dev "$sw" port "$i" get link 2>/dev/null | grep -q "link:up"; then
+                                printf "%b$i%b " "${GREEN}" "${RESET}"
+                            else
+                                printf "%b$i%b " "${RED}" "${RESET}"
+                            fi
+                        done
+                        printf "]\n"
+
+                        for i in $(seq 0 $((p_count - 1))); do
+                            link_info=$(swconfig dev "$sw" port "$i" get link 2>/dev/null)
+                            if echo "$link_info" | grep -q "link:up"; then
+                                h_label=$(echo "$port_map" | grep -o "|P$i:[^|]*" | cut -d: -f2)
+                                # Standardize speed labels (remove baseT for cleanliness)
+                                spd=$(echo "$link_info" | grep -oE "[0-9]+(baseT|Mbps|Gbps)" | sed 's/baseT/Mbps/' | sed 's/10000Mbps/10Gbps/' || echo "UP")
+                                
+                                [ -z "$h_label" ] && h_label="Port $i"
+                                full_label="$h_label (P$i)"
+
+                                if [[ "$spd" == *"10G"* ]]; then
+                                    printf "     └─ %b%-12s%b: %bUP%b    %-12s %b(Internal)%b\n" "${YELLOW}" "$full_label" "${RESET}" "${GREEN}" "${RESET}" "$spd" "${CYAN}" "${RESET}"
+                                else
+                                    printf "     └─ %b%-12s%b: %bUP%b    %-12s\n" "${YELLOW}" "$full_label" "${RESET}" "${GREEN}" "${RESET}" "$spd"
+                                fi
+                            fi
+                        done
+                    done
+                    printf "\n %bLegend: %bGreen=UP %bRed=DOWN %bCyan=Internal %bYellow=Chassis Label%b\n" "${BOLD}" "${GREEN}" "${RED}" "${CYAN}" "${YELLOW}" "${RESET}"
                 fi
                 ;;
-                
             4)
                 printf " %b%bPage 4 of $total_pages: Wireless Interfaces%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
@@ -452,8 +518,8 @@ show_hardware_info() {
                 ;;
         esac
         
-        printf " ────────────────────────────────────────────────────────────────────\n"
-        printf " [B] Previous   "
+        printf " ──────────────────────────────────────────────────────────────────────────────\n"
+        printf " [P] Previous   "
         i=1
         while [ $i -le $total_pages ]; do
             if [ $i -eq $page ]; then
@@ -468,7 +534,7 @@ show_hardware_info() {
         nav_choice=$(read_single_char)
         
         case "$nav_choice" in
-            b|B) [ $page -gt 1 ] && page=$((page - 1)) ;;
+            p|P|b|B) [ $page -gt 1 ] && page=$((page - 1)) ;;
             n|N) [ $page -lt $total_pages ] && page=$((page + 1)) ;;
             1|2|3|4) 
                 if [ "$nav_choice" -ge 1 ] 2>/dev/null && [ "$nav_choice" -le $total_pages ]; then
@@ -533,7 +599,11 @@ manage_agh_ui_updates() {
         clear
         print_centered_header "AdGuardHome UI Updates Management"
 
-        agh_pid=$(pidof AdGuardHome)
+        if is_agh_running; then
+            agh_pid=$(pidof AdGuardHome)
+        else
+            agh_pid=""
+        fi
 
         printf " %b\n" "${CYAN}CURRENT STATUS${RESET}"
         if [ -z "$agh_pid" ]; then
@@ -612,15 +682,15 @@ manage_agh_ui_updates() {
 # -----------------------------
 show_agh_storage_help() {
     clear
-    print_centered_header "AdGuardHome Filter Size Limit - Help"
+    print_centered_header "AdGuardHome Filter Space Limit - Help"
     
     cat << 'HELPEOF'
-AdGuardHome Filter Size Limit – BE3600 & Similar Models
+AdGuardHome Filter Space Limit – BE3600 & Similar Models
 
 Why the limit exists
 ────────────────────
 On 512MB RAM routers (MT3600BE, some newer GL models), GL.iNet creates a 10MB file 
-and mounts it as /etc/AdGuardHome/data/filters. This caps filter cache size to 
+and mounts it as /etc/AdGuardHome/data/filters. This caps filter cache space to 
 prevent AdGuardHome from consuming too much RAM and crashing the router.
 
 Removing this limit lets you use bigger blocklists (e.g. HaGeZi Pro++, multi-list setups), 
@@ -672,13 +742,13 @@ manage_agh_storage() {
         limit_active=0
         if grep -q "mount_filter_img" "$AGH_INIT" 2>/dev/null && ! grep -q "^[[:space:]]*#.*mount_filter_img" "$AGH_INIT" 2>/dev/null; then
             limit_active=1
-            printf "   Filter Size Limit: %bACTIVE (10MB)%b\n" "${YELLOW}" "${RESET}"
+            printf "   Filter Space Limit: %bACTIVE (10MB)%b\n" "${YELLOW}" "${RESET}"
         else
-            printf "   Filter Size Limit: %bINACTIVE%b\n" "${GREEN}" "${RESET}"
+            printf "   Filter Space Limit: %bINACTIVE%b\n" "${GREEN}" "${RESET}"
         fi
         
-        printf "\n1️⃣  Remove Filter Size Limitation\n"
-        printf "2️⃣  Re-enable Filter Size Limitation\n"
+        printf "\n1️⃣  Remove Filter Space Limitation\n"
+        printf "2️⃣  Re-enable Filter Space Limitation\n"
         printf "0️⃣  Return to previous menu\n"
         printf "❓ Help\n"
         printf "\nChoose [1-2/0/?]: "
@@ -688,7 +758,7 @@ manage_agh_storage() {
         case $storage_choice in
             1)
                 if [ $limit_active -eq 0 ]; then
-                    print_warning "Filter size limitation is already removed"
+                    print_warning "Filter space limitation is already removed"
                     press_any_key
                     continue
                 fi
@@ -702,13 +772,14 @@ and instability on 512MB devices when filters are big or many are enabled.
 WARNEOF
                 
                 if ! swapon -s 2>/dev/null | grep -q zram; then
-                    print_warning "WARNING: Zram swap is NOT enabled!"
-                    printf "%b\n\n" "${YELLOW}Strongly recommended: Enable zram swap first${RESET}"
-                    printf "%b\n" "${YELLOW}→ it gives fast compressed swap in RAM and protects flash.${RESET}"
+                    printf "\n"
+                    print_warning "WARNING: Zram swap is NOT enabled!\n"
+                    print_info "It is strongly recommended to enable zram swap before adding aditional filter lists."
                 fi
                 
                 printf "\n%b" "${YELLOW}Remove the 10MB limit anyway? [y/N]: ${RESET}"
                 read -r confirm
+                printf "\n"
                 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
                     printf "Operation cancelled.\n"
                     press_any_key
@@ -717,7 +788,7 @@ WARNEOF
                 
                 if is_agh_running; then
                     agh_pid=$(pidof AdGuardHome)
-                    $AGH_INIT stop >/dev/null 2>&1
+                    $AGH_INIT stop >/dev/null 2>&1; sleep 1
                 else
                     agh_pid=""
                 fi
@@ -733,14 +804,14 @@ WARNEOF
                     print_success "Removed data.img file"
                 fi
                 
-                sed -i '/^[[:space:]]*mount_filter_img/s/^/# /' "$AGH_INIT"
+                sed -i 's|^\([[:space:]]*\)mount_filter_img[[:space:]]|\1# mount_filter_img |' "$AGH_INIT"
                 print_success "Disabled mount_filter_img in init script"
                 
                 if [ -n "$agh_pid" ]; then
-                    $AGH_INIT start >/dev/null 2>&1
-                    if [ $? -eq 0 ]; then
+                    $AGH_INIT start >/dev/null 2>&1; sleep 2
+                    if is_agh_running; then
                         print_success "AdGuardHome restarted successfully"
-                        print_success "Filter size limit removed!"
+                        print_success "Filter space limit removed!"
                     else
                         print_error "Failed to restart AdGuardHome"
                     fi
@@ -750,33 +821,33 @@ WARNEOF
                 ;;
             2)
                 if ! grep -q "mount_filter_img" "$AGH_INIT"; then
-                    print_warning "Filter size limitation feature (mount_filter_img) does not exist on this device/firmware."
-                    printf "   No changes possible — your AdGuardHome is not restricted by the filter size limit.\n"
+                    print_warning "Filter space limitation feature (mount_filter_img) does not exist on this device/firmware."
+                    printf "   No changes possible — your AdGuardHome is not restricted by the filter space limit.\n"
                     press_any_key
                     continue
                 fi
 
-                if ! grep -q "^#.*mount_filter_img" "$AGH_INIT"; then
-                    print_warning "Filter size limitation is already active (mount_filter_img is not commented out)."
+                if ! grep -q "^[[:space:]]*#[[:space:]]*mount_filter_img[[:space:]]" "$AGH_INIT"; then
+                    print_warning "Filter space limitation is already active (mount_filter_img is not commented out)."
                     press_any_key
                     continue
                 fi
                 
                 if is_agh_running; then
                     agh_pid=$(pidof AdGuardHome)
-                    $AGH_INIT stop >/dev/null 2>&1
+                    $AGH_INIT stop >/dev/null 2>&1; sleep 1
                 else
                     agh_pid=""
                 fi
                 
-                sed -i '/mount_filter_img/s/^[[:space:]]*#[[:space:]]*//' "$AGH_INIT"
+                sed -i 's|^\([[:space:]]*\)#[[:space:]]*mount_filter_img[[:space:]]|\1mount_filter_img |' "$AGH_INIT"
                 print_success "Re-enabled mount_filter_img in init script"
                 
                 if [ -n "$agh_pid" ]; then
-                    $AGH_INIT start >/dev/null 2>&1
-                    if [ $? -eq 0 ]; then
+                    $AGH_INIT start >/dev/null 2>&1; sleep 2
+                    if is_agh_running; then
                         print_success "AdGuardHome restarted successfully"
-                        printf "\n%b\n" "${GREEN}✅ Filter size limit removed!${RESET}"
+                        print_success "Filter space limit removed!"
                     else
                         print_error "Failed to restart AdGuardHome"
                     fi
@@ -947,7 +1018,7 @@ EOF
                     BACKUP_FILE="${AGH_CONFIG}.backup.${stamp}"
                     cp "$AGH_CONFIG" "$BACKUP_FILE"
 
-                    $AGH_INIT stop >/dev/null 2>&1
+                    $AGH_INIT stop >/dev/null 2>&1; sleep 1
 
                    	# 5. REMOVAL (Your logic, hardened for line order)
 					echo "$to_remove" | while IFS='|' read -r i n t s sel rec u; do
@@ -1018,15 +1089,14 @@ id: $ts"
 					done
 
                     # 8. RESTART & ERROR RECOVERY
-                    $AGH_INIT start >/dev/null 2>&1
-                    sleep 2
-                    if ! pidof AdGuardHome >/dev/null; then
+                    $AGH_INIT start >/dev/null 2>&1; sleep 2
+                     if ! is_agh_running; then
                         printf "\n"
 						print_error "AdGuardHome failed to start! Reverting..."
                         cp "$AGH_CONFIG" "${AGH_CONFIG}.error.${stamp}"
                         cp "$BACKUP_FILE" "$AGH_CONFIG"
-                        $AGH_INIT start >/dev/null 2>&1
-                        if ! pidof AdGuardHome >/dev/null; then
+                        $AGH_INIT start >/dev/null 2>&1; sleep 2
+                        if ! is_agh_running; then
                             print_error "FATAL: Could not restore AGH even with backup!"
                         else
                             print_warning "Restoring last known good configuration."
@@ -1139,14 +1209,21 @@ update_agh_credentials() {
 
     BCRYPT_HASH=$(htpasswd -n -B -b "$user_name" "$user_pass" | cut -d: -f2)
 
+    
+
     # --- VALIDATION LOGIC ---
     [ -z "$TIMESTAMP" ] && TIMESTAMP=$(date +%Y%m%d%H%M%S)
     BACKUP_FILE="$AGH_CONF.backup.$TIMESTAMP"
     cp "$AGH_CONF" "$BACKUP_FILE"
+
+    # --- Stopping AGH before config changes ---
+    $AGH_INIT stop >/dev/null 2>&1; sleep 1
+
+    local ESC_HASH=$(echo "$BCRYPT_HASH" | sed 's/[&]/\\&/g')
     
     if grep -q "users: \[\]" "$AGH_CONF"; then
         # Case A: Empty list. Replace line with block.
-        sed -i "/users: \[\]/c\users:\n  - name: $user_name\n    password: \"$BCRYPT_HASH\"" "$AGH_CONF"
+        sed -i "\|users: \[\]|c\users:\n  - name: $user_name\n    password: \"$ESC_HASH\"" "$AGH_CONF"
     elif grep -q "^users:" "$AGH_CONF"; then
         # Case B: Check if next two lines are - name and password
         line_num=$(grep -n "^users:" "$AGH_CONF" | cut -d: -f1)
@@ -1154,8 +1231,8 @@ update_agh_credentials() {
         check_pass=$(sed -n "$((line_num+2))p" "$AGH_CONF")
 
         if echo "$check_name" | grep -q " - name:" && echo "$check_pass" | grep -q "password:"; then
-            sed -i "$((line_num+1))s/- name: .*/- name: $user_name/" "$AGH_CONF"
-            sed -i "$((line_num+2))s|password: .*|password: \"$BCRYPT_HASH\"|" "$AGH_CONF"
+            sed -i "$((line_num+1))s|- name: .*|- name: $user_name|" "$AGH_CONF"
+            sed -i "$((line_num+2))s|password: .*|password: \"$ESC_HASH\"|" "$AGH_CONF"
         else
             print_error "Unexpected YAML structure detected below 'users:' line."
             print_warning "Manual edit required to avoid corrupting config."
@@ -1167,13 +1244,11 @@ update_agh_credentials() {
     fi
 
     # --- RESTART & RECOVERY ---
-    $AGH_INIT stop >/dev/null 2>&1
-    $AGH_INIT start >/dev/null 2>&1
-    sleep 2
-    if ! pidof AdGuardHome >/dev/null; then
+    $AGH_INIT start >/dev/null 2>&1; sleep 2
+    if ! is_agh_running; then
         print_error "Service failed to start! Rolling back..."
         cp "$BACKUP_FILE" "$AGH_CONF"
-        $AGH_INIT start >/dev/null 2>&1
+        $AGH_INIT start >/dev/null 2>&1; sleep 2
         press_any_key
     else
         print_success "Credentials updated. Backup created: $(basename "$BACKUP_FILE")"
@@ -1282,7 +1357,7 @@ manage_agh_direct_access() {
 
                 BACKUP_FILE="$AGH_CONF.backup.$TIMESTAMP"
                 cp "$AGH_CONF" "$BACKUP_FILE"
-                $AGH_INIT stop >/dev/null 2>&1
+                $AGH_INIT stop >/dev/null 2>&1; sleep 1
 
                 # Find users: block and replace with users: []
                 line_num=$(grep -n "^users:" "$AGH_CONF" | cut -d: -f1)
@@ -1294,10 +1369,10 @@ manage_agh_direct_access() {
 
                 $AGH_INIT start >/dev/null 2>&1
                 sleep 2
-                if ! pidof AdGuardHome >/dev/null; then
+                if ! is_agh_running; then
                     print_error "Service failed to start! Rolling back..."
                     cp "$BACKUP_FILE" "$AGH_CONF"
-                    $AGH_INIT start >/dev/null 2>&1
+                    $AGH_INIT start >/dev/null 2>&1; sleep 2
                     press_any_key
                 else
                     print_success "Password removed. Service restarted."
@@ -1341,7 +1416,7 @@ NOTES:
 - RULE DISCREPANCY: 'Raw' counts include all text lines. The WebUI 
   displays a lower 'Optimized' count after deduplication.
 - 10MB LIMIT: Crucial for routers with small flash storage. When
-  active, it restricts filter size to prevent storage exhaustion.
+  active, it restricts filter space to prevent storage exhaustion.
 - LOGS: Query logs are often in /tmp (RAM). If 'Free Space' is 
   low, the system may become unstable.
 HELPEOF
@@ -1393,7 +1468,7 @@ create_agh_backup() {
                 return 0
                 ;;
             0) return 1 ;;
-            *) print_error "Invalid option" ; sleep 1 ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }
@@ -1457,11 +1532,11 @@ manage_agh_backups() {
                 fi
                 
                 printf "\nApplying Restore...\n"
-                $AGH_INIT stop >/dev/null 2>&1
+                $AGH_INIT stop >/dev/null 2>&1; sleep 1
                 [ "$fix_cfg" = "Y" ] && cp "/etc/AdGuardHome/config.yaml.backup.$selected_ts" "/etc/AdGuardHome/config.yaml"
                 [ "$fix_bin" = "Y" ] && cp "/usr/bin/AdGuardHome.backup.$selected_ts" "/usr/bin/AdGuardHome"
                 [ "$fix_ini" = "Y" ] && cp "/etc/init.d/adguardhome.backup.$selected_ts" "/etc/init.d/adguardhome"
-                $AGH_INIT start >/dev/null 2>&1
+                $AGH_INIT start >/dev/null 2>&1; sleep 2
                 printf "\n"
                 print_success "Restore complete!"; press_any_key; return ;;
             0) return ;;
@@ -1541,7 +1616,7 @@ delete_agh_backups() {
             c)
                 if ! grep -q "|1$" "$map_file"; then
                     printf "\n"
-                    print_error "No backups selected."; press_any_key ; continue
+                    print_error "No backups selected."; press_any_key; continue
                 fi
                 printf "\n"
                 print_warning "Delete selected backups? [y/N]: "
@@ -1569,7 +1644,7 @@ sub_setup_config() {
     while true; do
         clear
         print_centered_header "AdGuardHome Setup, Access & UI Updates"
-        printf "1️⃣  Filter Storage (10MB Limit)\n"
+        printf "1️⃣  Filter Storage Space Limit\n"
         printf "2️⃣  UI Direct Access\n"
         printf "3️⃣  UI Updates\n"
         printf "0️⃣  Back to Control Center\n"
@@ -1580,7 +1655,7 @@ sub_setup_config() {
             2) manage_agh_direct_access ;;
             3) manage_agh_ui_updates ;;
             0) break ;;
-            *) print_error "Invalid option" ; sleep 1 ;;
+            *) print_error "Invalid option"; sleep 1;;
         esac
     done
 }
@@ -1606,7 +1681,7 @@ sub_backup_recovery() {
             2) manage_agh_backups ;;
             3) delete_agh_backups ;;
             0) break ;;
-            *) print_error "Invalid option" ; sleep 1 ;;
+            *) print_error "Invalid option"; sleep 1;;
         esac
     done
 }
@@ -1629,24 +1704,25 @@ sub_service_health() {
                    local tr=$(read_single_char | tr '[:upper:]' '[:lower:]')
                    if [ "$tr" = "d" ]; then
                        uci set adguardhome.config.enabled='0' && uci commit adguardhome
-                       $AGH_INIT stop >/dev/null 2>&1 && print_success "Service Disabled"
+                       $AGH_INIT stop >/dev/null 2>&1; sleep 1; print_success "Service Disabled"
                    elif [ "$tr" = "r" ]; then
-                       $AGH_INIT restart >/dev/null 2>&1 && print_success "Service Restarted"
+                       $AGH_INIT restart >/dev/null 2>&1; sleep 2; print_success "Service Restarted"
                    fi
                else
                    printf "\n"
                    print_warning "Service is STOPPED. Enable now? [y/N]: "
                    if [ "$(read_single_char | tr '[:upper:]' '[:lower:]')" = "y" ]; then
                        uci set adguardhome.config.enabled='1' && uci commit adguardhome
-                       $AGH_INIT enable >/dev/null 2>&1 && $AGH_INIT start >/dev/null 2>&1 && print_success "Service Enabled"
+                       $AGH_INIT enable >/dev/null 2>&1; sleep 1; $AGH_INIT start >/dev/null 2>&1; sleep 2; print_success "Service Enabled"
                    fi
-               fi ; press_any_key ;;
+               fi
+               press_any_key ;;
             2) 
                # RESTORED: Your specific tested logread logic
                clear
                print_centered_header "AdGuardHome System Logs (Ctrl+C to exit)"
                sleep 1
-               trap 'printf "\n\n" ; print_warning "Stopping log viewing..."' INT
+               trap 'printf "\n\n"; print_warning "Stopping log viewing..."' INT
                logread -l 20 -e "AdGuardHome" 2>/dev/null
                logread -f -e "AdGuardHome" 2>/dev/null
                trap - INT
@@ -1660,9 +1736,10 @@ sub_service_health() {
                    rm -rf "${wd:-/etc/AdGuardHome}/data/filters/"*
                    $AGH_INIT restart >/dev/null 2>&1 && print_success "Filters Purged"
                    cached_rules="" 
-               fi ; press_any_key ;;
+               fi
+               press_any_key ;;
             0) break ;;
-            *) print_error "Invalid option" ; sleep 1 ;;
+            *) print_error "Invalid option"; sleep 1;;
         esac
     done
 }
@@ -1691,11 +1768,10 @@ sub_confirm_factory_reset() {
     if [ "$was_running" -eq 1 ]; then
         printf "\n"
         print_info "AdGuardHome is currently running. Stopping service..."
-        [ -f "$L_INIT" ] && $L_INIT stop >/dev/null 2>&1
+        [ -f "$L_INIT" ] && $L_INIT stop >/dev/null 2>&1; sleep 1
         sleep 1
         if is_agh_running; then
-            kill -9 $(pidof AdGuardHome) >/dev/null 2>&1
-            sleep 1
+            kill -9 $(pidof AdGuardHome) >/dev/null 2>&1; sleep 1
         fi
         print_success "Service stopped successfully."
     fi
@@ -1717,7 +1793,7 @@ sub_confirm_factory_reset() {
         # Handle administrative state (UCI)
         if [ "$was_uci_enabled" -eq 1 ]; then
             uci set adguardhome.config.enabled='1' && uci commit adguardhome
-            $L_INIT enable >/dev/null 2>&1
+            $L_INIT enable >/dev/null 2>&1; sleep 1
             print_success "Full recovery successful! AdGuardHome auto-start re-enabled."
             printf "\n"
         else
@@ -1725,7 +1801,7 @@ sub_confirm_factory_reset() {
             local keep_disabled=$(read_single_char | tr '[:upper:]' '[:lower:]')
             if [ "$keep_disabled" != "y" ]; then
                 uci set adguardhome.config.enabled='1' && uci commit adguardhome
-                $L_INIT enable >/dev/null 2>&1
+                $L_INIT enable >/dev/null 2>&1; sleep 1
                 print_success "AdGuardHome enabled in GL-WebUI and UCI."
                 was_uci_enabled=1
             fi
@@ -1735,14 +1811,14 @@ sub_confirm_factory_reset() {
         # Handle operational state (Running)
         if [ "$was_running" -eq 1 ]; then
             print_info "Automatically restarting service..."
-            $L_INIT start >/dev/null 2>&1 && print_success "Service restored to running state."
+            $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service restored to running state."
         elif [ "$was_uci_enabled" -eq 1 ]; then
             print_warning "AdGuardHome is enabled but not running. Start it now? [y/N]: "
             local start_now=$(read_single_char | tr '[:upper:]' '[:lower:]')
             if [ "$start_now" = "y" ]; then
                 printf "\n"
                 print_info "Starting AdGuardHome...\n"
-                $L_INIT start >/dev/null 2>&1 && print_success "Service started successfully."
+                $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service started successfully."
             fi
         fi
     elif [ $init_ok -eq 1 ] || [ $bin_ok -eq 1 ] || [ $conf_ok -eq 1 ]; then
@@ -1838,7 +1914,7 @@ agh_control_center() {
             [cC][lL]) sub_confirm_factory_reset ;;
             0) break ;;
             \?|h|H|❓) show_agh_help ;;
-            *) print_error "Invalid option" ; sleep 1 ;;
+            *) print_error "Invalid option"; sleep 1;;
         esac
     done
 }
@@ -1930,7 +2006,7 @@ manage_zram() {
                 if ! opkg list-installed | grep -q "^zram-swap"; then
                     print_warning "zram-swap not installed, installing..."
                     if [ "$opkg_updated" -eq 0 ]; then
-                        printf "Updating package lists...\n"
+                        print_info "Updating package lists..."
                         opkg update >/dev/null 2>&1
                         opkg_updated=1
                     fi
@@ -1945,11 +2021,11 @@ manage_zram() {
                 fi
                 
                 if [ -f /etc/init.d/zram ]; then
-                    /etc/init.d/zram enable >/dev/null 2>&1
-                    /etc/init.d/zram start >/dev/null 2>&1
+                    print_info "Enabling and starting zram swap"
+                    /etc/init.d/zram enable >/dev/null 2>&1; sleep 1
+                    /etc/init.d/zram start >/dev/null 2>&1; sleep 2
                     print_success "Zram swap enabled and started"
                     
-                    sleep 2
                     if swapon -s 2>/dev/null | grep -q zram; then
                         print_success "Zram swap is working correctly"
                     else
@@ -1962,8 +2038,8 @@ manage_zram() {
                 ;;
             2)
                 if [ -f /etc/init.d/zram ]; then
-                    /etc/init.d/zram stop >/dev/null 2>&1
-                    /etc/init.d/zram disable >/dev/null 2>&1
+                    /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
+                    /etc/init.d/zram disable >/dev/null 2>&1; sleep 1
                     print_success "Zram swap disabled and stopped"
                 else
                     print_warning "Zram swap is not installed"
@@ -1975,7 +2051,7 @@ manage_zram() {
                     printf "%b" "${YELLOW}Remove zram-swap package? [y/N]: ${RESET}"
                     read -r confirm
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                        [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1
+                        [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
                         opkg remove zram-swap >/dev/null 2>&1
                         print_success "zram-swap package removed"
                     else
@@ -2007,9 +2083,11 @@ benchmark_system() {
     while true; do
         clear
         print_centered_header "System Benchmarks"
-        printf "1️⃣  CPU Stress Test\n"
+        printf "1️⃣  CPU Thermal Stress Test\n"
         printf "2️⃣  CPU Benchmark (OpenSSL)\n"
         printf "3️⃣  Disk I/O Benchmark\n"
+        printf "4️⃣  RAM Benchmark\n"
+        printf "5️⃣  DNS Benchmark\n"
         printf "0️⃣  Main menu\n"
         printf "\nChoose [1-4/0]: "
         read -r bench_choice
@@ -2030,6 +2108,31 @@ benchmark_system() {
                         continue
                     fi
                 fi
+
+                get_temp() {
+                    local raw_temp
+                    raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
+                    if [ -n "$raw_temp" ]; then
+                        # Convert millidegrees to degrees
+                        local celsius=$(awk "BEGIN {print $raw_temp / 1000}")
+                        local fahrenheit=$(awk "BEGIN {print ($celsius * 1.8) + 32}")
+                        # Format to 1 decimal place
+                        printf "%.1f°C (%.1f°F)" "$celsius" "$fahrenheit"
+                    else
+                        printf "N/A"
+                    fi
+                }
+
+                get_fan_speed() {
+                    # Common paths for GL.iNet fan speed
+                    if [ -f "/sys/class/hwmon/hwmon0/fan1_input" ]; then
+                        cat "/sys/class/hwmon/hwmon0/fan1_input" 2>/dev/null | awk '{print $1 " RPM"}'
+                    elif [ -f "/sys/class/hwmon/hwmon1/fan1_input" ]; then
+                        cat "/sys/class/hwmon/hwmon1/fan1_input" 2>/dev/null | awk '{print $1 " RPM"}'
+                    else
+                        printf "N/A (Fanless)"
+                    fi
+                }
                 
                 cpu_cores=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
                 [ -z "$cpu_cores" ] && cpu_cores=1
@@ -2041,14 +2144,23 @@ benchmark_system() {
                 case "$duration" in
                     ''|*[!0-9]*) duration=60 ;;
                 esac
+
+                start_temp_str=$(get_temp)
+                start_fan_str=$(get_fan_speed)
                 
                 printf "\n%b\n" "${YELLOW}⏳ Running stress test on $cpu_cores cores for $duration seconds...${RESET}"
-                printf "%b\n\n" "${YELLOW}💡 Monitor with 'top' in another session${RESET}"
+                printf "Starting Stats: %b | %b\n\n" "${CYAN}$start_temp_str${RESET}" "${CYAN}$start_fan_str${RESET}"
                 
-                stress --cpu "$cpu_cores" --timeout "${duration}s" --verbose
+                stress --cpu "$cpu_cores" --timeout "${duration}s"
+
+                end_temp_str=$(get_temp)
+                end_fan_str=$(get_fan_speed)
                 
                 printf "\n"
-                print_success "Stress test completed"
+                print_success "Stress test completed\n"
+                printf "Final Stats:    %b | %b\n" "${RED}$end_temp_str${RESET}" "${RED}$end_fan_str${RESET}"
+                temp_diff=$(echo "$end_temp_str $start_temp_str" | awk '{print $1 - $3}')
+                printf "Temperature increase: %b+%.1f°C (+%.1f°F)%b\n" "${RED}" "$temp_diff" "$(awk "BEGIN {print $temp_diff * 1.8}")" "${RESET}"
                 press_any_key
                 ;;
             2)
@@ -2058,18 +2170,76 @@ benchmark_system() {
                     continue
                 fi
                 
-                printf "\n%b\n" "${CYAN}🔧 Running OpenSSL speed benchmark...${RESET}"
-                printf "%b\n\n" "${YELLOW}⏳ This will take a minute...${RESET}"
+                # --- MT7987a Baselines (k bytes/s) ---
+                BASE_AES="93653 269054 508791 660796 718897 721709"
+                BASE_SHA="70723 214609 497956 740733 866776 876396"
                 
+                # RSA Baselines (sign/s and verify/s)
+                BASE_RSA_S=180.9; BASE_RSA_V=6765.6
+                BASE_RSA_MS=715.8; BASE_RSA_MV=26528.0
+
+                print_info "Running OpenSSL speed benchmark. This will take a minute...\n"
+                
+                # --- Function to Print Aligned Delta Row ---
+                # Usage: print_delta "type_string" "baseline_string" "raw_output_file"
+                print_delta() {
+                    local type=$1; local baseline=$2; local datafile=$3
+                    printf "${YELLOW}%-16s${RESET}" "% Δ MT7987a:"
+                    # Use awk to handle case-insensitivity and matching
+                    awk -v t="$type" -v base="$baseline" -v r="$RED" -v g="$GREEN" -v res="$RESET" '
+                    # Convert first column to lowercase to match our "type" variable
+                    tolower($1) == tolower(t) {
+                        split(base, b_arr);
+                        for(i=1; i<=6; i++) {
+                            cur = $(i+1); gsub(/k/, "", cur);
+                            # If OpenSSL output is 0.00, avoid division by zero
+                            if (b_arr[i] > 0) {
+                                diff = ((cur - b_arr[i]) / b_arr[i]) * 100;
+                                printf "%s%10.1f%%%s  ", (diff >= 0 ? g : r), diff, res
+                            }
+                        }
+                    }' "$datafile"
+                    echo ""
+                }
+
+                # --- AES Section ---
                 printf "%b\n" "${CYAN}Single-threaded AES-256-GCM:${RESET}"
-                openssl speed -elapsed -evp aes-256-gcm 2>&1 | tail -3
-                
+                openssl speed -elapsed -evp aes-256-gcm 2>&1 | tee /tmp/ssl_res | tail -n 3
+                print_delta "aes-256-gcm" "$BASE_AES" "/tmp/ssl_res"
+
+                # --- SHA Section ---
                 printf "\n%b\n" "${CYAN}Single-threaded SHA256:${RESET}"
-                openssl speed -elapsed sha256 2>&1 | tail -3
-                
-                printf "\n%b\n" "${CYAN}RSA 2048-bit signing:${RESET}"
-                openssl speed -elapsed rsa2048 2>&1 | tail -5
-                
+                openssl speed -elapsed sha256 2>&1 | tee /tmp/ssl_res | tail -n 3
+                print_delta "sha256" "$BASE_SHA" "/tmp/ssl_res"
+
+                # --- RSA Section (Helper for RSA logic) ---
+                process_rsa() {
+                    local label=$1; local cmd=$2; local b_sign=$3; local b_verify=$4
+                    printf "\n%b\n" "${CYAN}$label:${RESET}"
+                    $cmd > /tmp/ssl_res 2>/dev/null
+                    grep -E '^ {10}|^rsa' /tmp/ssl_res
+                    
+                    # Parse sign/s (col 6) and verify/s (col 7)
+                    read cur_s cur_v <<EOF
+            $(grep "^rsa 2048" /tmp/ssl_res | awk '{print $6, $7}')
+EOF
+                    # Calculate Deltas inside awk to avoid bc dependency
+                    awk -v cs="$cur_s" -v bs="$b_sign" -v cv="$cur_v" -v bv="$b_verify" \
+                        -v r="$RED" -v g="$GREEN" -v res="$RESET" -v y="$YELLOW" 'BEGIN {
+                        ds = ((cs - bs) / bs) * 100; dv = ((cv - bv) / bv) * 100;
+                        printf "%s%% Δ MT7987a:  %s%+.1f%% (Sign)%s  /  %s%+.1f%% (Verify)%s\n", 
+                            y, (ds>=0?g:r), ds, res, (dv>=0?g:r), dv, res
+                    }'
+                }
+
+                process_rsa "RSA 2048-bit signing" "openssl speed -elapsed rsa2048" "$BASE_RSA_S" "$BASE_RSA_V"
+
+                cores=$(grep -c ^processor /proc/cpuinfo)
+                if [ "$cores" -gt 1 ]; then
+                    process_rsa "RSA 2048-bit (Multi-core - $cores cores)" "openssl speed -elapsed -multi $cores rsa2048" "$BASE_RSA_MS" "$BASE_RSA_MV"
+                fi
+
+                rm -f /tmp/ssl_res
                 printf "\n"
                 print_success "Benchmark completed"
                 press_any_key
@@ -2119,7 +2289,7 @@ benchmark_system() {
                 
                 if [ -f ./testfile ]; then
                     write_speed=$((test_size / write_time))
-                    printf "%b\n" "${GREEN}✅ Write speed: ~${write_speed} MB/s${RESET}"
+                    print_success "Write speed: ~${write_speed} MB/s"
                 fi
                 
                 printf "\n%b\n" "${YELLOW}⏳ Running read test ($test_name)...${RESET}"
@@ -2132,11 +2302,117 @@ benchmark_system() {
                 [ "$read_time" -eq 0 ] && read_time=1
                 
                 read_speed=$((test_size / read_time))
-                printf "%b\n" "${GREEN}✅ Read speed: ~${read_speed} MB/s${RESET}"
+                print_success "Read speed: ~${read_speed} MB/s"
                 
                 rm -f ./testfile
                 printf "\n"
                 print_success "Disk benchmark completed"
+                press_any_key
+                ;;
+            4)
+            printf "%b\n" "${CYAN}🔧 Memory I/O Benchmark${RESET}\n"
+                
+                total_mem=$(awk '/MemTotal/ {print int($2)}' /proc/meminfo 2>/dev/null)
+                [ -z "$total_mem" ] && total_mem=$(free | awk '/Mem:/ {print int($2)}')
+                
+                test_size=0
+                test_name=""
+                if [ "$total_mem" -ge $((1000 * 1024)) ]; then
+                    test_size=100000
+                    test_name="100GB"
+                elif [ "$total_mem" -ge $((500 * 1024)) ]; then
+                    test_size=50000
+                    test_name="50GB"
+                elif [ "$total_mem" -ge $((250 * 1024)) ]; then
+                    test_size=25000
+                    test_name="25GB"
+                elif [ "$total_mem" -ge $((125 * 1024)) ]; then
+                    test_size=12500
+                    test_name="12.5GB"
+                elif [ "$total_mem" -ge $((62 * 1024)) ]; then
+                    test_size=6200
+                    test_name="6.2GB"
+                else
+                    test_size=3100
+                    test_name="3.1GB"
+                fi
+                
+                printf "System RAM detected: %b$((total_mem / 1024)) MB%b\n" "${GREEN}" "${RESET}"
+                printf "Test size: %b%s%b\n" "${GREEN}" "$test_name" "${RESET}"
+                
+                printf "\n%b\n" "${YELLOW}⏳ Running memory I/O test ($test_name)...${RESET}"
+                sync
+                write_start=$(date +%s)
+                dd if=/dev/zero of=/dev/null bs=1M count=$test_size 2>&1 | tail -3
+                write_end=$(date +%s)
+                write_time=$((write_end - write_start))
+                [ "$write_time" -eq 0 ] && write_time=1
+                
+                write_speed=$((test_size / write_time))
+                print_success "Memory I/O speed: ~${write_speed} MB/s\n"
+                print_success "Memory I/O benchmark completed"
+                press_any_key
+                ;;
+            5)
+                printf "\n"
+                print_info "Starting Comprehensive DNS Benchmark...\n"
+                
+                # Pre-check: Can we resolve anything at all?
+                if ! nslookup google.com >/dev/null 2>&1; then
+                    print_error "DNS is not responding. Check your internet connection or DNS settings."
+                    press_any_key
+                    continue
+                fi
+                
+                # Servers to test
+                SERVERS="127.0.0.1 1.1.1.1 8.8.8.8 9.9.9.9"
+                SAMPLES=20  # Number of tests per server
+                
+                printf "%-22s %-8s %-8s %-8s\n" "DNS Server" "Min" "Avg" "Max"
+                printf "--------------------------------------------------------\n"
+
+                for server in $SERVERS; do
+                    case $server in
+                        "127.0.0.1") label="Local (AdGuard/Cache)" ;;
+                        "1.1.1.1")   label="Cloudflare" ;;
+                        "8.8.8.8")   label="Google" ;;
+                        "9.9.9.9")   label="Quad9" ;;
+                    esac
+
+                    total=0
+                    min=9999
+                    max=0
+                    fail_count=0
+
+                    for i in $(seq 1 $SAMPLES); do
+                        test_domain="bench${RANDOM}${RANDOM}.com"
+
+                        read ut _ < /proc/uptime
+                        start_ms=$(awk -v t="$ut" 'BEGIN {print int(t * 1000)}')
+                        
+                        nslookup "$test_domain" "$server" >/dev/null 2>&1
+                        
+                        read ut _ < /proc/uptime
+                        end_ms=$(awk -v t="$ut" 'BEGIN {print int(t * 1000)}')
+                        
+                        msec=$((end_ms - start_ms))
+
+                        [ "$msec" -lt 0 ] && msec=0
+                        [ "$msec" -lt "$min" ] && min=$msec
+                        [ "$msec" -gt "$max" ] && max=$msec
+                        total=$((total + msec))
+                    done
+
+                    avg=$((total / SAMPLES))
+
+                    COLOR=$CYAN
+                    [ "$avg" -lt 15 ] && COLOR=$GREEN
+                        
+                    printf "%-22s %b%-8d %-8d %-8d%b ms\n" "$label" "$COLOR" "$min" "$avg" "$max" "$RESET"
+                done
+                
+                printf "\n"
+                print_success "DNS Benchmark completed"
                 press_any_key
                 ;;
             m|M|0)
@@ -2503,7 +2779,7 @@ show_menu() {
             4) benchmark_system ;;
             5) view_uci_config ;;
             6) check_self_update "$@"; press_any_key ;;
-            0) clear; printf "\n%b\n\n" "${GREEN}✅ Thanks for using GL.iNet Toolkit!${RESET}"; exit 0 ;;
+            0) clear; printf "\n\n"; print_success "Thanks for using GL.iNet Toolkit!"; exit 0 ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done

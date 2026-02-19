@@ -2086,7 +2086,7 @@ benchmark_system() {
         printf "1️⃣  CPU Thermal Stress Test\n"
         printf "2️⃣  CPU Benchmark (OpenSSL)\n"
         printf "3️⃣  Disk I/O Benchmark\n"
-        printf "4️⃣  RAM Benchmark\n"
+        printf "4️⃣  Memory I/O Benchmark\n"
         printf "5️⃣  DNS Benchmark\n"
         printf "0️⃣  Main menu\n"
         printf "\nChoose [1-4/0]: "
@@ -2170,7 +2170,7 @@ benchmark_system() {
                     continue
                 fi
                 
-                # --- MT7987a Baselines (k bytes/s) ---
+                # --- MT7987a - Beryl 7 Baselines (k bytes/s) ---
                 BASE_AES="93653 269054 508791 660796 718897 721709"
                 BASE_SHA="70723 214609 497956 740733 866776 876396"
                 
@@ -2184,7 +2184,7 @@ benchmark_system() {
                 # Usage: print_delta "type_string" "baseline_string" "raw_output_file"
                 print_delta() {
                     local type=$1; local baseline=$2; local datafile=$3
-                    printf "${YELLOW}%-16s${RESET}" "% Δ MT7987a:"
+                    printf "${YELLOW}%-16s${RESET}" "% Δ Beryl 7:"
                     # Use awk to handle case-insensitivity and matching
                     awk -v t="$type" -v base="$baseline" -v r="$RED" -v g="$GREEN" -v res="$RESET" '
                     # Convert first column to lowercase to match our "type" variable
@@ -2227,7 +2227,7 @@ EOF
                     awk -v cs="$cur_s" -v bs="$b_sign" -v cv="$cur_v" -v bv="$b_verify" \
                         -v r="$RED" -v g="$GREEN" -v res="$RESET" -v y="$YELLOW" 'BEGIN {
                         ds = ((cs - bs) / bs) * 100; dv = ((cv - bv) / bv) * 100;
-                        printf "%s%% Δ MT7987a:  %s%+.1f%% (Sign)%s  /  %s%+.1f%% (Verify)%s\n", 
+                        printf "%s%% Δ Beryl 7:  %s%+.1f%% (Sign)%s  /  %s%+.1f%% (Verify)%s\n", 
                             y, (ds>=0?g:r), ds, res, (dv>=0?g:r), dv, res
                     }'
                 }
@@ -2247,110 +2247,116 @@ EOF
             3)
                 printf "%b\n" "${CYAN}🔧 Disk I/O Benchmark${RESET}\n"
                 
+                # --- Beryl 7 (MT7981) Baselines (MB/s) ---
+                BASE_W=119.05
+                BASE_R=10.62
+
                 available_kb=$(df -k . | awk 'NR==2 {print $4}')
                 
-                test_size=0
-                test_name=""
-                if [ "$available_kb" -ge $((1000 * 1024)) ]; then
-                    test_size=1000
-                    test_name="1GB"
-                elif [ "$available_kb" -ge $((500 * 1024)) ]; then
-                    test_size=500
-                    test_name="500MB"
-                elif [ "$available_kb" -ge $((250 * 1024)) ]; then
-                    test_size=250
-                    test_name="250MB"
-                elif [ "$available_kb" -ge $((125 * 1024)) ]; then
-                    test_size=125
-                    test_name="125MB"
-                elif [ "$available_kb" -ge $((62 * 1024)) ]; then
-                    test_size=62
-                    test_name="62MB"
-                elif [ "$available_kb" -ge $((31 * 1024)) ]; then
-                    test_size=31
-                    test_name="31MB"
-                else
-                    print_error "Not enough disk space (need at least 31MB)"
-                    printf "Available: %d MB\n" $((available_kb / 1024))
-                    press_any_key
-                    continue
-                fi
+                # Check for space (Using your established test_size logic)
+                if [ "$available_kb" -ge 1024000 ]; then test_size=1000; test_name="1GB"
+                elif [ "$available_kb" -ge 512000 ]; then test_size=500; test_name="500MB"
+                elif [ "$available_kb" -ge 256000 ]; then test_size=250; test_name="250MB"
+                elif [ "$available_kb" -ge 128000 ]; then test_size=125; test_name="125MB"
+                elif [ "$available_kb" -ge 64000 ]; then test_size=64; test_name="64MB"
+                elif [ "$available_kb" -ge 32000 ]; then test_size=32; test_name="32MB"
+                else test_size=16; test_name="16MB"; fi
                 
                 printf "Test size: %b%s%b\n" "${GREEN}" "$test_name" "${RESET}"
-                print_success "Sufficient disk space available"
                 
+                # Helper for ms timing
+                get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
+
+                # --- Write Test ---
                 printf "\n%b\n" "${YELLOW}⏳ Running write test ($test_name)...${RESET}"
-                sync
-                write_start=$(date +%s)
-                dd if=/dev/zero of=./testfile bs=1M count=$test_size conv=fsync 2>&1 | tail -3
-                write_end=$(date +%s)
-                write_time=$((write_end - write_start))
-                [ "$write_time" -eq 0 ] && write_time=1
+                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
                 
-                if [ -f ./testfile ]; then
-                    write_speed=$((test_size / write_time))
-                    print_success "Write speed: ~${write_speed} MB/s"
-                fi
+                w_start=$(get_ms)
+                dd if=/dev/zero of=./testfile bs=1M count=$test_size conv=fsync 2>&1 | tail -n 1
+                w_end=$(get_ms)
                 
-                printf "\n%b\n" "${YELLOW}⏳ Running read test ($test_name)...${RESET}"
-                sync
-                echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-                read_start=$(date +%s)
-                dd if=./testfile of=/dev/null bs=1M 2>&1 | tail -3
-                read_end=$(date +%s)
-                read_time=$((read_end - read_start))
-                [ "$read_time" -eq 0 ] && read_time=1
+                # --- Read Test ---
+                printf "%b\n" "${YELLOW}⏳ Running read test ($test_name)...${RESET}"
+                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
                 
-                read_speed=$((test_size / read_time))
-                print_success "Read speed: ~${read_speed} MB/s"
+                r_start=$(get_ms)
+                dd if=./testfile of=/dev/null bs=1M 2>&1 | tail -n 1
+                r_end=$(get_ms)
                 
+                # --- UI Reporting (The SSL Style) ---
+                printf "\n%b%s Results:%b\n" "${CYAN}" "$test_name" "${RESET}"
+                printf "%-16s %-16s %-16s\n" "Type" "Speed" "% Δ Beryl 7"
+                
+                # Use awk to process both results for precision and delta alignment
+                awk -v ws="$w_start" -v we="$w_end" -v rs="$r_start" -v re="$r_end" \
+                    -v sz="$test_size" -v bw="$BASE_W" -v br="$BASE_R" \
+                    -v r="$RED" -v g="$GREEN" -v y="$YELLOW" -v res="$RESET" '
+                BEGIN {
+                    # Write Math
+                    w_ms = we - ws; if(w_ms <= 0) w_ms = 1;
+                    w_spd = (sz * 1000) / w_ms;
+                    w_diff = ((w_spd - bw) / bw) * 100;
+
+                    # Read Math
+                    r_ms = re - rs; if(r_ms <= 0) r_ms = 1;
+                    r_spd = (sz * 1000) / r_ms;
+                    r_diff = ((r_spd - br) / br) * 100;
+
+                    # Output Rows
+                    printf "Write (Sync)     %-16s %s%+.1f%%%s (%s MB/s)\n", sprintf("%.2f MB/s", w_spd), (w_diff>=0?g:r), w_diff, res, bw;
+                    printf "Read (Cached)    %-16s %s%+.1f%%%s (%s MB/s)\n", sprintf("%.2f MB/s", r_spd), (r_diff>=0?g:r), r_diff, res, br;
+                }'
+
                 rm -f ./testfile
                 printf "\n"
                 print_success "Disk benchmark completed"
                 press_any_key
                 ;;
             4)
-            printf "%b\n" "${CYAN}🔧 Memory I/O Benchmark${RESET}\n"
+                printf "%b\n" "${CYAN}🔧 Memory I/O Benchmark${RESET}\n"
                 
+                # --- Beryl 7 (MT7981) Memory Baseline (MB/s) ---
+                # Based on internal DDR bandwidth tests
+                BASE_MEM=4351.61
+
                 total_mem=$(awk '/MemTotal/ {print int($2)}' /proc/meminfo 2>/dev/null)
-                [ -z "$total_mem" ] && total_mem=$(free | awk '/Mem:/ {print int($2)}')
                 
-                test_size=0
-                test_name=""
-                if [ "$total_mem" -ge $((1000 * 1024)) ]; then
-                    test_size=100000
-                    test_name="100GB"
-                elif [ "$total_mem" -ge $((500 * 1024)) ]; then
-                    test_size=50000
-                    test_name="50GB"
-                elif [ "$total_mem" -ge $((250 * 1024)) ]; then
-                    test_size=25000
-                    test_name="25GB"
-                elif [ "$total_mem" -ge $((125 * 1024)) ]; then
-                    test_size=12500
-                    test_name="12.5GB"
-                elif [ "$total_mem" -ge $((62 * 1024)) ]; then
-                    test_size=6200
-                    test_name="6.2GB"
-                else
-                    test_size=3100
-                    test_name="3.1GB"
-                fi
+                # Determine test size (100k blocks of 1M = 100GB of throughput)
+                # We want a large enough test to bypass L1/L2 cache saturation
+                if [ "$total_mem" -ge 960000 ]; then test_size=100000; test_name="100GB"
+                elif [ "$total_mem" -ge 460000 ]; then test_size=50000; test_name="50GB"
+                else test_size=25000; test_name="25GB"; fi
                 
-                printf "System RAM detected: %b$((total_mem / 1024)) MB%b\n" "${GREEN}" "${RESET}"
-                printf "Test size: %b%s%b\n" "${GREEN}" "$test_name" "${RESET}"
+                printf "System RAM: %b$((total_mem / 1024)) MB%b\n" "${GREEN}" "${RESET}"
+                printf "Test throughput: %b%s%b\n" "${GREEN}" "$test_name" "${RESET}"
                 
-                printf "\n%b\n" "${YELLOW}⏳ Running memory I/O test ($test_name)...${RESET}"
-                sync
-                write_start=$(date +%s)
-                dd if=/dev/zero of=/dev/null bs=1M count=$test_size 2>&1 | tail -3
-                write_end=$(date +%s)
-                write_time=$((write_end - write_start))
-                [ "$write_time" -eq 0 ] && write_time=1
+                # Helper for ms timing
+                get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
+
+                printf "\n%b\n" "${YELLOW}⏳ Measuring Memory Controller Throughput...${RESET}"
                 
-                write_speed=$((test_size / write_time))
-                print_success "Memory I/O speed: ~${write_speed} MB/s\n"
-                print_success "Memory I/O benchmark completed"
+                m_start=$(get_ms)
+                # We use a large block size (1M) to maximize throughput
+                dd if=/dev/zero of=/dev/null bs=1M count=$test_size 2>&1 | tail -n 1
+                m_end=$(get_ms)
+                
+                # --- UI Reporting (The Unified Style) ---
+                printf "\n%bMemory Performance Results:%b\n" "${CYAN}" "${RESET}"
+                printf "%-16s %-16s %-16s\n" "Type" "Speed" "% Δ Beryl 7"
+                
+                awk -v ms_s="$m_start" -v ms_e="$m_end" -v sz="$test_size" -v base="$BASE_MEM" \
+                    -v r="$RED" -v g="$GREEN" -v res="$RESET" '
+                BEGIN {
+                    total_ms = ms_e - ms_s; if(total_ms <= 0) total_ms = 1;
+                    speed = (sz * 1000) / total_ms;
+                    diff = ((speed - base) / base) * 100;
+
+                    printf "Mem Throughput   %-16s %s%+.1f%%%s (%s MB/s)\n", 
+                        sprintf("%.2f MB/s", speed), (diff>=0?g:r), diff, res, base;
+                }'
+
+                printf "\n"
+                print_success "Memory benchmark completed"
                 press_any_key
                 ;;
             5)
@@ -2362,6 +2368,13 @@ EOF
                     print_error "DNS is not responding. Check your internet connection or DNS settings."
                     press_any_key
                     continue
+                fi
+
+                # Check for Hijacking
+                is_proxied=0
+                if nslookup "detect${RANDOM}.com" 1.2.3.4 >/dev/null 2>&1; then
+                    is_proxied=1
+                    print_warning "DNS Interception Active: Traffic is being redirected locally.\n"
                 fi
                 
                 # Servers to test
@@ -2379,36 +2392,40 @@ EOF
                         "9.9.9.9")   label="Quad9" ;;
                     esac
 
-                    total=0
-                    min=9999
-                    max=0
-                    fail_count=0
+                    total=0; min=9999; max=0; BURST=5
 
-                    for i in $(seq 1 $SAMPLES); do
-                        test_domain="bench${RANDOM}${RANDOM}.com"
+                    for i in $(seq 1 10); do
+                        test_domain="bench${RANDOM}.net"
 
                         read ut _ < /proc/uptime
-                        start_ms=$(awk -v t="$ut" 'BEGIN {print int(t * 1000)}')
+                        start_t=$ut
                         
-                        nslookup "$test_domain" "$server" >/dev/null 2>&1
+                        # Execute a burst of lookups to exceed the 10ms clock tick
+                        for b in $(seq 1 $BURST); do
+                            nslookup "$test_domain" "$server" >/dev/null 2>&1
+                        done
                         
                         read ut _ < /proc/uptime
-                        end_ms=$(awk -v t="$ut" 'BEGIN {print int(t * 1000)}')
+                        end_t=$ut
                         
-                        msec=$((end_ms - start_ms))
+                        # Calculate per-query msec: ((end - start) * 1000) / BURST
+                        msec=$(awk -v s="$start_t" -v e="$end_t" -v b="$BURST" \
+                              'BEGIN { printf "%.2f", ((e - s) * 1000) / b }')
 
-                        [ "$msec" -lt 0 ] && msec=0
-                        [ "$msec" -lt "$min" ] && min=$msec
-                        [ "$msec" -gt "$max" ] && max=$msec
-                        total=$((total + msec))
+                        # Update stats
+                        min=$(awk -v m="$msec" -v cur="$min" 'BEGIN { print (m < cur ? m : cur) }')
+                        max=$(awk -v m="$msec" -v cur="$max" 'BEGIN { print (m > cur ? m : cur) }')
+                        total=$(awk -v m="$msec" -v t="$total" 'BEGIN { print t + m }')
                     done
 
-                    avg=$((total / SAMPLES))
-
+                    avg=$(awk -v t="$total" 'BEGIN { printf "%.2f", t / 10 }')
+                    
                     COLOR=$CYAN
-                    [ "$avg" -lt 15 ] && COLOR=$GREEN
+                    if [ $(awk -v a="$avg" 'BEGIN {print (a < 15.0 ? 1 : 0)}') -eq 1 ]; then 
+                        COLOR=$GREEN
+                    fi
                         
-                    printf "%-22s %b%-8d %-8d %-8d%b ms\n" "$label" "$COLOR" "$min" "$avg" "$max" "$RESET"
+                    printf "%-22s %b%-8s %-8s %-8s%b ms\n" "$label" "$COLOR" "$min" "$avg" "$max" "$RESET"
                 done
                 
                 printf "\n"

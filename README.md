@@ -25,12 +25,12 @@
 - 🆘 Fail-Safe Recovery – "Industrial" self-healing logic. If your AGH binary or init script goes missing, the script can pull pristine copies directly from the device's /rom to fix the install.
 - 📦 Surgical Backups – Precision-tracked backups with 2-digit decimal accuracy. Create, manage, and restore configurations with automated timestamping.
 - 💾 Zram Swap Management – Essential for low-RAM travel routers. Easily install and tune compressed RAM swap to prevent out-of-memory crashes.
-- 📊 Performance Benchmarks – Real-world testing including stress-ng CPU cycles, OpenSSL throughput, and raw Disk I/O speeds.
+- 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput.
 - 📋 Secure UCI Viewer – Quick, read-only access to your system config. Check SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
 - 🔄 Native Self-Updater – Stay current without manual downloads. The script checks GitHub on launch and can update itself in place.
 - 🆓 GPL-3.0 Licensed – Free, open, and community-driven.
 
-Tested on various GL.iNet models (Beryl, Beryl AX, Beryl BE, Slate 7, Flint 3, Flint 3e, Brume 3, etc.) running recent firmware.
+Tested on various GL.iNet models (Beryl, Beryl AX, Beryl BE, Slate 7, Flint 3, Flint 3e, etc.) running recent firmware.
 
 ---
 

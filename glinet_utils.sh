@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-02-19
+# Version: 2026-02-20
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -683,10 +683,7 @@ manage_agh_ui_updates() {
             m|M|0)
                 return
                 ;;
-            *)
-                print_error "Invalid option"
-                sleep 1
-                ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }
@@ -754,9 +751,11 @@ manage_agh_storage() {
         fi     
         
         limit_active=0
-        if grep -q "mount_filter_img" "$AGH_INIT" 2>/dev/null && ! grep -q "^[[:space:]]*#.*mount_filter_img" "$AGH_INIT" 2>/dev/null; then
+        if grep -q "$AGH_WORKDIR/data/filters" /proc/mounts; then
             limit_active=1
-            printf "   Filter Space Limit: %bACTIVE (10MB)%b\n" "${YELLOW}" "${RESET}"
+            # Calculate actual size from the mount point
+            current_limit=$(df -m "$AGH_WORKDIR/data/filters" | tail -1 | awk '{print $2}')
+            printf "   Filter Space Limit: %bACTIVE (%sMB)%b\n" "${YELLOW}" "$current_limit" "${RESET}"
         else
             printf "   Filter Space Limit: %bINACTIVE%b\n" "${GREEN}" "${RESET}"
         fi
@@ -768,13 +767,20 @@ manage_agh_storage() {
         printf "\nChoose [1-2/0/?]: "
         read -r storage_choice
         printf "\n"
+
+        local exec_pattern="^[[:space:]]*mount_filter_img[[:space:]]+"
+        local comment_pattern="^[[:space:]]*#[[:space:]]*mount_filter_img[[:space:]]+"
         
         case $storage_choice in
             1)
-                if [ $limit_active -eq 0 ]; then
-                    print_warning "Filter space limitation is already removed"
-                    press_any_key
-                    continue
+                if [ "$limit_active" -eq 0 ]; then
+                    print_warning "Filter space limitation is already INACTIVE on the system."
+                    press_any_key; continue
+                fi
+
+                if ! grep -qE "$exec_pattern" "$AGH_INIT"; then
+                    print_error "Could not find a feature call to disable."
+                    press_any_key; continue
                 fi
                 
                 cat << 'WARNEOF'
@@ -818,8 +824,8 @@ WARNEOF
                     print_success "Removed data.img file"
                 fi
                 
-                sed -i 's|^\([[:space:]]*\)mount_filter_img[[:space:]]|\1# mount_filter_img |' "$AGH_INIT"
-                print_success "Disabled mount_filter_img in init script"
+                sed -i "s|^\([[:space:]]*\)\(mount_filter_img[[:space:]]\)|\1# \2|" "$AGH_INIT"
+                print_success "Disabled execution call in init script"
                 
                 if [ -n "$agh_pid" ]; then
                     $AGH_INIT start >/dev/null 2>&1; sleep 2
@@ -834,17 +840,25 @@ WARNEOF
                 press_any_key
                 ;;
             2)
+                if [ "$limit_active" -eq 1 ]; then
+                    print_warning "Filter space limitation is already ACTIVE."
+                    press_any_key; continue
+                fi
+                
                 if ! grep -q "mount_filter_img" "$AGH_INIT"; then
-                    print_warning "Filter space limitation feature (mount_filter_img) does not exist on this device/firmware."
-                    printf "   No changes possible — your AdGuardHome is not restricted by the filter space limit.\n"
+                    print_warning "Filter space limitation feature is not supported on this device/firmware."
                     press_any_key
                     continue
                 fi
 
-                if ! grep -q "^[[:space:]]*#[[:space:]]*mount_filter_img[[:space:]]" "$AGH_INIT"; then
-                    print_warning "Filter space limitation is already active (mount_filter_img is not commented out)."
-                    press_any_key
-                    continue
+                if grep -qE "$exec_pattern" "$AGH_INIT"; then
+                    print_warning "Filter space limitation is already enabled or not supported on this device/firmware."
+                    press_any_key; continue
+                fi
+
+                if ! grep -qE "$comment_pattern" "$AGH_INIT"; then
+                    print_error "Could not find a feature call to re-enable."
+                    press_any_key; continue
                 fi
                 
                 if is_agh_running; then
@@ -854,14 +868,14 @@ WARNEOF
                     agh_pid=""
                 fi
                 
-                sed -i 's|^\([[:space:]]*\)#[[:space:]]*mount_filter_img[[:space:]]|\1mount_filter_img |' "$AGH_INIT"
-                print_success "Re-enabled mount_filter_img in init script"
+                sed -i "s|^\([[:space:]]*\)#[[:space:]]*\(mount_filter_img[[:space:]]\)|\1\2|" "$AGH_INIT"
+                print_success "Re-enabled execution call in init script"
                 
                 if [ -n "$agh_pid" ]; then
                     $AGH_INIT start >/dev/null 2>&1; sleep 2
                     if is_agh_running; then
                         print_success "AdGuardHome restarted successfully"
-                        print_success "Filter space limit removed!"
+                        print_success "Filter space limit re-enabled!"
                     else
                         print_error "Failed to restart AdGuardHome"
                     fi
@@ -875,10 +889,7 @@ WARNEOF
             m|M|0)
                 return
                 ;;
-            *)
-                print_error "Invalid option"
-                sleep 1
-                ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }
@@ -997,16 +1008,21 @@ EOF
                 printf " %-4s %-12s %-50s %-20s\n" "$s_box" "$type" "$label" "$s_txt"
             done < "$LISTS_DATA"
             printf " ──────────────────────────────────────────────────────────────────────────────────────────\n"
-            printf " [A] All   [N] None   [T#] Toggle   [C] Confirm   [0] Cancel   [?] Help\n"
+            printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel   [?] Help\n"
             printf " Enter command: "
             read -r input
 
             case "$input" in
                 a|A) sed -i 's/\(.*|.*|.*|.*|\)0\(|.*|.*\)/\11\2/' "$LISTS_DATA" ;;
                 n|N) sed -i 's/\(.*|.*|.*|.*|\)1\(|.*|.*\)/\10\2/' "$LISTS_DATA" ;;
-                t*|T*)
-                    num=$(echo "$input" | sed 's/[tT]//g')
-                    [ -n "$num" ] && awk -F'|' -v t="$num" 'BEGIN{OFS="|"} {if($1==t) $5=($5==1?0:1); print}' "$LISTS_DATA" > "$LISTS_DATA.tmp" && mv "$LISTS_DATA.tmp" "$LISTS_DATA"
+                [0-9]*)
+                    if [ "$input" != "0" ]; then
+                        num="$input"
+                        awk -F'|' -v t="$num" 'BEGIN{OFS="|"} {if($1==t) $5=($5==1?0:1); print}' "$LISTS_DATA" > "$LISTS_DATA.tmp" && mv "$LISTS_DATA.tmp" "$LISTS_DATA"
+                    else
+                        # If it is exactly 0, handle it as the cancel command
+                        rm -f "$LISTS_DATA"; return
+                    fi
                     ;;
                 c|C)
                     to_install=$(awk -F'|' '$5==1 && $4==0' "$LISTS_DATA")
@@ -1126,7 +1142,7 @@ id: $ts"
                     ;;
                 \?|h|H|❓)
                     show_agh_lists_help ;;
-                0) rm -f "$LISTS_DATA"; return ;;
+                *) print_error "Invalid option"; sleep 1 ;;
             esac
         done
     done
@@ -1170,7 +1186,7 @@ update_agh_credentials() {
     if [ "$PASS_STATUS" = "✅" ]; then
         print_warning "A password is already set. Proceeding will overwrite it.\n"
     else 
-        print_warning "No password currently set. This will create a new username and password.\n"
+        print_warning "No password currently set. This will create a new username and password."
     fi
     printf "Confirm to proceed? [y/N]: "
     read -r confirm
@@ -1179,7 +1195,7 @@ update_agh_credentials() {
 
     # Dependency Check
     if ! command -v htpasswd >/dev/null 2>&1; then
-        printf "🔍 Installing apache-utils...\n"
+        print_info "Installing apache-utils...\n"
         opkg update >/dev/null 2>&1 && opkg install apache-utils >/dev/null 2>&1
         if ! command -v htpasswd >/dev/null 2>&1; then
             print_error "Failed to install apache-utils. Cannot proceed."
@@ -1363,7 +1379,6 @@ manage_agh_direct_access() {
                 else
                     print_warning "Remove credentials to AdGuardHome Web UI?"
                 fi
-                printf "\n"
                 printf "Confirm [y/N]: "
                 read -r confirm
                 printf "\n"
@@ -1488,77 +1503,78 @@ create_agh_backup() {
 }
 
 manage_agh_backups() {
-    local backups=$(ls /etc/AdGuardHome/config.yaml.backup.* 2>/dev/null | sed 's/.*\.backup\.//' | sort -r)
-    [ -z "$backups" ] && { print_error "No backups found."; sleep 2; return; }
-
-    clear
-    print_centered_header "Pick a Backup Date"
-    printf " ────────────────────────────────────────────────────────────\n"
-    printf " %-3s  %-18s  %-5s  %-5s  %-5s\n" "#" "Date / Time" "Conf" "Bin" "Init"
-    printf "\n"
-
-    local i=1
-    local map_file="/tmp/agh_bk_map"
-    > "$map_file"
-
-    for ts in $backups; do
-        local p_date="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:8:2}:${ts:10:2}"
-        local has_bin="[N]"; [ -f "/usr/bin/AdGuardHome.backup.$ts" ] && has_bin="[Y]"
-        local has_ini="[N]"; [ -f "/etc/init.d/adguardhome.backup.$ts" ] && has_ini="[Y]"
-
-        printf " %-3s  %-18s  %-5s  %-5s  %-5s\n" "$i." "$p_date" "[Y]" "$has_bin" "$has_ini"
-        printf "%s|%s\n" "$i" "$ts" >> "$map_file"
-        i=$((i+1))
-    done
-    printf " ────────────────────────────────────────────────────────────\n"
-    printf " [#] To Restore   [0] Cancel\n"
-    printf " Choose [1-$((i-1))/0]: "
-    read -r b_choice
-    printf "\n"
-    [ -z "$b_choice" ] || [ "$b_choice" = "0" ] && return
-
-    local selected_ts=$(grep "^$b_choice|" "$map_file" | cut -d'|' -f2)
-    [ -z "$selected_ts" ] && return
-
-    local fix_cfg="Y"; local fix_bin="N"; local fix_ini="N"
     while true; do
+        local backups=$(ls /etc/AdGuardHome/config.yaml.backup.* 2>/dev/null | sed 's/.*\.backup\.//' | sort -r)
+        [ -z "$backups" ] && { print_error "No backups found."; sleep 2; return; }
+
         clear
-        print_centered_header "Select items to restore from: $selected_ts"
+        print_centered_header "Pick a Backup Date"
         printf " ────────────────────────────────────────────────────────────\n"
-        printf " 1. [ %s ] Configuration Settings\n" "$fix_cfg"
-        printf " 2. [ %s ] App Binary (AdGuardHome)\n" "$fix_bin"
-        printf " 3. [ %s ] Startup Script (init.d)\n\n" "$fix_ini"
-        printf " ────────────────────────────────────────────────────────────\n"
-        printf " [#] Toggle Restore   [C] Confirm   [0] Cancel\n"
-        printf " Choose [1-3/C/0]: "
-        local s_choice=$(read_single_char | tr '[:upper:]' '[:lower:]')
+        printf " %-3s  %-18s  %-5s  %-5s  %-5s\n" "#" "Date / Time" "Conf" "Bin" "Init"
         printf "\n"
-        case "$s_choice" in
-            1) [ "$fix_cfg" = "Y" ] && fix_cfg="N" || fix_cfg="Y" ;;
-            2) [ "$fix_bin" = "Y" ] && fix_bin="N" || fix_bin="Y" ;;
-            3) [ "$fix_ini" = "Y" ] && fix_ini="N" || fix_ini="Y" ;;
-            c) 
-                if [ "$fix_cfg" = "N" ] && [ "$fix_bin" = "N" ] && [ "$fix_ini" = "N" ]; then
+
+        local i=1
+        local map_file="/tmp/agh_bk_map"
+        > "$map_file"
+
+        for ts in $backups; do
+            local p_date="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:8:2}:${ts:10:2}"
+            local has_bin="[N]"; [ -f "/usr/bin/AdGuardHome.backup.$ts" ] && has_bin="[Y]"
+            local has_ini="[N]"; [ -f "/etc/init.d/adguardhome.backup.$ts" ] && has_ini="[Y]"
+
+            printf " %-3s  %-18s  %-5s  %-5s  %-5s\n" "$i." "$p_date" "[Y]" "$has_bin" "$has_ini"
+            printf "%s|%s\n" "$i" "$ts" >> "$map_file"
+            i=$((i+1))
+        done
+        printf " ────────────────────────────────────────────────────────────\n"
+        printf " [#] To Restore   [0] Cancel\n"
+        printf " Choose [1-$((i-1))/0]: "
+        read -r b_choice
+        printf "\n"
+        [ -z "$b_choice" ] || [ "$b_choice" = "0" ] && return
+
+        local selected_ts=$(grep "^$b_choice|" "$map_file" | cut -d'|' -f2)
+        if [ -z "$selected_ts" ]; then 
+            print_error "Invalid selection"; sleep 1; continue
+        fi
+
+        local fix_cfg="Y"; local fix_bin="N"; local fix_ini="N"
+        while true; do
+            clear
+            print_centered_header "Select items to restore from: $selected_ts"
+            printf " ────────────────────────────────────────────────────────────\n"
+            printf " 1. [ %s ] Configuration Settings\n" "$fix_cfg"
+            printf " 2. [ %s ] App Binary (AdGuardHome)\n" "$fix_bin"
+            printf " 3. [ %s ] Startup Script (init.d)\n\n" "$fix_ini"
+            printf " ────────────────────────────────────────────────────────────\n"
+            printf " [#] Toggle Restore   [C] Confirm   [0] Cancel\n"
+            printf " Choose [1-3/C/0]: "
+            local s_choice=$(read_single_char | tr '[:upper:]' '[:lower:]')
+            printf "\n"
+            case "$s_choice" in
+                1) [ "$fix_cfg" = "Y" ] && fix_cfg="N" || fix_cfg="Y" ;;
+                2) [ "$fix_bin" = "Y" ] && fix_bin="N" || fix_bin="Y" ;;
+                3) [ "$fix_ini" = "Y" ] && fix_ini="N" || fix_ini="Y" ;;
+                c) 
+                    if [ "$fix_cfg" = "N" ] && [ "$fix_bin" = "N" ] && [ "$fix_ini" = "N" ]; then
+                        printf "\n"
+                        print_error "Nothing selected to restore. Select an option or 0 to cancel."
+                        press_any_key
+                        continue
+                    fi
+                    
+                    printf "\nApplying Restore...\n"
+                    $AGH_INIT stop >/dev/null 2>&1; sleep 1
+                    [ "$fix_cfg" = "Y" ] && cp "/etc/AdGuardHome/config.yaml.backup.$selected_ts" "/etc/AdGuardHome/config.yaml"
+                    [ "$fix_bin" = "Y" ] && cp "/usr/bin/AdGuardHome.backup.$selected_ts" "/usr/bin/AdGuardHome"
+                    [ "$fix_ini" = "Y" ] && cp "/etc/init.d/adguardhome.backup.$selected_ts" "/etc/init.d/adguardhome"
+                    $AGH_INIT start >/dev/null 2>&1; sleep 2
                     printf "\n"
-                    print_error "Nothing selected to restore. Select an option or 0 to cancel."
-                    press_any_key
-                    continue
-                fi
-                
-                printf "\nApplying Restore...\n"
-                $AGH_INIT stop >/dev/null 2>&1; sleep 1
-                [ "$fix_cfg" = "Y" ] && cp "/etc/AdGuardHome/config.yaml.backup.$selected_ts" "/etc/AdGuardHome/config.yaml"
-                [ "$fix_bin" = "Y" ] && cp "/usr/bin/AdGuardHome.backup.$selected_ts" "/usr/bin/AdGuardHome"
-                [ "$fix_ini" = "Y" ] && cp "/etc/init.d/adguardhome.backup.$selected_ts" "/etc/init.d/adguardhome"
-                $AGH_INIT start >/dev/null 2>&1; sleep 2
-                printf "\n"
-                print_success "Restore complete!"; press_any_key; return ;;
-            0) return ;;
-            *)
-                print_error "Invalid option"
-                sleep 1
-                ;;
-        esac
+                    print_success "Restore complete!"; press_any_key; return ;;
+                0) return ;;
+                *) print_error "Invalid option"; sleep 1 ;;
+            esac
+        done
     done
 }
 
@@ -1612,7 +1628,7 @@ delete_agh_backups() {
         done < "$map_file"
 
         printf " ──────────────────────────────────────────────────────────────\n"
-        printf " [A] All   [N] None   [T#] Toggle   [C] Confirm   [0] Cancel\n"
+        printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel\n"
         printf " Enter command: "
         read -r input
         local cmd=$(echo "$input" | tr '[:upper:]' '[:lower:]')
@@ -1620,12 +1636,13 @@ delete_agh_backups() {
         case "$cmd" in
             a) sed -i 's/|0$/|1/' "$map_file" ;;
             n) sed -i 's/|1$/|0/' "$map_file" ;;
-            t*) 
-                local t_idx="${cmd#t}"
-                if grep -q "^$t_idx|" "$map_file"; then
-                    local current_state=$(grep "^$t_idx|" "$map_file" | cut -d'|' -f3)
+            [1-9]*) 
+                if grep -q "^$cmd|" "$map_file"; then
+                    local current_state=$(grep "^$cmd|" "$map_file" | cut -d'|' -f3)
                     local new_state=$((1 - current_state))
-                    sed -i "s/^$t_idx|.*|.*/$(grep "^$t_idx|" "$map_file" | cut -d'|' -f1-2)|$new_state/" "$map_file"
+                    sed -i "s/^\($cmd|[^|]*|\).*/\1$new_state/" "$map_file"
+                else
+                    print_error "Index $cmd not found"; sleep 1
                 fi ;;
             c)
                 if ! grep -q "|1$" "$map_file"; then
@@ -1633,8 +1650,10 @@ delete_agh_backups() {
                     print_error "No backups selected."; press_any_key; continue
                 fi
                 printf "\n"
-                print_warning "Delete selected backups? [y/N]: "
-                if [ "$(read_single_char)" = "y" ]; then
+                print_warning "WARNING: You are about to permanently delete selected backups."
+                printf "Confirm deletion? [y/N]: "; read -r confirm
+                case "$confirm" in
+                    y|Y)
                     while IFS='|' read -r idx ts sel; do
                         if [ "$sel" -eq 1 ]; then
                             rm -f "/etc/AdGuardHome/config.yaml.backup.$ts"
@@ -1646,10 +1665,11 @@ delete_agh_backups() {
                     print_success "Selected backups purged."
                     press_any_key;
                     rm -f "$map_file"
-                    return
-                fi ;;
+                    return ;;
+                    *) print_error "Deletion cancelled." ; press_any_key ; continue ;;
+                esac ;;
             0) rm -f "$map_file"; return ;;
-            *) print_error "Invalid command"; sleep 1 ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }
@@ -1714,25 +1734,25 @@ sub_service_health() {
             1) 
                if is_agh_running; then
                    printf "\n"
-                   print_warning "Service is RUNNING. Toggle [D]isable, [R]estart, or [0] Cancel? "
-                   local tr=$(read_single_char | tr '[:upper:]' '[:lower:]')
-                   if [ "$tr" = "d" ]; then
+                   print_warning "Service is RUNNING. Do you want to [D]isable, [R]estart, or [0] Cancel?"
+                   printf "Choose [D/R/0]: "; read -r confirm
+                   if [ "$confirm" = "d" ] || [ "$confirm" = "D" ]; then
                        uci set adguardhome.config.enabled='0' && uci commit adguardhome
-                       $AGH_INIT stop >/dev/null 2>&1; sleep 1; print_success "Service Disabled"
-                   elif [ "$tr" = "r" ]; then
-                       $AGH_INIT restart >/dev/null 2>&1; sleep 2; print_success "Service Restarted"
+                       $AGH_INIT stop >/dev/null 2>&1; sleep 1; printf "\n"; print_success "Service Disabled"
+                   elif [ "$confirm" = "r" ] || [ "$confirm" = "R" ]; then
+                       $AGH_INIT restart >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Restarted"
                    fi
                else
                    printf "\n"
-                   print_warning "Service is STOPPED. Enable now? [y/N]: "
-                   if [ "$(read_single_char | tr '[:upper:]' '[:lower:]')" = "y" ]; then
+                   print_warning "Service is STOPPED. Enable now?"
+                   printf "Confirm [y/N]: "; read -r confirm
+                   if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                        uci set adguardhome.config.enabled='1' && uci commit adguardhome
-                       $AGH_INIT enable >/dev/null 2>&1; sleep 1; $AGH_INIT start >/dev/null 2>&1; sleep 2; print_success "Service Enabled"
+                       $AGH_INIT enable >/dev/null 2>&1; sleep 1; $AGH_INIT start >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Enabled"
                    fi
                fi
                press_any_key ;;
             2) 
-               # RESTORED: Your specific tested logread logic
                clear
                print_centered_header "AdGuardHome System Logs (Ctrl+C to exit)"
                sleep 1
@@ -1744,11 +1764,12 @@ sub_service_health() {
                ;;
             3) 
                printf "\n"
-               print_warning "Clear all cached filter files? [y/N]: "
-               if [ "$(read_single_char | tr '[:upper:]' '[:lower:]')" = "y" ]; then
+               print_warning "Clear all cached filter files?"
+               printf "Confirm [y/N]: "; read -r confirm
+               if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                    local wd=$(get_agh_workdir)
-                   rm -rf "${wd:-/etc/AdGuardHome}/data/filters/"*
-                   $AGH_INIT restart >/dev/null 2>&1 && print_success "Filters Purged"
+                   rm -rf "${wd:-/etc/AdGuardHome}/data/filters/"* 2>/dev/null
+                   $AGH_INIT restart >/dev/null 2>&1; printf "\n"; print_success "Filters Purged"
                    cached_rules="" 
                fi
                press_any_key ;;
@@ -1767,9 +1788,9 @@ sub_confirm_factory_reset() {
     local was_uci_enabled=0
 
     printf "\n"
-    print_warning "Restore factory system files and defaults from /rom? [y/N]: "
-    local confirm=$(read_single_char | tr '[:upper:]' '[:lower:]')
-    [ "$confirm" != "y" ] && return
+    print_warning "WARNING: This will restore factory system files and defaults from /rom"
+    printf "Confirm restore? [y/N]: "; read -r confirm
+    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && { printf "\n"; print_info "Operation cancelled."; press_any_key; return; }
 
     # --- 1. Pre-Check State & Stop Phase ---
     # Call the function directly to check the exit status
@@ -1791,9 +1812,9 @@ sub_confirm_factory_reset() {
     fi
 
     # --- 2. Restore Files from ROM ---
-    [ -f "/rom$L_INIT" ] && cp "/rom$L_INIT" "$L_INIT" && chmod +x "$L_INIT" && init_ok=1
-    [ -f "/rom$L_BIN" ]  && cp "/rom$L_BIN" "$L_BIN"   && chmod +x "$L_BIN"  && bin_ok=1
-    [ -f "/rom$L_CONF" ] && cp "/rom$L_CONF" "$L_CONF" && conf_ok=1
+    [ -f "/rom$L_INIT" ] && cp -f "/rom$L_INIT" "$L_INIT" && chmod +x "$L_INIT" && init_ok=1
+    [ -f "/rom$L_BIN" ]  && cp -f "/rom$L_BIN" "$L_BIN"   && chmod +x "$L_BIN"  && bin_ok=1
+    [ -f "/rom$L_CONF" ] && cp -f "/rom$L_CONF" "$L_CONF" && conf_ok=1
     
     # --- 3. Report Status ---
     printf "\n"
@@ -1811,15 +1832,15 @@ sub_confirm_factory_reset() {
             print_success "Full recovery successful! AdGuardHome auto-start re-enabled."
             printf "\n"
         else
-            print_warning "AdGuardHome was disabled in UCI. Keep it disabled? [y/N]: "
-            local keep_disabled=$(read_single_char | tr '[:upper:]' '[:lower:]')
-            if [ "$keep_disabled" != "y" ]; then
+            printf "\n"
+            print_warning "AdGuardHome was disabled in UCI. Enable it now?"
+            printf "Confirm [y/N]: "; read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 uci set adguardhome.config.enabled='1' && uci commit adguardhome
                 $L_INIT enable >/dev/null 2>&1; sleep 1
-                print_success "AdGuardHome enabled in GL-WebUI and UCI."
+                print_success "AdGuardHome enabled in GL-WebUI and UCI.\n"
                 was_uci_enabled=1
             fi
-            printf "\n"
         fi
         
         # Handle operational state (Running)
@@ -1827,9 +1848,9 @@ sub_confirm_factory_reset() {
             print_info "Automatically restarting service..."
             $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service restored to running state."
         elif [ "$was_uci_enabled" -eq 1 ]; then
-            print_warning "AdGuardHome is enabled but not running. Start it now? [y/N]: "
-            local start_now=$(read_single_char | tr '[:upper:]' '[:lower:]')
-            if [ "$start_now" = "y" ]; then
+            print_warning "AdGuardHome is enabled but not running. Start it now?"
+            printf "Confirm [y/N]: "; read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 printf "\n"
                 print_info "Starting AdGuardHome...\n"
                 $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service started successfully."
@@ -1840,7 +1861,6 @@ sub_confirm_factory_reset() {
     else
         print_error "Recovery failed. Files not found in /rom or write error."
     fi
-    
     press_any_key
 }
 
@@ -2018,27 +2038,27 @@ manage_zram() {
         case $zram_choice in
             1)
                 if ! opkg list-installed | grep -q "^zram-swap"; then
-                    print_warning "zram-swap not installed, installing..."
+                    print_warning "zram-swap not installed, installing...\n"
                     if [ "$opkg_updated" -eq 0 ]; then
-                        print_info "Updating package lists..."
+                        print_info "Updating package lists...\n"
                         opkg update >/dev/null 2>&1
                         opkg_updated=1
                     fi
                     opkg install zram-swap >/dev/null 2>&1
                     if opkg list-installed | grep -q "^zram-swap"; then
-                        print_success "zram-swap package installed"
+                        print_success "zram-swap package installed\n"
                     else
-                        print_error "Failed to install zram-swap"
+                        print_error "Failed to install zram-swap\n"
                         press_any_key
                         continue
                     fi
                 fi
                 
                 if [ -f /etc/init.d/zram ]; then
-                    print_info "Enabling and starting zram swap"
+                    print_info "Enabling and starting zram swap\n"
                     /etc/init.d/zram enable >/dev/null 2>&1; sleep 1
                     /etc/init.d/zram start >/dev/null 2>&1; sleep 2
-                    print_success "Zram swap enabled and started"
+                    print_success "Zram swap enabled and started\n"
                     
                     if swapon -s 2>/dev/null | grep -q zram; then
                         print_success "Zram swap is working correctly"
@@ -2064,12 +2084,13 @@ manage_zram() {
                 if opkg list-installed | grep -q "^zram-swap"; then
                     printf "%b" "${YELLOW}Remove zram-swap package? [y/N]: ${RESET}"
                     read -r confirm
+                    printf "\n"
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
                         opkg remove zram-swap >/dev/null 2>&1
                         print_success "zram-swap package removed"
                     else
-                        printf "Removal cancelled.\n"
+                        printf "Removal cancelled."
                     fi
                 else
                     print_warning "zram-swap package is not installed"
@@ -2082,10 +2103,7 @@ manage_zram() {
             m|M|0)
                 return
                 ;;
-            *)
-                print_error "Invalid option"
-                sleep 1
-                ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }
@@ -2468,10 +2486,7 @@ EOF
             m|M|0)
                 return
                 ;;
-            *)
-                print_error "Invalid option"
-                sleep 1
-                ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }
@@ -2770,10 +2785,7 @@ view_uci_config() {
             m|M|0)
                 return
                 ;;
-            *)
-                print_error "Invalid option"
-                sleep 1
-                ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }

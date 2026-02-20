@@ -2341,15 +2341,24 @@ EOF
                 # Based on internal DDR bandwidth tests
                 BASE_MEM=4351.61
 
-                total_mem=$(awk '/MemTotal/ {print int($2)}' /proc/meminfo 2>/dev/null)
+                if [ -f /proc/meminfo ]; then
+                    total_mem=$(awk '/MemTotal/ {
+                        m = $2 / 1024
+                        est = m + 30
+                        rounded = (int((est + 127) / 128) * 128)
+                        print rounded
+                    }' /proc/meminfo)
+                fi
                 
+                total_mem=${total_mem:-512} # Default to 512MB if we can't read it
+
                 # Determine test size (100k blocks of 1M = 100GB of throughput)
                 # We want a large enough test to bypass L1/L2 cache saturation
-                if [ "$total_mem" -ge 960000 ]; then test_size=100000; test_name="100GB"
-                elif [ "$total_mem" -ge 460000 ]; then test_size=50000; test_name="50GB"
+                if [ "$total_mem" -ge 960 ]; then test_size=100000; test_name="100GB"
+                elif [ "$total_mem" -ge 460 ]; then test_size=50000; test_name="50GB"
                 else test_size=25000; test_name="25GB"; fi
                 
-                printf "System RAM: %b$((total_mem / 1024)) MB%b\n" "${GREEN}" "${RESET}"
+                printf "System RAM: %b%s MB%b\n" "${GREEN}" "$total_mem" "${RESET}"
                 printf "Test throughput: %b%s%b\n" "${GREEN}" "$test_name" "${RESET}"
                 
                 # Helper for ms timing
@@ -2373,7 +2382,7 @@ EOF
                     speed = (sz * 1000) / total_ms;
                     diff = ((speed - base) / base) * 100;
 
-                    printf "Mem Throughput   %-16s %s%+.1f%%%s (%s MB/s)\n", 
+                    printf "Read / Write     %-16s %s%+.1f%%%s (%s MB/s)\n", 
                         sprintf("%.2f MB/s", speed), (diff>=0?g:r), diff, res, base;
                 }'
 

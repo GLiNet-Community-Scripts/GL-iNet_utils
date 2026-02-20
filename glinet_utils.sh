@@ -327,14 +327,14 @@ show_hardware_info() {
                 # 1. Check for eMMC (Brume 2/3, Flint 2/3, etc.)
                 if [ -b /dev/mmcblk0 ]; then
                     mmc_blocks=$(cat /sys/block/mmcblk0/size)
-                    # Convert 512-byte blocks to MiB
-                    mmc_mib=$((mmc_blocks * 512 / 1024 / 1024))
+                    # Convert 512-byte blocks to MB
+                    mmc_mb=$((mmc_blocks * 512 / 1024 / 1024))
                     
-                    if [ "$mmc_mib" -ge 1000 ]; then
-                        mmc_gib=$(( (mmc_mib + 512) / 1024 ))
-                        printf "   Physical eMMC: %b%d GiB%b\n" "${GREEN}" "$mmc_gib" "${RESET}"
+                    if [ "$mmc_mb" -ge 1000 ]; then
+                        mmc_gb=$(( (mmc_mb + 512) / 1024 ))
+                        printf "   Physical eMMC: %b%d GB%b\n" "${GREEN}" "$mmc_gb" "${RESET}"
                     else
-                        printf "   Physical eMMC: %b%d MiB%b\n" "${GREEN}" "$mmc_mib" "${RESET}"
+                        printf "   Physical eMMC: %b%d MB%b\n" "${GREEN}" "$mmc_mb" "${RESET}"
                     fi
 
                 # 2. Fallback to MTD (Slate 7 Pro, Beryl, etc.)
@@ -344,13 +344,13 @@ show_hardware_info() {
                     if [ -n "$max_hex" ]; then
                         # Convert Hex to Decimal bytes using shell printf
                         flash_bytes=$(printf "%d" "0x$max_hex")
-                        flash_mib=$((flash_bytes / 1024 / 1024))
+                        flash_mb=$((flash_bytes / 1024 / 1024))
                         
-                        if [ "$flash_mib" -ge 1000 ]; then
-                            flash_gib=$(( (flash_mib + 512) / 1024 ))
-                            printf "   Physical NAND: %b%d GiB%b\n" "${GREEN}" "$flash_gib" "${RESET}"
+                        if [ "$flash_mb" -ge 1000 ]; then
+                            flash_gb=$(( (flash_mb + 512) / 1024 ))
+                            printf "   Physical NAND: %b%d GB%b\n" "${GREEN}" "$flash_gb" "${RESET}"
                         else
-                            printf "   Physical NAND: %b%d MiB%b\n" "${GREEN}" "$flash_mib" "${RESET}"
+                            printf "   Physical NAND: %b%d MB%b\n" "${GREEN}" "$flash_mb" "${RESET}"
                         fi
                     fi
                 else
@@ -627,13 +627,34 @@ manage_agh_ui_updates() {
         fi
 
         if grep -q -- "--no-check-update" "$AGH_INIT"; then
-            printf "   UI Updates: %bDISABLED%b\n\n" "${RED}" "${RESET}"
+            printf "   UI Updates: %bDISABLED%b\n" "${RED}" "${RESET}"
         else
-            printf "   UI Updates: %bENABLED%b\n\n" "${GREEN}" "${RESET}"
+            printf "   UI Updates: %bENABLED%b\n" "${GREEN}" "${RESET}"
+        fi
+
+        up_conf="/etc/sysupgrade.conf"
+        updates_persist="0"
+
+        if [ -s "$up_conf" ]; then
+            updates_persist="1"
+            for entry in "/usr/bin/AdGuardHome" "/etc/init.d/adguardhome" "/etc/AdGuardHome/config.yaml"; do
+                if ! grep -qFx "$entry" "$up_conf" 2>/dev/null; then
+                    updates_persist="0"
+                    break
+                fi
+            done
+        fi
+
+        if [ "$updates_persist" -eq "1" ]; then
+            printf "   Update Persistence: %bENABLED%b\n\n" "${GREEN}" "${RESET}"
+        else
+            printf "   Update Persistence: %bDISABLED%b\n\n" "${RED}" "${RESET}"
         fi
         
         printf "1️⃣  Enable UI Updates\n"
         printf "2️⃣  Disable UI Updates\n"
+        printf "3️⃣  Enable update persistence across firmware updates\n"
+        printf "4️⃣  Disable update persistence across firmware updates\n"
         printf "0️⃣  Return to previous menu\n"
         printf "❓ Help\n"
         printf "\nChoose [1-2/0/?]: "
@@ -643,7 +664,15 @@ manage_agh_ui_updates() {
         case $agh_choice in
             1)
                 if grep -q -- "--no-check-update" "$AGH_INIT"; then
-                    sed -i 's/--no-check-update//g; s/  / /g' "$AGH_INIT"
+                    if [ "$updates_persist" -eq 0 ]; then
+                        print_warning "UI updates are currently set to not persist across firmware updates.\n   Enabling UI updates may cause compatibility issues during firmware\n   updates due to legacy binaries being reinstalled. Consider enabling\n   update persistence to avoid this problem.\n"
+                    else
+                        print_info "UI updates are currently set to persist across firmware updates.\n"
+                    fi
+                    printf "Proceed with changes? [y/N]: "; read -r confirm ; printf "\n"
+                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+
+                    sed -i 's/--no-check-update[[:space:]]*//g' "$AGH_INIT"
                     print_success "UI updates enabled in AdGuardHome"
                     
                     if is_agh_running; then    
@@ -660,8 +689,11 @@ manage_agh_ui_updates() {
                 press_any_key
                 ;;
             2)
+                printf "Disable UI updates? [y/N]: "; read -r confirm ; printf "\n"
+                [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+                
                 if ! grep -q -- "--no-check-update" "$AGH_INIT"; then
-                    sed -i '/procd_set_param command/ s/ -c/ --no-check-update -c/' "$AGH_INIT"
+                    sed -i '/procd_set_param command/ s/ \(-c\|--config\)/ --no-check-update \1/' "$AGH_INIT"
                     print_success "UI updates disabled in AdGuardHome"
                     
                     if is_agh_running; then    
@@ -674,6 +706,35 @@ manage_agh_ui_updates() {
                     fi
                 else
                     print_warning "UI updates are already disabled"
+                fi
+                press_any_key
+                ;;
+            3)
+                if [ "$updates_persist" -eq 0 ]; then
+                    printf "Enable update persistence across firmware updates? [y/N]: "; read -r confirm ; printf "\n"
+                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+                    
+                    [ ! -f "$up_conf" ] && touch "$up_conf"
+                   
+                    for entry in "/usr/bin/AdGuardHome" "/etc/init.d/adguardhome" "/etc/AdGuardHome/config.yaml"; do
+                        grep -qFx "$entry" "$up_conf" || echo "$entry" >> "$up_conf"
+                    done
+                    print_success "Update persistence enabled in $up_conf"
+                else
+                    print_warning "Update persistence is already enabled"
+                fi
+                press_any_key
+                ;;
+            4)
+                if [ "$updates_persist" -eq 1 ]; then
+                    printf "Disable update persistence across firmware updates? [y/N]: "; read -r confirm ; printf "\n"
+                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+                    sed -i "/\/usr\/bin\/AdGuardHome/d" /etc/sysupgrade.conf
+                    sed -i "/\/etc\/init.d\/adguardhome/d" /etc/sysupgrade.conf
+                    sed -i "/\/etc\/AdGuardHome\/config.yaml/d" /etc/sysupgrade.conf
+                    print_success "Update persistence disabled in $up_conf"
+                else
+                    print_warning "Update persistence is already disabled"
                 fi
                 press_any_key
                 ;;
@@ -1986,7 +2047,7 @@ No  → if you have 1 GB+ RAM and very light usage
 Important notes:
 • Zram uses some CPU to compress/decompress → not ideal on very old/slow CPUs
 • Data in zram is lost on reboot (normal for swap)
-• Routers with 512MiB flash or less will have a forced limit for AdGuardHome allow/block lists.
+• Routers with 512MB flash or less will have a forced limit for AdGuardHome allow/block lists.
   See Option 3 - Manage AdGuardHome Storage
 
 In this menu you can:
@@ -2790,6 +2851,48 @@ view_uci_config() {
     done
 }
 
+install_openspeedtest() {
+    local script_url="https://raw.githubusercontent.com/phantasm22/OpenSpeedTestServer/main/install_openspeedtest.sh"
+    local script_name="install_openspeedtest.sh"
+    local expected_header="Author: phantasm22"
+
+    clear
+    print_centered_header "OpenSpeedTest Server Installation"
+
+    # Check if we need to download (file missing OR invalid header)
+    if [ ! -f "$script_name" ] || ! grep -q "$expected_header" "$script_name"; then
+        print_info "Downloading latest OpenSpeedTest installer..."
+        
+        if wget -q -O "$script_name" "$script_url" && [ -s "$script_name" ]; then
+            chmod +x "$script_name"
+            print_success "Download successful."
+        else
+            print_error "Failed to download installer. Please check your connection."
+            rm -f "$script_name"
+            press_any_key
+            return 1
+        fi
+    fi
+
+    # Execute the script
+    print_info "Launching installer...\n"
+    sleep 2
+    
+    # Check for execution bit just in case
+    [ ! -x "$script_name" ] && chmod +x "$script_name"
+    
+    ./"$script_name"
+    
+    # Handle post-execution status
+    if [ $? -eq 0 ]; then
+        print_success "OpenSpeedTest setup sequence finished."
+    else
+        print_warning "Installer exited with a non-zero status."
+    fi
+
+    press_any_key
+}
+
 # -----------------------------
 # Check for updates on start
 # -----------------------------
@@ -2830,6 +2933,7 @@ show_menu() {
         printf "4️⃣  System Benchmarks (CPU & Disk)\n"
         printf "5️⃣  View System Configuration (UCI)\n"
         printf "6️⃣  Check for Update\n"
+        printf "7️⃣  Install/Manage OpenSpeedTest Server\n"
         printf "0️⃣  Exit\n"
         printf "\nChoose [1-6/0]: "
         read opt
@@ -2841,7 +2945,8 @@ show_menu() {
             4) benchmark_system ;;
             5) view_uci_config ;;
             6) check_self_update "$@"; press_any_key ;;
-            0) clear; printf "\n\n"; print_success "Thanks for using GL.iNet Toolkit!"; exit 0 ;;
+            7) install_openspeedtest ;;
+            0) clear; printf "\n"; print_success "Thanks for using GL.iNet Toolkit!\n"; exit 0 ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done

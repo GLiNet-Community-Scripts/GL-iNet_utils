@@ -30,7 +30,7 @@
 - 🔄 Native Self-Updater – Stay current without manual downloads. The script checks GitHub on launch and can update itself in place.
 - 🆓 GPL-3.0 Licensed – Free, open, and community-driven.
 
-Tested on various GL.iNet models (Beryl, Beryl AX, Beryl BE, Slate 7, Flint 3, Flint 3e, etc.) running recent firmware.
+Tested on various GL.iNet models (Beryl, Beryl AX, Beryl 7, Slate 7, Flint 3, Flint 3e, etc.) running recent firmware.
 
 ---
 

@@ -1737,7 +1737,7 @@ sub_service_health() {
                    print_warning "Service is RUNNING. Do you want to [D]isable, [R]estart, or [0] Cancel?"
                    printf "Choose [D/R/0]: "; read -r confirm
                    if [ "$confirm" = "d" ] || [ "$confirm" = "D" ]; then
-                       uci set adguardhome.config.enabled='0' && uci commit adguardhome
+                       uci set adguardhome.config.enabled='0' && uci set adguardhome.config.dns_enabled='0' && uci commit adguardhome
                        $AGH_INIT stop >/dev/null 2>&1; sleep 1; printf "\n"; print_success "Service Disabled"
                    elif [ "$confirm" = "r" ] || [ "$confirm" = "R" ]; then
                        $AGH_INIT restart >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Restarted"
@@ -1747,7 +1747,7 @@ sub_service_health() {
                    print_warning "Service is STOPPED. Enable now?"
                    printf "Confirm [y/N]: "; read -r confirm
                    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                       uci set adguardhome.config.enabled='1' && uci commit adguardhome
+                       uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
                        $AGH_INIT enable >/dev/null 2>&1; sleep 1; $AGH_INIT start >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Enabled"
                    fi
                fi
@@ -1827,7 +1827,7 @@ sub_confirm_factory_reset() {
     if [ $init_ok -eq 1 ] && [ $bin_ok -eq 1 ] && [ $conf_ok -eq 1 ]; then
         # Handle administrative state (UCI)
         if [ "$was_uci_enabled" -eq 1 ]; then
-            uci set adguardhome.config.enabled='1' && uci commit adguardhome
+            uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
             $L_INIT enable >/dev/null 2>&1; sleep 1
             print_success "Full recovery successful! AdGuardHome auto-start re-enabled."
             printf "\n"
@@ -1836,7 +1836,7 @@ sub_confirm_factory_reset() {
             print_warning "AdGuardHome was disabled in UCI. Enable it now?"
             printf "Confirm [y/N]: "; read -r confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
-                uci set adguardhome.config.enabled='1' && uci commit adguardhome
+                uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
                 $L_INIT enable >/dev/null 2>&1; sleep 1
                 print_success "AdGuardHome enabled in GL-WebUI and UCI.\n"
                 was_uci_enabled=1

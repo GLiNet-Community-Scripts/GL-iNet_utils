@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-02-20
+# Version: 2026-02-21
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -315,8 +315,16 @@ show_hardware_info() {
                 if [ -f /proc/meminfo ]; then
                     awk '/MemTotal/ {
                         m = $2 / 1024
-                        est = m + 30
-                        rounded = (int((est + 127) / 128) * 128)
+                        if (m <= 32) rounded = 32
+                        else if (m <= 64) rounded = 64
+                        else if (m <= 128) rounded = 128
+                        else if (m <= 256) rounded = 256
+                        else if (m <= 512) rounded = 512
+                        else if (m <= 1024) rounded = 1024
+                        else if (m <= 2048) rounded = 2048
+                        else if (m < 3072) rounded = 3072
+                        else if (m <= 4096) rounded = 4096
+                        else rounded = (int((m + 128) / 256) * 256)
                         printf "   Soldered RAM: '"${GREEN}"'%d MB'"${RESET}"'\n", rounded
                         printf "   Available RAM: '"${GREEN}"'%.0f MB'"${RESET}"'\n", m
                     }' /proc/meminfo
@@ -324,8 +332,34 @@ show_hardware_info() {
                 printf "\n"
                 
                 printf " %b\n" "${CYAN}Storage:${RESET}"
-                # 1. Check for eMMC (Brume 2/3, Flint 2/3, etc.)
-                if [ -b /dev/mmcblk0 ]; then
+                # 1. Primary: GL.iNet Universal Hardware Info (4.x+ Firmware)
+                if [ -f /proc/gl-hw-info/flash_size ]; then
+                    flash_raw=$(cat /proc/gl-hw-info/flash_size | sed 's/MiB/MB/')
+                    
+                    # Determine type: eMMC is usually > 1GB or specifically on Brume/Flint series
+                    # But we can be precise by checking for the block device existence
+                    if [ -b /dev/mmcblk0 ]; then
+                        type="eMMC"
+                    else
+                        type="NAND Flash"
+                    fi
+                    printf "   Physical %s: %b%s%b\n" "$type" "${GREEN}" "$flash_raw" "${RESET}"
+                
+                # 2. Smart dmesg detection
+                elif dmesg | grep -iE "nand|spi|mtd|mmc" | grep -iq "MiB"; then
+                    d_line=$(dmesg | grep -iE "nand|spi|mtd|mmc" | grep -i "MiB" | head -n 1)
+                    d_size=$(echo "$d_line" | grep -oE '[0-9]+ MiB' | sed 's/MiB/MB/')
+                    
+                    case "$(echo "$d_line" | tr '[:upper:]' '[:lower:]')" in
+                        *nand*) type="NAND Flash" ;;
+                        *spi*)  type="SPI Flash" ;;
+                        *mmc*)  type="eMMC" ;;
+                        *)      type="Flash Storage" ;;
+                    esac
+                    printf "   Physical %s: %b%s%b\n" "$type" "${GREEN}" "$d_size" "${RESET}"
+                
+                # 3. Check for eMMC
+                elif [ -b /dev/mmcblk0 ]; then
                     mmc_blocks=$(cat /sys/block/mmcblk0/size)
                     # Convert 512-byte blocks to MB
                     mmc_mb=$((mmc_blocks * 512 / 1024 / 1024))
@@ -337,7 +371,7 @@ show_hardware_info() {
                         printf "   Physical eMMC: %b%d MB%b\n" "${GREEN}" "$mmc_mb" "${RESET}"
                     fi
 
-                # 2. Fallback to MTD (Slate 7 Pro, Beryl, etc.)
+                # 4. Fallback to MTD 
                 elif [ -f /proc/mtd ]; then
                     max_hex=$(awk 'NR>1 {print $2}' /proc/mtd | sort -r | head -n 1)
                     
@@ -2913,7 +2947,8 @@ if [ ! -f "$AGH_INIT" ]; then
     # Second check: If still missing after the user had a chance to fix it
     if [ ! -f "$AGH_INIT" ]; then
         AGH_DISABLED=1
-        print_warning "Recovery failed. AdGuardHome features will be disabled.\n"
+        printf "\n"
+        print_warning "Recovery failed or cancelled. AdGuardHome features will be disabled.\n"
         sleep 2
     fi
 fi

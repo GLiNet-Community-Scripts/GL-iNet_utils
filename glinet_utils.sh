@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-02-21
+# Version: 2026-02-22
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -2970,7 +2970,7 @@ show_menu() {
         printf "6️⃣  Check for Update\n"
         printf "7️⃣  Install/Manage OpenSpeedTest Server\n"
         printf "0️⃣  Exit\n"
-        printf "\nChoose [1-6/0]: "
+        printf "\nChoose [1-7/0]: "
         read opt
         
         case $opt in

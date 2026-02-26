@@ -18,7 +18,6 @@
 
 ## Features
 
-- 🚀 Key Features
 - 🖥️ Deep Hardware Insights – Total visibility into your CPU, RAM, and storage. Includes paged navigation for network interfaces and wireless radio details.
 - 🛡️ VPN Crypto Audit – Instantly verify if your hardware acceleration (AES-CE, NEON) is actually active for OpenVPN and WireGuard.
 - 🛠️ AdGuardHome Control Center – A central hub to toggle the service, manage UI auto-updates, and bulk-import blocklists or allowlists.

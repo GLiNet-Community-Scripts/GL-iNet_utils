@@ -26,7 +26,7 @@
 - 💾 Zram Swap Management – Essential for lower-RAM travel routers like the Beryl 7. Easily install and tune compressed RAM swap to prevent out-of-memory crashes.
 - 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput compared to a Beryl 7 baseline.
 - 📋 Secure UCI Viewer – Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
-- 🚀 OpenSpeedTest Integration - Automated download and deployment of the OpenSpeedTest server scipt for optimized local network speed diagnostics.
+- 🚀 OpenSpeedTest Integration - Automated download and deployment of the OpenSpeedTest server script for optimized local network speed diagnostics.
 - 🔄 Native Self-Updater – Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 GPL-3.0 Licensed – Free, open, and community-driven.
 

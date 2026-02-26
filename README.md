@@ -18,15 +18,16 @@
 
 ## Features
 
-- 🖥️ Deep Hardware Insights – Total visibility into your CPU, RAM, and storage. Includes paged navigation for network interfaces and wireless radio details.
-- 🛡️ VPN Crypto Audit – Instantly verify if your hardware acceleration (AES-CE, NEON) is actually active for OpenVPN and WireGuard.
-- 🛠️ AdGuardHome Control Center – A central hub to toggle the service, manage UI auto-updates, and bulk-import blocklists or allowlists.
-- 🆘 Fail-Safe Recovery – "Industrial" self-healing logic. If your AGH binary or init script goes missing, the script can pull pristine copies directly from the device's /rom to fix the install.
-- 📦 Surgical Backups – Precision-tracked backups with 2-digit decimal accuracy. Create, manage, and restore configurations with automated timestamping.
-- 💾 Zram Swap Management – Essential for low-RAM travel routers. Easily install and tune compressed RAM swap to prevent out-of-memory crashes.
-- 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput.
-- 📋 Secure UCI Viewer – Quick, read-only access to your system config. Check SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
-- 🔄 Native Self-Updater – Stay current without manual downloads. The script checks GitHub on launch and can update itself in place.
+- 🖥️ Deep Hardware Insights – Total visibility into your CPU, RAM, and storage. Includes paged navigation for network interfaces and wireless radio details (Link speeds, MIMO, Channel bandwidth).
+- 🛡️ VPN Crypto Audit – Instantly verify if your hardware acceleration (AES-CE, NEON) is active at the kernel level for optimized OpenVPN and WireGuard performance.
+- 🛠️ AdGuardHome Control Center – A central hub to toggle the service, manage/enable UI updates, and bulk manage a pre-set list of blocklists and allowlists. Manage persisting AdGuardHome updates through firmware updates.
+- 🆘 Fail-Safe Recovery – "Industrial" self-healing logic. If your AGH binary or init scripts are corrupted, the script pulls pristine copies directly from the device's /rom to restore functionality.
+- 📦 Surgical Backups for AdGuardHome – Precision-tracked AdGuardHome backups. Create, manage, and restore configurations, binaries, and init scripts with automated timestamping and integrity checks.
+- 💾 Zram Swap Management – Essential for lower-RAM travel routers like the Beryl 7. Easily install and tune compressed RAM swap to prevent out-of-memory crashes.
+- 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput compared to a Beryl 7 baseline.
+- 📋 Secure UCI Viewer – Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
+- 🚀 OpenSpeedTest Integration - Automated download and deployment of the OpenSpeedTest server scipt for optimized local network speed diagnostics.
+- 🔄 Native Self-Updater – Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 GPL-3.0 Licensed – Free, open, and community-driven.
 
 Tested on various GL.iNet models (Beryl, Beryl AX, Beryl 7, Slate 7, Flint 3, Flint 3e, etc.) running recent firmware.

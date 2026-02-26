@@ -68,6 +68,7 @@ Options may vary as new utilities are added, but generally include:
 4️⃣  System Benchmarks (CPU & Disk)
 5️⃣  View System Configuration (UCI)
 6️⃣  Check for Update
+7️⃣  Install/Manage OpenSpeedTest Server
 0️⃣  Exit
 
 ```
@@ -87,9 +88,11 @@ AdGuardHome Control Center
 System Benchmarks
 
 ```
-1️⃣  CPU Stress Test
+1️⃣  CPU Thermal Stress Test
 2️⃣  CPU Benchmark (OpenSSL)
 3️⃣  Disk I/O Benchmark
+4️⃣  Memory I/O Benchmark
+5️⃣  DNS Benchmark
 0️⃣  Main menu
 ```
 

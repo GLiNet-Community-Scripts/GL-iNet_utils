@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-02-22
+# Version: 2026-02-28
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -255,19 +255,28 @@ is_agh_running() {
 show_hardware_info() {
     page=1
     total_pages=4
-    
+    nav_choice=""
+    clear
+
     while true; do
-        clear
+        if [ "$page" -eq 1 ]; then 
+            printf '\033[H'
+            else 
+                clear
+        fi
         print_centered_header "Hardware Information"
         printf " ──────────────────────────────────────────────────────────────────────────────\n"
         case $page in
             1)
+                fsdata=$(df -h | head -1 | sed 's/^/   /')
+                fstmp=$(df -h | grep -E "^/dev/" | grep -v "tmpfs" | head -3 | sed 's/^/   /')
+                
                 printf " %b%bPage 1 of $total_pages: System Overview%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
                 printf " %b\n" "${CYAN}System Information:${RESET}"
                 if command -v uci >/dev/null 2>&1; then
                     hostname=$(uci get system.@system[0].hostname 2>/dev/null)
-                    [ -n "$hostname" ] && printf "   Model: %b%s%b\n" "${GREEN}" "$hostname" "${RESET}"
+                    [ -n "$hostname" ] && printf "   Model:    %b%s%b\n" "${GREEN}" "$hostname" "${RESET}"
                 fi
                 
                 if [ -f /etc/glversion ]; then
@@ -279,21 +288,33 @@ show_hardware_info() {
                     board=$(grep -o '"model"[[:space:]]*:[[:space:]]*"[^"]*"' /etc/board.json | head -1 | cut -d'"' -f4)
                     [ -n "$board" ] && printf " Board: %b%s%b\n" "${GREEN}" "$board" "${RESET}"
                 fi
+
+                if [ -f /proc/uptime ]; then
+                    uptime_raw=$(cat /proc/uptime | cut -d. -f1)
+                    up_d=$((uptime_raw / 86400))
+                    up_h=$(( (uptime_raw % 86400) / 3600 ))
+                    up_m=$(( (uptime_raw % 3600) / 60 ))
+                    up_s=$(( uptime_raw % 60 ))  
+                    printf "   Uptime:   %b%d Day(s), %02d:%02d:%02d %b\n" \
+                        "${GREEN}" "$up_d" "$up_h" "$up_m" "$up_s" "${RESET}"
+                else
+                    printf "   Uptime:   %bUnknown%b\n" "${YELLOW}" "${RESET}"
+                fi
                 printf "\n"
                 
                 printf " %b\n" "${CYAN}CPU:${RESET}"
                 cpu_vendor_model=$(get_cpu_vendor_model)
-                printf "   Vendor/Model: %b%s%b\n" "${GREEN}" "$cpu_vendor_model" "${RESET}"
+                printf "   Vendor/Model:    %b%s%b\n" "${GREEN}" "$cpu_vendor_model" "${RESET}"
                 
                 ensure_lscpu
                 if command -v lscpu >/dev/null 2>&1; then
                     cpu_cores=$(lscpu 2>/dev/null | grep "^CPU(s):" | awk '{print $2}')
                     cpu_freq=$(lscpu 2>/dev/null | grep "CPU max MHz" | awk '{print $4}')
                     [ -z "$cpu_freq" ] && cpu_freq=$(lscpu 2>/dev/null | grep "CPU MHz" | awk '{print $3}')
-                    [ -n "$cpu_cores" ] && printf "   Cores: %b%s%b\n" "${GREEN}" "$cpu_cores" "${RESET}"
+                    [ -n "$cpu_cores" ] && printf "   Cores:           %b%s%b\n" "${GREEN}" "$cpu_cores" "${RESET}"
                 else
                     cpu_cores=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
-                    [ -n "$cpu_cores" ] && printf "   Cores: %b%s%b\n" "${GREEN}" "$cpu_cores" "${RESET}"
+                    [ -n "$cpu_cores" ] && printf "   Cores:           %b%s%b\n" "${GREEN}" "$cpu_cores" "${RESET}"
                 fi
 
                 if [ -z "$cpu_freq" ]; then
@@ -303,31 +324,56 @@ show_hardware_info() {
                     esac
                 fi
 
-                [ -n "$cpu_freq" ] && printf "   Frequency: %b%.0f MHz%b\n" "${GREEN}" "$cpu_freq" "${RESET}"
+                [ -n "$cpu_freq" ] && printf "   Frequency:       %b%.0f MHz%b\n" "${GREEN}" "$cpu_freq" "${RESET}"
 
                 cpu_load=$(cat /proc/loadavg | awk '{print $1 ", " $2 ", " $3}')
-                [ -n "$cpu_load" ] && printf "   Load Average: %b%s%b\n" "${GREEN}" "$cpu_load" "${RESET}"
+                [ -n "$cpu_load" ] && printf "   Load Average:    %b%s%b\033[K\n" "${GREEN}" "$cpu_load" "${RESET}"
+                
+                temp_path=$(cat /proc/gl-hw-info/temperature 2>/dev/null)
+                if [ -f "$temp_path" ]; then
+                    raw_temp=$(cat "$temp_path")
+                    if [ "$raw_temp" -ge 1000 ]; then
+                        whole=$((raw_temp / 1000))
+                        decimal=$(( (raw_temp % 1000) / 10 ))
+                        printf "   CPU Temperature: %b%d.%d°C%b\033[K\n" "${GREEN}" "$whole" "$decimal" "${RESET}"
+                    else
+                         printf "   CPU Temperature: %bUnknown%b\033[K\n" "${YELLOW}" "${RESET}"
+                    fi
+                else
+                    printf "   CPU Temperature: %bUnknown%b\033[K\n" "${YELLOW}" "${RESET}"
+                fi
                 
                 fan_speed=$(cat /sys/class/hwmon/hwmon*/fan*_input 2>/dev/null | head -1)
-                [ -n "$fan_speed" ] && printf "   Fan Speed: %b%s RPM%b\n" "${GREEN}" "$fan_speed" "${RESET}"
+                [ -n "$fan_speed" ] && printf "   Fan Speed:       %b%s RPM%b\033[K\n" "${GREEN}" "$fan_speed" "${RESET}"
                 
                 printf "\n %b\n" "${CYAN}Memory:${RESET}"
                 if [ -f /proc/meminfo ]; then
-                    awk '/MemTotal/ {
-                        m = $2 / 1024
-                        if (m <= 32) rounded = 32
-                        else if (m <= 64) rounded = 64
-                        else if (m <= 128) rounded = 128
-                        else if (m <= 256) rounded = 256
-                        else if (m <= 512) rounded = 512
-                        else if (m <= 1024) rounded = 1024
-                        else if (m <= 2048) rounded = 2048
-                        else if (m < 3072) rounded = 3072
-                        else if (m <= 4096) rounded = 4096
-                        else rounded = (int((m + 128) / 256) * 256)
-                        printf "   Soldered RAM: '"${GREEN}"'%d MB'"${RESET}"'\n", rounded
-                        printf "   Available RAM: '"${GREEN}"'%.0f MB'"${RESET}"'\n", m
-                    }' /proc/meminfo
+                    awk '
+                        /MemTotal/ { t = $2 / 1024 }
+                        /MemAvailable/ { a = $2 / 1024 }
+                        END {
+                            # 1. Use t (Total) for your rounding logic
+                            m = t
+                            if (m <= 32) rounded = 32
+                            else if (m <= 64) rounded = 64
+                            else if (m <= 128) rounded = 128
+                            else if (m <= 256) rounded = 256
+                            else if (m <= 512) rounded = 512
+                            else if (m <= 1024) rounded = 1024
+                            else if (m <= 2048) rounded = 2048
+                            else if (m < 3072) rounded = 3072
+                            else if (m <= 4096) rounded = 4096
+                            else rounded = (int((m + 128) / 256) * 256)
+                            
+                            # 2. Perform math now that both t and a are known
+                            u = t - a
+                            p = (t > 0) ? (u / t * 100) : 0
+
+                            # 3. Print using your exact formatting
+                            printf "   Soldered RAM:  '"${GREEN}"'%d MB'"${RESET}"'\n", rounded
+                            printf "   Available RAM: '"${GREEN}"'%.0f MB'"${RESET}"'\n", m
+                            printf "   Used RAM:      '"${GREEN}"'%.0f MB (%.1f%%)'"${RESET}"'\033[K\n", u, p
+                        }' /proc/meminfo
                 fi
                 printf "\n"
                 
@@ -392,8 +438,7 @@ show_hardware_info() {
                 fi
                 
                 printf "\n %b\n" "${CYAN}Filesystem Usage:${RESET}"
-                df -h | head -1 | sed 's/^/   /'
-                df -h | grep -E "^/dev/" | grep -v "tmpfs" | head -3 | sed 's/^/   /'
+                printf "%b\n%b\n" "$fsdata" "$fstmp"
                 ;;
                 
             2)
@@ -579,14 +624,19 @@ show_hardware_info() {
         done
         printf "  [N] Next   [0] Main menu  "
         
-        nav_choice=$(read_single_char)
+        if [ "$page" -eq 1 ]; then
+            read -t 1 -n 1 nav_choice
+        else
+            nav_choice=$(read_single_char)
+        fi
         
         case "$nav_choice" in
-            p|P|b|B) [ $page -gt 1 ] && page=$((page - 1)) ;;
-            n|N) [ $page -lt $total_pages ] && page=$((page + 1)) ;;
+            p|P|b|B) [ $page -gt 1 ] && page=$((page - 1)) && clear;;
+            n|N) [ $page -lt $total_pages ] && page=$((page + 1)) && clear;;
             1|2|3|4) 
-                if [ "$nav_choice" -ge 1 ] 2>/dev/null && [ "$nav_choice" -le $total_pages ]; then
+                if [ "$page" -ne "$nav_choice" ]; then
                     page=$nav_choice
+                    clear
                 fi
                 ;;
             m|M|0) return ;;

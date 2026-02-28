@@ -2283,9 +2283,14 @@ benchmark_system() {
                     fi
                     opkg install stress >/dev/null 2>&1
                     if ! command -v stress >/dev/null 2>&1; then
-                        print_error "Failed to install stress"
-                        press_any_key
-                        continue
+                        opkg install stress-ng >/dev/null 2>&1
+                        if ! command -v stress-ng >/dev/null 2>&1; then
+                            print_error "Failed to install stress"
+                            press_any_key
+                            continue
+                        else 
+                            ln -s "$(which stress-ng)" /usr/bin/stress
+                        fi
                     fi
                 fi
 

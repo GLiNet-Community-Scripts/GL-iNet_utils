@@ -18,7 +18,7 @@
 
 ## Features
 
-- 🖥️ Deep Hardware Insights – Total visibility into your CPU, RAM, and storage. Includes paged navigation for network interfaces and wireless radio details (Link speeds, MIMO, Channel bandwidth).
+- 🖥️ Deep Hardware Insights – Total visibility into your CPU, RAM, and storage with real-time monitoring of uptime, CPU temp, and fan speeds. Includes paged navigation for network interfaces and wireless radio details (Link speeds, MIMO, Channel bandwidth).
 - 🛡️ VPN Crypto Audit – Instantly verify if your hardware acceleration (AES-CE, NEON) is active at the kernel level for optimized OpenVPN and WireGuard performance.
 - 🛠️ AdGuardHome Control Center – A central hub to toggle the service, manage/enable UI updates, and bulk manage a pre-set list of blocklists and allowlists. Manage persisting AdGuardHome updates through firmware updates.
 - 🆘 Fail-Safe Recovery – "Industrial" self-healing logic. If your AGH binary or init scripts are corrupted, the script pulls pristine copies directly from the device's /rom to restore functionality.

@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-02-28
+# Version: 2026-03-01
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -46,6 +46,7 @@ SCRIPT_URL="https://raw.githubusercontent.com/phantasm22/GL-iNet_utils/refs/head
 TMP_NEW_SCRIPT="/tmp/glinet_utils_new.sh"
 SCRIPT_PATH="$0"
 [ "${SCRIPT_PATH#*/}" != "$SCRIPT_PATH" ] || SCRIPT_PATH="$(pwd)/$SCRIPT_PATH"
+opkg_updated=0
 
 # -----------------------------
 # Cleanup any previous updates
@@ -185,13 +186,52 @@ check_self_update() {
 # -----------------------------
 # System Detection Functions
 # -----------------------------
-ensure_lscpu() {
-    if ! command -v lscpu >/dev/null 2>&1; then
-        if [ "$opkg_updated" -eq 0 ]; then
-            opkg update >/dev/null 2>&1
-            opkg_updated=1
-        fi
-        opkg install lscpu >/dev/null 2>&1
+check_opkg_updated() {
+    if [ "$opkg_updated" -eq 0 ]; then
+        print_info "Updating package lists...\n"
+        opkg update >/dev/null 2>&1
+        opkg_updated=1
+    fi
+}
+
+get_free_space() {
+        local path="$1"
+        while [ -n "$path" ] && [ ! -d "$path" ]; do
+            path="${path%/*}"
+        done
+        [ -z "$path" ] && path="/"
+        df -Ph "$path" 2>/dev/null | awk 'NR==2 {print $4}'
+    }
+
+get_fan_speed() {
+    local fan_val=""
+    local gl_path="/proc/gl-hw-info/fan"
+    if [ -f "$gl_path" ]; then
+        local node=$(awk '{print $1}' "$gl_path" 2>/dev/null)
+        [ -n "$node" ] && fan_val=$(cat /sys/class/hwmon/"$node"/fan*_input 2>/dev/null | head -n1)
+    fi
+    if [ -z "$fan_val" ]; then
+        fan_val=$(cat /sys/class/hwmon/hwmon*/fan*_input 2>/dev/null | head -n1)
+    fi
+    echo "${fan_val:-N/A}"
+}
+
+get_cpu_temp() {
+    local raw_temp=""
+    local temp_path=$(cat /proc/gl-hw-info/temperature 2>/dev/null)
+    if [ -f "$temp_path" ]; then
+        raw_temp=$(cat "$temp_path" 2>/dev/null)
+    fi
+    if [ -z "$raw_temp" ]; then
+        raw_temp=$(cat /sys/class/hwmon/hwmon*/temp*_input 2>/dev/null | head -n1)
+    fi
+    if [ -n "$raw_temp" ] && [ "$raw_temp" -ge 1000 ]; then
+        local whole=$((raw_temp / 1000))
+        local decimal=$(( (raw_temp % 1000) / 10 ))
+        local formatted_decimal=$(printf "%02d" "$decimal")
+        echo "$whole.$formatted_decimal"
+    else
+        echo "unknown"
     fi
 }
 
@@ -256,7 +296,16 @@ show_hardware_info() {
     page=1
     total_pages=4
     nav_choice=""
+    
     clear
+    
+    if ! command -v lscpu >/dev/null 2>&1; then
+        print_centered_header "Hardware Information"
+        check_opkg_updated
+        print_info "Installing lscpu for enhanced CPU information...\n"
+        opkg install lscpu >/dev/null 2>&1
+        clear
+    fi
 
     while true; do
         if [ "$page" -eq 1 ]; then 
@@ -268,8 +317,8 @@ show_hardware_info() {
         printf " ──────────────────────────────────────────────────────────────────────────────\n"
         case $page in
             1)
-                fsdata=$(df -h | head -1 | sed 's/^/   /')
-                fstmp=$(df -h | grep -E "^/dev/" | grep -v "tmpfs" | head -3 | sed 's/^/   /')
+                fsdata=$(df -Ph | head -1 | sed 's/^/   /')
+                fstmp=$(df -Ph | grep -E "^/dev/" | grep -v "tmpfs" | head -3 | sed 's/^/   /')
                 
                 printf " %b%bPage 1 of $total_pages: System Overview%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
@@ -295,8 +344,7 @@ show_hardware_info() {
                     up_h=$(( (uptime_raw % 86400) / 3600 ))
                     up_m=$(( (uptime_raw % 3600) / 60 ))
                     up_s=$(( uptime_raw % 60 ))  
-                    printf "   Uptime:   %b%d Day(s), %02d:%02d:%02d %b\n" \
-                        "${GREEN}" "$up_d" "$up_h" "$up_m" "$up_s" "${RESET}"
+                    printf "   Uptime:   %b%d Day(s), %02d:%02d:%02d%b\n" "${GREEN}" "$up_d" "$up_h" "$up_m" "$up_s" "${RESET}"
                 else
                     printf "   Uptime:   %bUnknown%b\n" "${YELLOW}" "${RESET}"
                 fi
@@ -306,7 +354,6 @@ show_hardware_info() {
                 cpu_vendor_model=$(get_cpu_vendor_model)
                 printf "   Vendor/Model:    %b%s%b\n" "${GREEN}" "$cpu_vendor_model" "${RESET}"
                 
-                ensure_lscpu
                 if command -v lscpu >/dev/null 2>&1; then
                     cpu_cores=$(lscpu 2>/dev/null | grep "^CPU(s):" | awk '{print $2}')
                     cpu_freq=$(lscpu 2>/dev/null | grep "CPU max MHz" | awk '{print $4}')
@@ -329,21 +376,14 @@ show_hardware_info() {
                 cpu_load=$(cat /proc/loadavg | awk '{print $1 ", " $2 ", " $3}')
                 [ -n "$cpu_load" ] && printf "   Load Average:    %b%s%b\033[K\n" "${GREEN}" "$cpu_load" "${RESET}"
                 
-                temp_path=$(cat /proc/gl-hw-info/temperature 2>/dev/null)
-                if [ -f "$temp_path" ]; then
-                    raw_temp=$(cat "$temp_path")
-                    if [ "$raw_temp" -ge 1000 ]; then
-                        whole=$((raw_temp / 1000))
-                        decimal=$(( (raw_temp % 1000) / 10 ))
-                        printf "   CPU Temperature: %b%d.%d°C%b\033[K\n" "${GREEN}" "$whole" "$decimal" "${RESET}"
-                    else
-                         printf "   CPU Temperature: %bUnknown%b\033[K\n" "${YELLOW}" "${RESET}"
-                    fi
-                else
+                cpu_temp=$(get_cpu_temp)
+                if [ "$cpu_temp" = "unknown" ]; then
                     printf "   CPU Temperature: %bUnknown%b\033[K\n" "${YELLOW}" "${RESET}"
+                else
+                    printf "   CPU Temperature: %b%s°C%b\033[K\n" "${GREEN}" "$cpu_temp" "${RESET}"
                 fi
                 
-                fan_speed=$(cat /sys/class/hwmon/hwmon*/fan*_input 2>/dev/null | head -1)
+                fan_speed=$(get_fan_speed)
                 [ -n "$fan_speed" ] && printf "   Fan Speed:       %b%s RPM%b\033[K\n" "${GREEN}" "$fan_speed" "${RESET}"
                 
                 printf "\n %b\n" "${CYAN}Memory:${RESET}"
@@ -887,19 +927,19 @@ manage_agh_storage() {
         
          if [ -d "$AGH_WORKDIR/data" ]; then
             printf  " %b\n" "${CYAN}$AGH_WORKDIR/data Directory:${RESET}"
-            df -h "$AGH_WORKDIR/data" 2>/dev/null | tail -1 | awk '{printf "   Total: %s | Used: %s | Free: %s\n", $2, $3, $4}'
+            df -Ph "$AGH_WORKDIR/data" 2>/dev/null | tail -1 | awk '{printf "   Total: %s | Used: %s | Free: %s\n", $2, $3, $4}'
         fi
         
         if [ -d "$AGH_WORKDIR/data/filters" ]; then
             printf "\n %b\n" "${CYAN}$AGH_WORKDIR/data/filters Directory:${RESET}"
-            df -h "$AGH_WORKDIR/data/filters" 2>/dev/null | tail -1 | awk '{printf "   Total: %s | Used: %s | Free: %s\n", $2, $3, $4}'
+            df -Ph "$AGH_WORKDIR/data/filters" 2>/dev/null | tail -1 | awk '{printf "   Total: %s | Used: %s | Free: %s\n", $2, $3, $4}'
         fi     
         
         limit_active=0
         if grep -q "$AGH_WORKDIR/data/filters" /proc/mounts; then
             limit_active=1
             # Calculate actual size from the mount point
-            current_limit=$(df -m "$AGH_WORKDIR/data/filters" | tail -1 | awk '{print $2}')
+            current_limit=$(df -Pm "$AGH_WORKDIR/data/filters" | tail -1 | awk '{print $2}')
             printf "   Filter Space Limit: %bACTIVE (%sMB)%b\n" "${YELLOW}" "$current_limit" "${RESET}"
         else
             printf "   Filter Space Limit: %bINACTIVE%b\n" "${GREEN}" "${RESET}"
@@ -1341,7 +1381,8 @@ update_agh_credentials() {
     # Dependency Check
     if ! command -v htpasswd >/dev/null 2>&1; then
         print_info "Installing apache-utils...\n"
-        opkg update >/dev/null 2>&1 && opkg install apache-utils >/dev/null 2>&1
+        check_opkg_updated
+        opkg install apache-utils >/dev/null 2>&1
         if ! command -v htpasswd >/dev/null 2>&1; then
             print_error "Failed to install apache-utils. Cannot proceed."
             press_any_key
@@ -2029,7 +2070,7 @@ get_agh_stats() {
 
     # 4. Storage Metric: Filters
     filt_u=$(du -sh "$data_dir/filters" 2>/dev/null | awk '{print $1}')
-    filt_f=$(df -h "$data_dir/filters" 2>/dev/null | awk 'NR==2 {print $4}')
+    filt_f=$(get_free_space "$data_dir/filters")
 
     # 5. Storage Metric: Query Logs (DBs + JSON)
     local q_bytes=0
@@ -2037,7 +2078,7 @@ get_agh_stats() {
         [ -f "$f" ] && q_bytes=$((q_bytes + $(ls -nl "$f" | awk '{print $5}')))
     done
     qlog_u=$(awk "BEGIN {printf \"%.1fM\", ${q_bytes:-0}/1048576}")
-    qlog_f=$(df -h "$data_dir" 2>/dev/null | awk 'NR==2 {print $4}')
+    qlog_f=$(get_free_space "$data_dir")
 
     # 6. Backup Storage & Last Date
     local bk_locs="/etc/AdGuardHome /usr/bin /etc/init.d"
@@ -2184,11 +2225,7 @@ manage_zram() {
             1)
                 if ! opkg list-installed | grep -q "^zram-swap"; then
                     print_warning "zram-swap not installed, installing...\n"
-                    if [ "$opkg_updated" -eq 0 ]; then
-                        print_info "Updating package lists...\n"
-                        opkg update >/dev/null 2>&1
-                        opkg_updated=1
-                    fi
+                    check_opkg_updated
                     opkg install zram-swap >/dev/null 2>&1
                     if opkg list-installed | grep -q "^zram-swap"; then
                         print_success "zram-swap package installed\n"
@@ -2277,10 +2314,7 @@ benchmark_system() {
                 
                 if ! command -v stress >/dev/null 2>&1; then
                     print_warning "stress not found, installing..."
-                    if [ "$opkg_updated" -eq 0 ]; then
-                        opkg update >/dev/null 2>&1
-                        opkg_updated=1
-                    fi
+                    check_opkg_updated
                     opkg install stress >/dev/null 2>&1
                     if ! command -v stress >/dev/null 2>&1; then
                         opkg install stress-ng >/dev/null 2>&1
@@ -2296,26 +2330,13 @@ benchmark_system() {
 
                 get_temp() {
                     local raw_temp
-                    raw_temp=$(cat /sys/class/thermal/thermal_zone0/temp 2>/dev/null)
-                    if [ -n "$raw_temp" ]; then
-                        # Convert millidegrees to degrees
-                        local celsius=$(awk "BEGIN {print $raw_temp / 1000}")
-                        local fahrenheit=$(awk "BEGIN {print ($celsius * 1.8) + 32}")
-                        # Format to 1 decimal place
-                        printf "%.1f°C (%.1f°F)" "$celsius" "$fahrenheit"
+                    raw_temp=$(get_cpu_temp)
+                    if [ "$raw_temp" != "unknown" ]; then
+                        local celsius=$(awk "BEGIN {printf \"%.2f\", $raw_temp}")
+                        local fahrenheit=$(awk "BEGIN {printf \"%.2f\", ($raw_temp * 1.8) + 32}")
+                        printf "%s°C (%s°F)" "$celsius" "$fahrenheit"
                     else
                         printf "N/A"
-                    fi
-                }
-
-                get_fan_speed() {
-                    # Common paths for GL.iNet fan speed
-                    if [ -f "/sys/class/hwmon/hwmon0/fan1_input" ]; then
-                        cat "/sys/class/hwmon/hwmon0/fan1_input" 2>/dev/null | awk '{print $1 " RPM"}'
-                    elif [ -f "/sys/class/hwmon/hwmon1/fan1_input" ]; then
-                        cat "/sys/class/hwmon/hwmon1/fan1_input" 2>/dev/null | awk '{print $1 " RPM"}'
-                    else
-                        printf "N/A (Fanless)"
                     fi
                 }
                 
@@ -2330,22 +2351,41 @@ benchmark_system() {
                     ''|*[!0-9]*) duration=60 ;;
                 esac
 
+                raw_start=$(get_cpu_temp)
                 start_temp_str=$(get_temp)
                 start_fan_str=$(get_fan_speed)
                 
                 printf "\n%b\n" "${YELLOW}⏳ Running stress test on $cpu_cores cores for $duration seconds...${RESET}"
-                printf "Starting Stats: %b | %b\n\n" "${CYAN}$start_temp_str${RESET}" "${CYAN}$start_fan_str${RESET}"
-                
+                                
                 stress --cpu "$cpu_cores" --timeout "${duration}s"
 
+                raw_end=$(get_cpu_temp)
                 end_temp_str=$(get_temp)
                 end_fan_str=$(get_fan_speed)
+                usleep 3000000
+                raw_post=$(get_cpu_temp)
+                post_temp_str=$(get_temp)
+                post_fan_str=$(get_fan_speed)
                 
                 printf "\n"
                 print_success "Stress test completed\n"
-                printf "Final Stats:    %b | %b\n" "${RED}$end_temp_str${RESET}" "${RED}$end_fan_str${RESET}"
-                temp_diff=$(echo "$end_temp_str $start_temp_str" | awk '{print $1 - $3}')
-                printf "Temperature increase: %b+%.1f°C (+%.1f°F)%b\n" "${RED}" "$temp_diff" "$(awk "BEGIN {print $temp_diff * 1.8}")" "${RESET}"
+                if [ "$raw_start" != "unknown" ] && [ "$raw_end" != "unknown" ]; then
+                    diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_end - $raw_start}")
+                    diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_end - $raw_start) / 1000 * 1.8}")
+                    post_diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_post - $raw_start}")
+                    post_diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_post - $raw_start) / 1000 * 1.8}")
+                    
+                    # Fan % Changes
+                    fan_p=$(awk "BEGIN {if ($start_fan_str > 0) printf \"%+.1f\", (($end_fan_str - $start_fan_str) / $start_fan_str) * 100; else print \"+0.0\"}")
+                    fan_post_p=$(awk "BEGIN {if ($start_fan_str > 0) printf \"%+.1f\", (($post_fan_str - $start_fan_str) / $start_fan_str) * 100; else print \"+0.0\"}")
+
+                    # --- TABLE RENDER ---
+                    printf "     %-11s       %-16s     %-12s       %-15s\n" "PHASE" "TEMPERATURE" "Δ CHANGE" "FAN SPEED (Δ%)"
+                    printf "────────────────   ──────────────────   ────────────────   ────────────────────\n"
+                    printf "%-16s   %-18s         %-9s    %-20s\n" "Start" "$start_temp_str" "---" "$start_fan_str RPM"
+                    printf "%-16s   %-18s   %s°C (%s°F)   %s RPM (%s%%)\n" "End" "$end_temp_str" "$diff_c" "$diff_f" "$end_fan_str" "$fan_p"
+                    printf "%-16s   %-18s   %s°C (%s°F)   %s RPM (%s%%)\n" "End + 3s" "$post_temp_str" "$post_diff_c" "$post_diff_f" "$post_fan_str" "$fan_post_p"
+                fi         
                 press_any_key
                 ;;
             2)
@@ -2440,7 +2480,7 @@ EOF
                 BASE_W=119.05
                 BASE_R=10.62
 
-                available_kb=$(df -k . | awk 'NR==2 {print $4}')
+                available_kb=$(df -Pk . | awk 'NR==2 {print $4}')
                 
                 # Check for space (Using your established test_size logic)
                 if [ "$available_kb" -ge 1024000 ]; then test_size=1000; test_name="1GB"
@@ -2473,8 +2513,9 @@ EOF
                 r_end=$(get_ms)
                 
                 # --- UI Reporting (The SSL Style) ---
-                printf "\n%b%s Results:%b\n" "${CYAN}" "$test_name" "${RESET}"
-                printf "%-16s %-16s %-16s\n" "Type" "Speed" "% Δ Beryl 7"
+                printf "\n%b%s Results:%b\n\n" "${CYAN}" "$test_name" "${RESET}"
+                printf "     %-14s  %-15s  %-16s\n" "TYPE" "SPEED" "% Δ BERYL 7"
+                printf "──────────────   ──────────────   ────────────────────\n"
                 
                 # Use awk to process both results for precision and delta alignment
                 awk -v ws="$w_start" -v we="$w_end" -v rs="$r_start" -v re="$r_end" \
@@ -2540,8 +2581,9 @@ EOF
                 m_end=$(get_ms)
                 
                 # --- UI Reporting (The Unified Style) ---
-                printf "\n%bMemory Performance Results:%b\n" "${CYAN}" "${RESET}"
-                printf "%-16s %-16s %-16s\n" "Type" "Speed" "% Δ Beryl 7"
+                printf "\n%bMemory Performance Results:%b\n\n" "${CYAN}" "${RESET}"
+                printf "     %-14s  %-15s  %-16s\n" "TYPE" "SPEED" "% Δ BERYL 7"
+                printf "──────────────   ──────────────   ────────────────────\n"
                 
                 awk -v ms_s="$m_start" -v ms_e="$m_end" -v sz="$test_size" -v base="$BASE_MEM" \
                     -v r="$RED" -v g="$GREEN" -v res="$RESET" '
@@ -2582,8 +2624,8 @@ EOF
                 SERVERS="127.0.0.1 1.1.1.1 8.8.8.8 9.9.9.9"
                 SAMPLES=20  # Number of tests per server
                 
-                printf "%-22s %-8s %-8s %-8s\n" "DNS Server" "Min" "Avg" "Max"
-                printf "--------------------------------------------------------\n"
+                printf "     %-19s %-8s %-10s %-8s\n" "DNS Server" "Min" "Avg" "Max"
+                printf "─────────────────────  ───────  ───────  ───────────\n"
 
                 for server in $SERVERS; do
                     case $server in

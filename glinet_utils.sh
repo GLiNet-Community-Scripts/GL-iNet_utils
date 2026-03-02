@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-01
+# Version: 2026-03-02
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -2291,7 +2291,7 @@ manage_zram() {
 }
 
 # -----------------------------
-# CPU & Disk Benchmarks
+# System Benchmarks
 # -----------------------------
 benchmark_system() {
     while true; do
@@ -2302,6 +2302,7 @@ benchmark_system() {
         printf "3️⃣  Disk I/O Benchmark\n"
         printf "4️⃣  Memory I/O Benchmark\n"
         printf "5️⃣  DNS Benchmark\n"
+        printf "6️⃣  Ookla Network SpeedTest\n"
         printf "0️⃣  Main menu\n"
         printf "\nChoose [1-4/0]: "
         read -r bench_choice
@@ -2673,6 +2674,49 @@ EOF
                 
                 printf "\n"
                 print_success "DNS Benchmark completed"
+                press_any_key
+                ;;
+            6)
+                clear
+                print_centered_header "Ookla Network SpeedTest"
+                
+                if ! command -v speedtest >/dev/null 2>&1 || ! speedtest --version 2>&1 | grep -qi "ookla"; then
+                    print_warning "Ookla Speedtest not found, installing..."
+                    arch=$(uname -m)
+                    case "$arch" in
+                        aarch64) suffix="aarch64" ;;
+                        armv7*)  suffix="armhf"   ;;
+                        armv8*)  suffix="aarch64" ;;
+                        mips*)   suffix="mips"    ;;
+                        x86_64)  suffix="x86_64"  ;;
+                        *) print_error "Unsupported Arch: $arch"; continue ;;
+                    esac
+                    ver=$(wget -qO- https://www.speedtest.net/apps/cli | grep -oE "ookla-speedtest-[0-9.]+-linux-$suffix.tgz" | head -n1)
+                    [ -z "$ver" ] && ver="ookla-speedtest-1.2.0-linux-$suffix.tgz"
+                    if [ -n "$ver" ]; then
+                        url="https://install.speedtest.net/app/cli/$ver"
+                        wget -qO- "$url" | tar xz -C /usr/bin speedtest 2>/dev/null
+                        chmod +x /usr/bin/speedtest 2>/dev/null
+                        print_success "Installed: $(speedtest --version | head -n1)"
+                    else
+                        print_error "Could not find download link for $suffix"
+                        press_any_key
+                        continue
+                    fi
+                    if ! command -v speedtest >/dev/null 2>&1; then
+                        print_error "Failed to install Ookla Speedtest"
+                        press_any_key
+                        continue
+                    fi
+                fi
+                
+                printf "\n%b\n" "${YELLOW}⏳ Running Ookla SpeedTest...${RESET}"
+                printf "──────────────────────────────────────────────────────────────────────\n"
+
+                speedtest -a --accept-license --accept-gdpr 2>/dev/null
+                
+                printf "\n──────────────────────────────────────────────────────────────────────\n"
+                print_success "Ookla SpeedTest completed"         
                 press_any_key
                 ;;
             m|M|0)
@@ -3062,10 +3106,10 @@ show_menu() {
         printf "1️⃣  Show Hardware Information\n"
         printf "2️⃣  AdGuardHome Control Center\n"
         printf "3️⃣  Manage Zram Swap\n"
-        printf "4️⃣  System Benchmarks (CPU & Disk)\n"
+        printf "4️⃣  System Benchmarks\n"
         printf "5️⃣  View System Configuration (UCI)\n"
-        printf "6️⃣  Check for Update\n"
-        printf "7️⃣  Install/Manage OpenSpeedTest Server\n"
+        printf "6️⃣  Install/Manage OpenSpeedTest Server\n"
+        printf "7️⃣  Check for Update\n"
         printf "0️⃣  Exit\n"
         printf "\nChoose [1-7/0]: "
         read opt
@@ -3076,8 +3120,8 @@ show_menu() {
             3) manage_zram ;;
             4) benchmark_system ;;
             5) view_uci_config ;;
-            6) check_self_update "$@"; press_any_key ;;
-            7) install_openspeedtest ;;
+            6) install_openspeedtest ;;
+            7) check_self_update "$@"; press_any_key ;;
             0) clear; printf "\n"; print_success "Thanks for using GL.iNet Toolkit!\n"; exit 0 ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac

@@ -2372,20 +2372,25 @@ benchmark_system() {
                 print_success "Stress test completed\n"
                 if [ "$raw_start" != "unknown" ] && [ "$raw_end" != "unknown" ]; then
                     diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_end - $raw_start}")
-                    diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_end - $raw_start) / 1000 * 1.8}")
+                    diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_end - $raw_start) * 1.8}")
                     post_diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_post - $raw_start}")
-                    post_diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_post - $raw_start) / 1000 * 1.8}")
+                    post_diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_post - $raw_start) * 1.8}")
                     
                     # Fan % Changes
-                    fan_p=$(awk "BEGIN {if ($start_fan_str > 0) printf \"%+.1f\", (($end_fan_str - $start_fan_str) / $start_fan_str) * 100; else print \"+0.0\"}")
-                    fan_post_p=$(awk "BEGIN {if ($start_fan_str > 0) printf \"%+.1f\", (($post_fan_str - $start_fan_str) / $start_fan_str) * 100; else print \"+0.0\"}")
-
+                    if [ "$start_fan_str" = "N/A" ] || [ "$start_fan_str" -eq 0 ] 2>/dev/null; then
+                        fan_p="+0.0"
+                        fan_post_p="+0.0"
+                    else
+                        fan_p=$(awk "BEGIN {printf \"%+.1f\", (($end_fan_str - $start_fan_str) / $start_fan_str) * 100}")
+                        fan_post_p=$(awk "BEGIN {printf \"%+.1f\", (($post_fan_str - $start_fan_str) / $start_fan_str) * 100}")
+                    fi
+                    
                     # --- TABLE RENDER ---
-                    printf "     %-11s       %-16s     %-12s       %-15s\n" "PHASE" "TEMPERATURE" "Δ CHANGE" "FAN SPEED (Δ%)"
-                    printf "────────────────   ──────────────────   ────────────────   ────────────────────\n"
-                    printf "%-16s   %-18s         %-9s    %-20s\n" "Start" "$start_temp_str" "---" "$start_fan_str RPM"
-                    printf "%-16s   %-18s   %s°C (%s°F)   %s RPM (%s%%)\n" "End" "$end_temp_str" "$diff_c" "$diff_f" "$end_fan_str" "$fan_p"
-                    printf "%-16s   %-18s   %s°C (%s°F)   %s RPM (%s%%)\n" "End + 3s" "$post_temp_str" "$post_diff_c" "$post_diff_f" "$post_fan_str" "$fan_post_p"
+                    printf "     %-16s %-22s %-16s %-15s\n" "PHASE" "TEMPERATURE" "Δ CHANGE" "FAN SPEED (Δ%)"
+                    printf "────────────────   ──────────────────   ──────────────────   ────────────────────\n"
+                    printf "%-18s %-30s %-12s %-12s\n" "Start" "$start_temp_str" "---" "$start_fan_str RPM"
+                    printf "%-18s %-22s %-8s %-13s %-4s %-12s\n" "End" "$end_temp_str" "$diff_c°C" "($diff_f°F)" "$end_fan_str RPM" "($fan_p%)"
+                    printf "%-18s %-22s %-8s %-13s %-4s %-12s\n" "End + 3s" "$post_temp_str" "$post_diff_c°C" "($post_diff_f°F)" "$post_fan_str RPM" "($fan_post_p%)"
                 fi         
                 press_any_key
                 ;;

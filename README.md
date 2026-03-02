@@ -24,7 +24,7 @@
 - 🆘 Fail-Safe Recovery – "Industrial" self-healing logic. If your AGH binary or init scripts are corrupted, the script pulls pristine copies directly from the device's /rom to restore functionality.
 - 📦 Surgical Backups for AdGuardHome – Precision-tracked AdGuardHome backups. Create, manage, and restore configurations, binaries, and init scripts with automated timestamping and integrity checks.
 - 💾 Zram Swap Management – Essential for lower-RAM travel routers like the Beryl 7. Easily install and tune compressed RAM swap to prevent out-of-memory crashes.
-- 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput compared to a Beryl 7 baseline.
+- 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput compared to a Beryl 7 baseline. Includes network benchmark leveraging Ookla Speedtest.
 - 📋 Secure UCI Viewer – Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
 - 🚀 OpenSpeedTest Integration - Automated download and deployment of the OpenSpeedTest server script for optimized local network speed diagnostics.
 - 🔄 Native Self-Updater – Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
@@ -61,14 +61,16 @@ wget -O glinet_utils.sh https://raw.githubusercontent.com/phantasm22/GL-iNet_uti
 When launched, the script presents an interactive menu system.  
 Options may vary as new utilities are added, but generally include:
 
+Main Menu
+
 ```
 1️⃣  Show Hardware Information
 2️⃣  AdGuardHome Control Center
 3️⃣  Manage Zram Swap
-4️⃣  System Benchmarks (CPU & Disk)
+4️⃣  System Benchmarks
 5️⃣  View System Configuration (UCI)
-6️⃣  Check for Update
-7️⃣  Install/Manage OpenSpeedTest Server
+6️⃣  Install/Manage OpenSpeedTest Server
+7️⃣  Check for Update
 0️⃣  Exit
 
 ```
@@ -93,6 +95,7 @@ System Benchmarks
 3️⃣  Disk I/O Benchmark
 4️⃣  Memory I/O Benchmark
 5️⃣  DNS Benchmark
+6️⃣  Ookla Network SpeedTest
 0️⃣  Main menu
 ```
 

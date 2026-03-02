@@ -781,7 +781,7 @@ manage_agh_ui_updates() {
         printf "4️⃣  Disable update persistence across firmware updates\n"
         printf "0️⃣  Return to previous menu\n"
         printf "❓ Help\n"
-        printf "\nChoose [1-2/0/?]: "
+        printf "\nChoose [1-4/0/?]: "
         read -r agh_choice
         printf "\n"
         
@@ -2304,7 +2304,7 @@ benchmark_system() {
         printf "5️⃣  DNS Benchmark\n"
         printf "6️⃣  Ookla Network SpeedTest\n"
         printf "0️⃣  Main menu\n"
-        printf "\nChoose [1-4/0]: "
+        printf "\nChoose [1-6/0]: "
         read -r bench_choice
         printf "\n"
         

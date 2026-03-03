@@ -556,7 +556,7 @@ show_hardware_info() {
                 
                 # --- 3. Physical Switch ---
                 if [ -n "$sw_list" ]; then
-                    printf "\n %b\n" "${CYAN}Physical Chassis Ports (The Truth):${RESET}"
+                    printf "\n %b\n" "${CYAN}Physical Chassis Ports:${RESET}"
                     echo "$sw_list" | awk '{print $2}' | while read sw; do
                         sw_model=$(echo "$sw_list" | grep "$sw" | awk -F' - ' '{print $2}')
                         p_count=$(swconfig dev "$sw" help 2>&1 | grep -oE "ports: [0-9]+" | awk '{print $2}')
@@ -2384,7 +2384,7 @@ benchmark_system() {
                         fan_p=$(awk "BEGIN {printf \"%+.1f\", (($end_fan_str - $start_fan_str) / $start_fan_str) * 100}")
                         fan_post_p=$(awk "BEGIN {printf \"%+.1f\", (($post_fan_str - $start_fan_str) / $start_fan_str) * 100}")
                     fi
-                    
+
                     # --- TABLE RENDER ---
                     printf "     %-16s %-22s %-16s %-15s\n" "PHASE" "TEMPERATURE" "Δ CHANGE" "FAN SPEED (Δ%)"
                     printf "────────────────   ──────────────────   ──────────────────   ────────────────────\n"

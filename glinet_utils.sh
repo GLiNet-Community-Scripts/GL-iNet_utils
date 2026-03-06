@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-02
+# Version: 2026-03-05
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -2293,6 +2293,188 @@ manage_zram() {
 # -----------------------------
 # System Benchmarks
 # -----------------------------
+
+show_librespeed_help() {
+    clear
+    print_centered_header "LibreSpeed SpeedTest - Help"
+    
+    cat << 'HELPEOF'
+LibreSpeed SpeedTest Server – Quick Help
+
+What is LibreSpeed?
+───────────────────
+LibreSpeed is a lightweight, open-source speed test server written in Go. Unlike 
+traditional speed tests that rely on external servers, this runs locally on your 
+router. This allows you to test the actual throughput of your LAN and Wi-Fi 
+without being limited by your ISP's internet speed.
+
+Main features on GL.iNet routers:
+• Zero Dependencies: Standalone Go binary; does not require Nginx or PHP.
+• Lightweight: Extremely low CPU and RAM footprint, ideal for travel routers.
+• Privacy Focused: No telemetry, no ads, and no data collection.
+• Local Benchmarking: Perfect for testing Wi-Fi 6/7 performance and signal dead zones.
+
+LibreSpeed vs. OpenSpeedTest:
+─────────────────────────────
+• LibreSpeed: Best for background monitoring and 1Gbps wireless audits. 
+  It is much lighter on system resources (RAM/CPU).
+• OpenSpeedTest: Better for high-stress 2.5G/10G throughput testing on 
+  powerful hardware (like the Flint 2/3) due to its multi-threaded nature.
+• Better Together: Both can run simultaneously on different ports (e.g., 8989 
+  and 8888) to allow A/B testing of your wireless environment.
+
+When should you use it?
+Yes → To find Wi-Fi dead zones or verify the max speed of your local network.
+Yes → To check if your VPN or SQM settings are bottlenecking your local speeds.
+No  → If you only care about your ISP's "Internet" speed (use Ookla for that).
+
+Important notes:
+• Listen Port: Defaults to :8989. Access via http://<router-ip>:8989
+• Persistence: Enabling persistence ensures the binary and settings survive 
+  firmware updates, preventing manual re-installation.
+• Procd Jail: Runs in a secure sandbox for improved router security.
+HELPEOF
+    
+    press_any_key
+}
+
+manage_librespeed() {
+    while true; do
+        clear
+        print_centered_header "LibreSpeed SpeedTest Management"
+        
+        LAN_IP=$(uci -q get network.lan.ipaddr || echo "192.168.8.1")
+        LISTEN_PORT=":8989"
+        UP_CONF="/etc/sysupgrade.conf"
+        
+        # Determine installation status once for the whole loop
+        if command -v librespeed-go >/dev/null 2>&1; then
+            IS_INSTALLED=1
+        else
+            IS_INSTALLED=0
+        fi
+
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        if [ "$IS_INSTALLED" -eq 1 ]; then
+            if [ "$(uci -q get librespeed-go.config.enabled)" = "1" ]; then
+                printf "   Service: %bENABLED%b\n" "${GREEN}" "${RESET}"
+                if netstat -ltn 2>/dev/null | grep -q "${LISTEN_PORT#:}"; then
+                    printf "   Status: %bACTIVE%b\n" "${GREEN}" "${RESET}"
+                    printf "   URL: %bhttp://$LAN_IP${LISTEN_PORT}%b\n" "${CYAN}" "${RESET}"
+                else
+                    printf "   Status: %bSTARTING/ERROR%b\n" "${YELLOW}" "${RESET}"
+                fi
+            else
+                printf "   Service: %bDISABLED%b\n" "${YELLOW}" "${RESET}"
+            fi
+            
+            # Check Persistence Status
+            persist_ok="1"
+            for entry in "/usr/bin/librespeed-go" "/etc/init.d/librespeed-go" "/etc/config/librespeed-go"; do
+                if ! grep -qFx "$entry" "$UP_CONF" 2>/dev/null; then
+                    persist_ok="0"
+                    break
+                fi
+            done
+            
+            if [ "$persist_ok" -eq "1" ]; then
+                printf "   Persistence: %bENABLED%b\n" "${GREEN}" "${RESET}"
+            else
+                printf "   Persistence: %bDISABLED%b\n" "${RED}" "${RESET}"
+            fi
+        else
+            printf "   Service: %bNOT INSTALLED%b\n" "${RED}" "${RESET}"
+        fi
+        
+        printf "\n1️⃣  Install and Enable\n"
+        printf "2️⃣  Disable Service\n"
+        printf "3️⃣  Toggle Persistence\n"
+        printf "4️⃣  Uninstall Package\n"
+        printf "0️⃣  Main menu\n"
+        printf "❓ Help\n"
+        printf "\nChoose [1-4/0/?]: "
+        read -r ls_choice
+        printf "\n"
+        
+        case $ls_choice in
+            1)
+                if [ "$IS_INSTALLED" -eq 0 ]; then
+                    print_warning "Installing LibreSpeed...\n"
+                    check_opkg_updated
+                    opkg install librespeed-go >/dev/null 2>&1
+                    grep -q "librespeed" /etc/passwd || echo "librespeed:x:500:500:librespeed:/var/run/librespeed-go:/bin/false" >> /etc/passwd
+                    IS_INSTALLED=1
+                fi
+
+                if [ ! -f "/etc/config/librespeed-go" ]; then
+                    touch /etc/config/librespeed-go
+                fi
+                
+                if ! uci -q get librespeed-go.config >/dev/null; then
+                    uci set librespeed-go.config=librespeed-go
+                fi
+
+                uci set librespeed-go.config.listen_addr="$LISTEN_PORT"
+                uci set librespeed-go.config.enabled='1'
+                uci commit librespeed-go
+                
+                /etc/init.d/librespeed-go restart >/dev/null 2>&1
+                print_success "LibreSpeed enabled at http://$LAN_IP${LISTEN_PORT}"
+                press_any_key
+                ;;
+            2)
+                if [ "$IS_INSTALLED" -eq 1 ]; then
+                    uci set librespeed-go.config.enabled='0'
+                    uci commit librespeed-go
+                    /etc/init.d/librespeed-go stop >/dev/null 2>&1
+                    print_success "LibreSpeed disabled"
+                else
+                    print_error "Nothing to disable: LibreSpeed is not installed."
+                fi
+                press_any_key
+                ;;
+            3)
+                if [ "$IS_INSTALLED" -eq 1 ]; then
+                    if [ "$persist_ok" -eq "0" ]; then
+                        for entry in "/usr/bin/librespeed-go" "/etc/init.d/librespeed-go" "/etc/config/librespeed-go"; do
+                            grep -qFx "$entry" "$UP_CONF" || echo "$entry" >> "$UP_CONF"
+                        done
+                        print_success "Persistence enabled in $UP_CONF"
+                    else
+                        sed -i "\|/usr/bin/librespeed-go|d" "$UP_CONF"
+                        sed -i "\|/etc/init.d/librespeed-go|d" "$UP_CONF"
+                        sed -i "\|/etc/config/librespeed-go|d" "$UP_CONF"
+                        print_success "Persistence disabled"
+                    fi
+                else
+                    print_error "Nothing to persist: LibreSpeed is not installed."
+                fi
+                press_any_key
+                ;;
+            4)
+                if [ "$IS_INSTALLED" -eq 1 ]; then
+                    printf "%b" "${YELLOW}Remove LibreSpeed package? [y/N]: ${RESET}"; read -r confirm
+                    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                        /etc/init.d/librespeed-go stop >/dev/null 2>&1
+                        opkg remove librespeed-go >/dev/null 2>&1
+                        # Always clean up persistence entries on uninstall
+                        sed -i "\|/usr/bin/librespeed-go|d" "$UP_CONF"
+                        sed -i "\|/etc/init.d/librespeed-go|d" "$UP_CONF"
+                        sed -i "\|/etc/config/librespeed-go|d" "$UP_CONF"
+                        print_success "LibreSpeed removed"
+                    fi
+                else
+                    print_error "Nothing to remove: LibreSpeed is not installed."
+                fi
+                press_any_key
+                ;;
+            0) return ;;
+            \?|h|H|❓) show_librespeed_help ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
 benchmark_system() {
     while true; do
         clear
@@ -2301,10 +2483,12 @@ benchmark_system() {
         printf "2️⃣  CPU Benchmark (OpenSSL)\n"
         printf "3️⃣  Disk I/O Benchmark\n"
         printf "4️⃣  Memory I/O Benchmark\n"
-        printf "5️⃣  DNS Benchmark\n"
-        printf "6️⃣  Ookla Network SpeedTest\n"
+        printf "5️⃣  DNS Latency Benchmark\n"
+        printf "6️⃣  Ookla Internet SpeedTest\n"
+        printf "7️⃣  LibreSpeed SpeedTest Server\n"
+        printf "8️⃣  OpenSpeedTest Server\n"
         printf "0️⃣  Main menu\n"
-        printf "\nChoose [1-6/0]: "
+        printf "\nChoose [1-8/0]: "
         read -r bench_choice
         printf "\n"
         
@@ -2724,6 +2908,8 @@ EOF
                 print_success "Ookla SpeedTest completed"         
                 press_any_key
                 ;;
+            7)  manage_librespeed ;;
+            8)  install_openspeedtest ;;
             m|M|0)
                 return
                 ;;
@@ -3113,10 +3299,9 @@ show_menu() {
         printf "3️⃣  Manage Zram Swap\n"
         printf "4️⃣  System Benchmarks\n"
         printf "5️⃣  View System Configuration (UCI)\n"
-        printf "6️⃣  Install/Manage OpenSpeedTest Server\n"
-        printf "7️⃣  Check for Update\n"
+        printf "6️⃣  Check for Update\n"
         printf "0️⃣  Exit\n"
-        printf "\nChoose [1-7/0]: "
+        printf "\nChoose [1-6/0]: "
         read opt
         
         case $opt in
@@ -3125,8 +3310,7 @@ show_menu() {
             3) manage_zram ;;
             4) benchmark_system ;;
             5) view_uci_config ;;
-            6) install_openspeedtest ;;
-            7) check_self_update "$@"; press_any_key ;;
+            6) check_self_update "$@"; press_any_key ;;
             0) clear; printf "\n"; print_success "Thanks for using GL.iNet Toolkit!\n"; exit 0 ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac

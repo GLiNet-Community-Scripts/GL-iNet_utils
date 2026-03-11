@@ -2908,8 +2908,7 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                                     install_ookla_speedtest
                                 else
                                     [ "$opkg_updated" -eq 0 ] && check_opkg_updated
-                                    printf "\n"
-                                    print_info "Installing $name..."
+                                    print_info "Installing $name...\n"
                                     opkg install "$name" >/dev/null 2>&1
                                 fi
                             fi

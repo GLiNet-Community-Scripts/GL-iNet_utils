@@ -1351,7 +1351,7 @@ show_agh_direct_help() {
    - OFF: Port 3000 redirects to Port 80 (Standard GL.iNet Login).
 
 2. WEB UI CREDENTIALS:
-   - Uses 'apache-utils' to generate a secure Bcrypt hash.
+   - Uses 'apache' to generate a secure Bcrypt hash.
    - This is necessary to prevent open access to your dashboard
      once you bypass the GL.iNet login gatekeeper.
 
@@ -1384,11 +1384,11 @@ update_agh_credentials() {
 
     # Dependency Check
     if ! command -v htpasswd >/dev/null 2>&1; then
-        print_info "Installing apache-utils...\n"
+        print_info "Installing apache utils...\n"
         check_opkg_updated
-        opkg install apache-utils >/dev/null 2>&1
+        opkg install apache >/dev/null 2>&1
         if ! command -v htpasswd >/dev/null 2>&1; then
-            print_error "Failed to install apache-utils. Cannot proceed."
+            print_error "Failed to install apache utils. Cannot proceed."
             press_any_key
             return
         fi
@@ -2736,9 +2736,10 @@ librespeed-go|/usr/bin/librespeed-go|R|/usr/bin/librespeed-go /etc/config/libres
 stress|/usr/bin/stress|B|/usr/bin/stress
 stress-ng|/usr/bin/stress-ng|B|/usr/bin/stress-ng
 lscpu|/usr/bin/lscpu|B|/usr/bin/lscpu
-apache-utils|/usr/bin/ab|B|/usr/bin/ab
+apache|/usr/bin/htpasswd|R|/usr/bin/htpasswd
 htop|/usr/bin/htop|B|/usr/bin/htop
 rsync|/usr/bin/rsync|B|/usr/bin/rsync
+vim-fuller/usr/bin/vim|B|/usr/bin/vim
 speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
 
     local map_file="/tmp/pkg_manage_map"

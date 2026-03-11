@@ -23,10 +23,9 @@
 - 🛠️ AdGuardHome Control Center – A central hub to toggle the service, manage/enable UI updates, and bulk manage a pre-set list of blocklists and allowlists. Manage persisting AdGuardHome updates through firmware updates.
 - 🆘 Fail-Safe Recovery – "Industrial" self-healing logic. If your AGH binary or init scripts are corrupted, the script pulls pristine copies directly from the device's /rom to restore functionality.
 - 📦 Surgical Backups for AdGuardHome – Precision-tracked AdGuardHome backups. Create, manage, and restore configurations, binaries, and init scripts with automated timestamping and integrity checks.
-- 💾 Zram Swap Management – Essential for lower-RAM travel routers like the Beryl 7. Easily install and tune compressed RAM swap to prevent out-of-memory crashes.
-- 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput compared to a Beryl 7 baseline. Includes network benchmark leveraging Ookla Speedtest.
+- ⚙️ System Tweaks – Zram - Essential for lower-RAM travel routers like the Beryl 7. Easily install and tune compressed RAM swap to prevent out-of-memory crashes. Package Tool manager to manage and persist your favorite essential tools. SSH Key installer to avoid going through Luci. Fan speed control to manage min, max, fan-on, and warning. Direct integration with the UI. 
+- 📊 Performance Benchmarks – Real-world testing including stressing CPU cycles, OpenSSL throughput, raw Disk and Memory I/O speeds, and DNS throughput compared to a Beryl 7 baseline. Includes network benchmark leveraging Ookla Speedtest and Librespeed Test server along with OpenSpeedTest Server integration
 - 📋 Secure UCI Viewer – Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
-- 🚀 OpenSpeedTest Integration - Automated download and deployment of the OpenSpeedTest server script for optimized local network speed diagnostics.
 - 🔄 Native Self-Updater – Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 GPL-3.0 Licensed – Free, open, and community-driven.
 

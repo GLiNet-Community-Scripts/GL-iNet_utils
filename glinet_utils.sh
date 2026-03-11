@@ -2,15 +2,19 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-05
+# Version: 2026-03-11
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
 # - AdGuardHome management (UI updates, storage limits, lists)
-# - Zram swap configuration
-# - CPU stress testing and benchmarking
-# - Disk I/O benchmarking
+# - System tweaks (zram, SSH keys, package management)
+# - Benchmarking tools (network speed tests, CPU stress test)
 # - System configuration viewer
+# - Self-update mechanism to fetch latest script from GitHub
+# - User-friendly interface with color coding and emojis
+# - Robust error handling and input validation
+# - Designed for OpenWrt-based GL.iNet routers, tested on various models
+# Note: Some features may require specific hardware capabilities or firmware versions.
 
 # -----------------------------
 # Color & Emoji
@@ -679,7 +683,7 @@ show_hardware_info() {
                     clear
                 fi
                 ;;
-            m|M|0) return ;;
+            0) return ;;
         esac
     done
 }
@@ -865,7 +869,7 @@ manage_agh_ui_updates() {
             \?|h|H|❓)
                 show_agh_ui_help
                 ;;
-            m|M|0)
+            0)
                 return
                 ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -1071,7 +1075,7 @@ WARNEOF
             \?|h|H|❓)
                 show_agh_storage_help
                 ;;
-            m|M|0)
+            0)
                 return
                 ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -2185,7 +2189,15 @@ HELPEOF
 }
 
 manage_zram() {
+    local up_conf="/etc/sysupgrade.conf"
+    local laz_list="/etc/lazarus.list"
+
     while true; do
+        zram_persisting=0
+        if grep -qFx "/etc/init.d/zram" "$up_conf" 2>/dev/null; then
+            zram_persisting=1
+        fi
+
         clear
         print_centered_header "Zram Swap Management"
         
@@ -2211,13 +2223,19 @@ manage_zram() {
         else
             printf "   Zram Swap: %bNOT INSTALLED%b\n" "${RED}" "${RESET}"
         fi
+        if [ "$zram_persisting" -eq 1 ]; then
+                printf "   Persistence: %bENABLED%b\n\n" "${GREEN}" "${RESET}"
+            else
+                printf "   Persistence: %bDISABLED%b\n\n" "${YELLOW}" "${RESET}"
+        fi
         
-        printf "\n1️⃣  Install and Enable\n"
+        printf "1️⃣  Install and Enable\n"
         printf "2️⃣  Disable\n"
-        printf "3️⃣  Uninstall Package\n"
-        printf "0️⃣  Main menu\n"
+        printf "3️⃣  Toggle Persistence\n"
+        printf "4️⃣  Uninstall Package\n"
+        printf "0️⃣  Return to previous menu\n"
         printf "❓ Help\n"
-        printf "\nChoose [1-3/0/?]: "
+        printf "\nChoose [1-4/0/?]: "
         read -r zram_choice
         printf "\n"
         
@@ -2263,6 +2281,29 @@ manage_zram() {
                 press_any_key
                 ;;
             3)
+                if [ ! -f /etc/init.d/zram ]; then
+                    print_error "Zram swap is not installed."
+                else
+                    local z_paths="/etc/init.d/zram /etc/config/system"
+                    
+                    if [ "$zram_persisting" -eq 0 ]; then
+                        for p in $z_paths; do
+                            grep -qFx "$p" "$up_conf" || echo "$p" >> "$up_conf"
+                        done
+                        grep -qFx "zram-swap" "$laz_list" 2>/dev/null || echo "zram-swap" >> "$laz_list"
+                        create_lazarus_hook
+                        print_success "Zram persistence enabled."
+                    else
+                        for p in $z_paths; do
+                            sed -i "\|$p|d" "$up_conf" 2>/dev/null
+                        done
+                        sed -i "\|zram-swap|d" "$laz_list" 2>/dev/null
+                        print_warning "Zram persistence disabled."
+                    fi
+                fi
+                press_any_key
+                ;;
+            4)
                 if opkg list-installed | grep -q "^zram-swap"; then
                     printf "%b" "${YELLOW}Remove zram-swap package? [y/N]: ${RESET}"
                     read -r confirm
@@ -2270,6 +2311,13 @@ manage_zram() {
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
                         opkg remove zram-swap >/dev/null 2>&1
+                        
+                        # Added cleanup to match Package Manager behavior
+                        for p in /etc/init.d/zram /etc/config/system; do
+                            sed -i "\|$p|d" "$up_conf" 2>/dev/null
+                        done
+                        sed -i "\|zram-swap|d" "$laz_list" 2>/dev/null
+                        
                         print_success "zram-swap package removed"
                     else
                         printf "Removal cancelled."
@@ -2282,9 +2330,829 @@ manage_zram() {
             \?|h|H|❓)
                 show_zram_help
                 ;;
-            m|M|0)
+            0)
                 return
                 ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+
+# -----------------------------
+# System Tweaks
+# -----------------------------
+
+# --- Fan Management Module ---
+
+show_fan_help() {
+    clear
+    print_centered_header "Fan Management - Help"
+    
+    cat << 'HELPEOF'
+Fan Management – Quick Help
+
+How the Fan Controller Works:
+─────────────────────────────
+The /usr/bin/gl_fan process uses a PID-style controller to manage speed 
+based on three primary temperature setpoints.
+
+The Setpoints Explained:
+• Minimum: The temperature where the fan starts spinning at its lowest 
+  voltage. Setting this higher keeps the fan off longer.
+• Fan-On: The "Target" temperature. The controller will ramp the fan up 
+  toward 100% speed as it approaches and exceeds this value.
+• Warning: Primarily used for system logs and UI alerts. Usually set 
+  equal to or slightly higher than the Fan-On setpoint.
+• UI Max: This script's custom "Unlock." It extends the slider range 
+  in the web interface, allowing you to set thresholds up to 120°C.
+
+Thermal Hierarchy (Safety Rules):
+─────────────────────────────────
+To prevent logic loops, the following rules are enforced:
+  Minimum ≤ Fan-On ≤ UI Max
+  Warning must be between Minimum and UI Max.
+
+Dynamic vs. Manual Mode:
+• Dynamic: The system automatically adjusts RPM based on heat.
+• Manual: Forces the fan to a specific percentage (0-100%). 
+  Note: Manual mode persists until you re-enable Dynamic control.
+
+Safety Warning:
+────────────────
+Extending limits beyond 100°C can lead to hardware throttling or 
+emergency shutdowns. Most silicon is rated for ~105°C. Use 110°C+ 
+only if you understand the thermal risks to your specific model.
+HELPEOF
+    
+    press_any_key
+}
+
+manage_fan_settings() {
+    current_model=$(cat /proc/gl-hw-info/model)
+
+    reset_to_factory(){
+        # 1. Restore the 'Engine' (The Library) and the 'Seed' (The ROM config)
+        if [ -f "/rom/lib/functions/gl_util.sh" ]; then 
+            cp "/rom/lib/functions/gl_util.sh" "/lib/functions/gl_util.sh"
+        fi
+
+        if [ -f "/rom/etc/config/glfan" ]; then 
+            cp "/rom/etc/config/glfan" "/etc/config/glfan"
+        fi
+        
+        # 2. Trigger the Internal Provisioner
+        # This populates UCI with the REAL factory defaults for THIS specific model
+        . /lib/functions/gl_util.sh
+        fan_init
+        uci commit glfan
+        
+        # 3. Restore Web UI Visuals & Logic from ROM
+        if [ -f "/rom/www/views/gl-sdk4-ui-overview.common.js.gz" ]; then
+            cp "/rom/www/views/gl-sdk4-ui-overview.common.js.gz" "/www/views/gl-sdk4-ui-overview.common.js.gz"
+        fi
+        
+        local app_rom_gz=$(find /rom/www/js/ -name "app.*.js.gz" -type f | head -n 1)
+        if [ -n "$app_rom_gz" ]; then
+            cp "$app_rom_gz" "/www/js/$(basename "$app_rom_gz")"
+        fi
+
+        if [ -f "/rom/www/i18n/gl-sdk4-ui-overview.en.json" ]; then
+            cp "/rom/www/i18n/gl-sdk4-ui-overview.en.json" "/www/i18n/gl-sdk4-ui-overview.en.json"
+        fi
+        
+        /etc/init.d/gl_fan restart >/dev/null 2>&1
+    }
+
+    sync_system_and_ui() {
+        # Start at a good working state
+        reset_to_factory       
+        
+        local n_min=$1  # Minimum (The Floor)
+        local n_cur=$2  # Fan-On (The current target)
+        local n_wrn=$3  # Warning (The visual/system trigger)
+        local n_max=$4  # Maximum (The Ceiling)
+        
+        local b_min=$((n_min - 1)) 
+        local b_max=$((n_max + 1))
+        local util_file="/lib/functions/gl_util.sh"
+
+        # --- 1. System Logic & Backend Variable Sync ---
+        # Patch the hardware floor comparisons in the fan control library
+        sed -i "s/-lt 6[0-9]/-lt $n_min/g" "$util_file"
+        sed -i "s/-lt 7[0-9]/-lt $n_min/g" "$util_file"
+
+        # Use the model identifier to target the correct code block for assignments
+        if awk "/$current_model[)]/,/;;/" "$util_file" | grep -q "temperature="; then
+            sed -i "/$current_model[)]/,/;;/ s/\(minimum_temperature=\)[0-9]*/\1$n_min/" "$util_file"
+            sed -i "/$current_model[)]/,/;;/ s/\([[:space:]]temperature=\)[0-9]*/\1$n_cur/" "$util_file"
+        else
+            sed -i "s/\(local minimum_temperature=\)[0-9]*/\1$n_min/" "$util_file"
+            sed -i "s/\(local temperature=\)[0-9]*/\1$n_cur/" "$util_file"
+        fi
+        sed -i "s/warn_temperature=.*$/warn_temperature=\"$n_wrn\"/" "$util_file"
+
+        # --- 2. UCI Persistence ---
+        uci set glfan.globals.minimum_temperature="$n_min"
+        uci set glfan.globals.temperature="$n_cur"
+        uci set glfan.globals.warn_temperature="$n_wrn"
+        uci commit glfan
+
+        # --- 3. View Component Patching (UI Logic & Visuals) ---
+        local view_gz="/www/views/gl-sdk4-ui-overview.common.js.gz"
+        [ ! -f "$view_gz" ] && cp "/rom$view_gz" "$view_gz"
+        gunzip -f "$view_gz"
+        local v="/www/views/gl-sdk4-ui-overview.common.js"
+
+        # SECTION A: Computed Property Overrides (Dynamic Shadowing)
+        sed -i "s/minimum_temperature:t/minimum_temperature:ignore,t=$n_min/g" "$v"
+        sed -i "s/maximum_temperature:t/maximum_temperature:ignore,t=$n_max/g" "$v"
+        sed -i "s/maximumTemperature:()=>[0-9]*/maximumTemperature:()=>$n_max/g" "$v"
+
+        # SECTION B: Literal Logic Guards (Integer Boundaries)
+        sed -i "s/t<70/t<$n_min/g" "$v"
+        sed -i "s/t>90/t>$n_max/g" "$v"
+        sed -i "s/ature=70/ature=$n_min/g" "$v"
+        sed -i "s/ature=90/ature=$n_max/g" "$v"
+
+        # SECTION C: Universal Component Logic (Snap-Back Prevention)
+        sed -i "s/t<this.minimumTemperature/t<$n_min/g" "$v"
+        sed -i "s/t>this.maximumTemperature/t>$n_max/g" "$v"
+        sed -i "s/this.temperature=this.minimumTemperature/this.temperature=$n_min/g" "$v"
+        sed -i "s/this.temperature=this.maximumTemperature/this.temperature=$n_max/g" "$v"
+
+        # SECTION D: Physical Slider Attributes (Visual Buffer)
+        sed -i "s/attrs:{min:[^,]*[0-9a-zA-Z.-]*,max:[0-9a-zA-Z.+-]*/attrs:{min:$b_min,max:$b_max/g" "$v"
+
+        # SECTION E: Slider Scale & Step Labels
+        local marks_obj="${n_min}:'${n_min}°C'"
+        local span=$((n_max - n_min))
+        local interval=10
+        [ "$span" -le 50 ] && interval=5
+        for i in $(seq $((n_min + $interval)) "$interval" "$n_max"); do
+            marks_obj="$marks_obj,$i:'$i°C'"
+        done
+        sed -i "s/marks:t.tMarks/marks:{$marks_obj}/g" "$v"
+
+        # SECTION F: Information Strings (Info Box / Localization)
+        local info_pattern="fan start is [^.]*"
+        local info_replacement="fan start is $n_min °C ~ $n_max °C "
+        sed -i "s/$info_pattern/$info_replacement/g" "$v"
+        [ -f "/www/i18n/gl-sdk4-ui-overview.en.json" ] && \
+        sed -i "s/$info_pattern/$info_replacement/g" "/www/i18n/gl-sdk4-ui-overview.en.json"
+
+        # --- 4. Global Application Controller Patch (Validator Range) ---
+        local app_gz=$(find /www/js/ -name "app.*.js.gz" -type f | head -n 1)
+        if [ -n "$app_gz" ]; then
+            gunzip -f "$app_gz"
+            local app_file="${app_gz%.gz}"
+            # Unlock the global validator range
+            sed -i "s/[0-9]\{1,3\}||i<[0-9]\{2,3\}/${n_min}||i<$((n_max + 1))/g" "$app_file"
+            # Prevent initial state snap-back on page load
+            sed -i "s/temperature:6[90]/temperature:$n_cur/g" "$app_file"
+            sed -i "s/temperature:76/temperature:$n_cur/g" "$app_file"
+            gzip -f "$app_file"
+        fi
+
+        # 5. Deployment
+        gzip -f "$v"
+        /etc/init.d/gl_fan restart
+    }
+    
+    while true; do
+        
+        # 1. State Capture & Fanless Detection
+        has_fan=true
+        [ ! -d "/sys/class/thermal/cooling_device0" ] && has_fan=false
+
+        c_mode="DYNAMIC (System)"
+        c_mode_color="${GREEN}"
+        if ! pgrep -f '/usr/bin/gl_fan' >/dev/null; then
+            c_mode="MANUAL (Static)"
+            c_mode_color="${YELLOW}"
+        fi
+        
+        c_temp_fmt=$(get_cpu_temp)
+        c_fan_rpm="N/A"
+        c_speed_pct=0
+        
+        if [ "$has_fan" = "true" ]; then
+            c_fan_rpm=$(get_fan_speed)
+            c_pwm=$(cat /sys/class/thermal/cooling_device0/cur_state 2>/dev/null)
+            [ -z "$c_pwm" ] && c_pwm=0
+            c_speed_pct=$(( (c_pwm * 100) / 255 ))
+        fi
+
+        # 2. Get Current UI Max Setpoint
+        local view_gz="/www/views/gl-sdk4-ui-overview.common.js.gz"
+        local util_file="/lib/functions/gl_util.sh"
+        local attrs_block=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "attrs:\{min:[-0-9]+,max:[0-9]+")
+
+        if [ -n "$attrs_block" ]; then
+            raw_min=$(echo "$attrs_block" | cut -d: -f3 | cut -d, -f1)
+            raw_max=$(echo "$attrs_block" | cut -d: -f4)
+            u_min=$((raw_min + 1))
+            ui_max=$((raw_max - 1))
+        else
+            u_min=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "minimumTemperature:[^}]*" | grep -oE "[0-9]{2,3}" | head -n 1)
+            ui_max=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "maximumTemperature:[^}]*" | grep -oE "[0-9]{2,3}" | head -n 1)
+        fi
+
+        # --- 3. UCI Configuration State (The "Truth") ---
+        u_cur=$(uci -q get glfan.globals.temperature)
+        u_wrn=$(uci -q get glfan.globals.warn_temperature)
+
+        # --- 4. Sanitization & Fallbacks ---
+        [ -z "$u_min" ] && u_min=70
+        [ -z "$ui_max" ] && ui_max=90
+        [ -z "$u_cur" ] && u_cur=75
+        [ -z "$u_wrn" ] && u_wrn=75
+
+        clear
+        print_centered_header "Fan Management"
+        
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        if [ "$has_fan" = "false" ]; then
+            printf "   Hardware:          %bNOT DETECTED (Fanless Unit)%b\n" "${RED}" "${RESET}"
+        else
+            printf "   Control Mode:      %b%s%b\n" "$c_mode_color" "$c_mode" "${RESET}"
+            printf "   Current Speed:     %d%% (%s RPM)\n" "$c_speed_pct" "$c_fan_rpm"
+        fi
+        printf "   Temperature:       %b%s°C%b\n\n" "${WHITE}" "$c_temp_fmt" "${RESET}"
+
+        printf " %b\n" "${CYAN}DYNAMIC SETTINGS${RESET}"
+        printf "   Minimum Setpoint:  %s°C\n" "${u_min:-UNKNOWN}"
+        printf "   Fan-On Setpoint:   %s°C\n" "${u_cur:-UNKNOWN}"
+        printf "   Warning Setpoint:  %s°C\n" "${u_wrn:-UNKNOWN}"
+        printf "   Max Setpoint (UI): %b%s°C%b\n\n" "${YELLOW}" "$ui_max" "${RESET}"
+
+        if [ "$has_fan" = "false" ]; then
+            print_warning "Fan settings are disabled on fanless hardware."
+            printf "0️⃣  Return to previous menu\n"
+        else
+            printf "1️⃣  Set Static Fan Speed (0-100%%)\n"
+            printf "2️⃣  Enable Dynamic Fan Control\n"
+            printf "3️⃣  Set Minimum Setpoint\n"
+            printf "4️⃣  Set Fan-On Setpoint\n"
+            printf "5️⃣  Set Warning Setpoint\n"
+            printf "6️⃣  Set UI Maximum Setpoint\n"
+            printf "7️⃣  Reset to Factory Defaults\n"
+            printf "0️⃣  Return to previous menu\n"
+            printf "❓ Help\n"
+        fi
+        
+        printf "\nChoose option: "
+        read -r fan_choice
+        printf "\n"
+
+        if [ "$has_fan" = "false" ]; then
+            case "$fan_choice" in
+                0) return ;;
+                \?|h|H|help|HELP) show_fan_help; continue ;;
+                *) continue ;;
+            esac
+        fi
+
+        case "$fan_choice" in
+            1)
+                printf "Enter Speed %% (0-100): "
+                read -r pct
+                printf "\n"
+                pct=$(echo "$pct" | tr -dc '0-9')
+                if [ -n "$pct" ] && [ "$pct" -le 100 ]; then
+                    /etc/init.d/gl_fan stop >/dev/null 2>&1
+                    echo "$(( (pct * 255) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
+                    print_success "Manual mode active: $pct%%"
+                else
+                    print_error "Invalid input."
+                fi
+                press_any_key ;;
+            2)
+                /etc/init.d/gl_fan enable >/dev/null 2>&1
+                /etc/init.d/gl_fan restart >/dev/null 2>&1
+                print_success "Dynamic control restored"
+                press_any_key ;;
+            3)
+                printf "Set new Minimum Setpoint (0°C - %s°C): " "$u_cur"
+                read -r val
+                val=$(echo "$val" | tr -dc '0-9')
+                if [ -n "$val" ] && [ "$val" -le "$u_cur" ]; then
+                    sync_system_and_ui "$val" "$u_cur" "$u_wrn" "$ui_max"
+                    print_success "Minimum setpoint updated to ${val}°C (System & UI)."
+                else
+                    print_error "Must be a number and ≤ Fan-On ($u_cur°C)"
+                fi
+                press_any_key ;;
+            4)
+                printf "New Fan-On Setpoint (%s°C - %s°C): " "$u_min" "$ui_max"
+                read -r val
+                printf "\n"
+                val=$(echo "$val" | tr -dc '0-9')
+                if [ -n "$val" ] && [ "$val" -ge "$u_min" ] && [ "$val" -le "$ui_max" ]; then
+                    sync_system_and_ui "$u_min" "$val" "$u_wrn" "$ui_max"
+                    print_success "Fan-On setpoint updated"
+                else
+                    print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
+                fi
+                press_any_key ;;
+            5)
+                printf "New Warning Setpoint (%s°C - %s°C): " "$u_min" "$ui_max"
+                read -r val
+                printf "\n"
+                val=$(echo "$val" | tr -dc '0-9')
+                if [ -n "$val" ] && [ "$val" -ge "$u_min" ] && [ "$val" -le "$ui_max" ]; then
+                    sync_system_and_ui "$u_min" "$u_cur" "$val" "$ui_max"
+                    print_success "Warning setpoint updated"
+                else
+                    print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
+                fi
+                press_any_key ;;
+            6)
+                print_warning "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO YOUR DEVICE!"
+                printf "Set new UI Maximum Setpoint (%s°C - 120°C): " "$u_cur"
+                read -r val
+                printf "\n"
+                val=$(echo "$val" | tr -dc '0-9')
+                if [ -n "$val" ] && [ "$val" -ge "$u_cur" ] && [ "$val" -le 120 ]; then
+                    if [ "$val" -lt $u_wrn ]; then
+                        print_warning "New UI Max is below current Warning setpoint. Adjusting Warning to match new UI Max.\n"
+                        u_wrn="$val"
+                    fi
+                    sync_system_and_ui "$u_min" "$u_cur" "$u_wrn" "$val"
+                    print_success "Max UI setpoint updated to ${val}°C."
+                else
+                    print_error "Must be between Fan-On ($u_cur°C) and 120°C"
+                fi
+                press_any_key ;;
+            7)
+                print_warning "Restoring to Factory Defaults..."
+                reset_to_factory
+                print_success "Factory defaults restored. Refresh browser."
+                press_any_key ;;
+            0) return ;;
+            \?|h|H|❓) show_fan_help; continue ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+get_action_text() {
+    local t_i=$1 local t_p=$2 local o_i=$3 local o_p=$4
+    
+    if [ "$t_i" -eq "$o_i" ] && [ "$t_p" -eq "$o_p" ]; then
+        echo "No Change"
+    elif [ "$t_i" -eq 1 ] && [ "$o_i" -eq 0 ]; then
+        [ "$t_p" -eq 1 ] && echo "> Install + Persist" || echo "> Install Package"
+    elif [ "$t_i" -eq 1 ] && [ "$o_i" -eq 1 ] && [ "$t_p" -ne "$o_p" ]; then
+        [ "$t_p" -eq 1 ] && echo "> Enable Persistence" || echo "> Disable Persistence"
+    elif [ "$t_i" -eq 0 ] && [ "$o_i" -eq 1 ]; then
+        [ "$o_p" -eq 1 ] && echo "> Remove + Unpersist" || echo "> Remove Package"
+    else
+        echo "No Change"
+    fi
+}
+
+create_lazarus_hook() {
+    local hook="/etc/uci-defaults/99-lazarus"
+    cat << 'EOF' > "$hook"
+#!/bin/sh
+# Lazarus Survival Engine - Post-Upgrade Package Restoration Hook
+if [ -f /etc/lazarus.list ]; then
+    opkg update
+    cat /etc/lazarus.list | xargs opkg install
+fi
+# Re-persist the healer list itself
+grep -qFx "/etc/lazarus.list" /etc/sysupgrade.conf || echo "/etc/lazarus.list" >> /etc/sysupgrade.conf
+exit 0
+EOF
+    chmod +x "$hook"
+}
+
+manage_packages() {
+    # Define the Utility Database (Package|Binary|Config/Service Files)
+    # Types: R = Reinstall (Complex), B = Binary (Simple)
+    local UTILITY_DB="zram-swap|/etc/init.d/zram|R|/etc/init.d/zram /etc/config/system
+librespeed-go|/usr/bin/librespeed-go|R|/usr/bin/librespeed-go /etc/config/librespeed-go /etc/init.d/librespeed-go
+stress|/usr/bin/stress|B|/usr/bin/stress
+stress-ng|/usr/bin/stress-ng|B|/usr/bin/stress-ng
+lscpu|/usr/bin/lscpu|B|/usr/bin/lscpu
+apache-utils|/usr/bin/ab|B|/usr/bin/ab
+htop|/usr/bin/htop|B|/usr/bin/htop
+rsync|/usr/bin/rsync|B|/usr/bin/rsync
+speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
+
+    local map_file="/tmp/pkg_manage_map"
+    local sys_conf="/etc/sysupgrade.conf"
+    local laz_list="/etc/lazarus.list"
+    
+    # Initialization: Scan current system state
+    init_system_state(){
+    [ -f "$map_file" ] && rm -f "$map_file"
+    local i=1
+    echo "$UTILITY_DB" | while IFS='|' read -r name bin type paths; do
+        local inst=0; [ -f "$bin" ] && inst=1
+        local pers=0
+        # Check if any of its paths are in sysupgrade.conf
+        for p in $paths; do
+            if grep -qFx "$p" "$sys_conf" 2>/dev/null; then pers=1; break; fi
+        done
+        # Format: Index|Name|Target_I|Target_P|Action|Type|Paths|Orig_I|Orig_P
+        echo "$i|$name|$inst|$pers|No Change|$type|$paths|$inst|$pers" >> "$map_file"
+        i=$((i+1))
+    done
+    }
+
+    init_system_state
+
+    while true; do
+        clear
+        print_centered_header "Package & Persistence Manager"
+        printf "      Install Persist  Package Name        Planned Action\n"
+        printf " ──────────────────────────────────────────────────────────────\n"
+
+        while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
+            local i_box=" [ ] "; [ "$i_t" -eq 1 ] && i_box=" [✓] "
+            local p_box=" [ ] "; [ "$p_t" -eq 1 ] && p_box=" [✓] "
+
+            printf " %-5s %s   %s %-1s %-19s %b%s%b\n" "$idx." "$i_box" "$p_box" "" "$name" "${CYAN}" "$action" "${RESET}"
+        done < "$map_file"
+
+        printf " ──────────────────────────────────────────────────────────────\n"
+        printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Back   [?] Help\n"
+        printf "\n Command: "
+        local cmd=$(read_single_char | tr '[:upper:]' '[:lower:]')
+
+        case "$cmd" in
+            a|A) 
+                # Step 1: Force targets to 1|1 for all rows
+                awk -F'|' -v OFS='|' '{$3=1; $4=1; print}' "$map_file" > "${map_file}.tmp"
+                
+                # Step 2: Re-calculate the "Smart" action text for all 9 columns
+                while IFS='|' read -r idx name ti tp act type paths oi op; do
+                    new_act=$(get_action_text 1 1 "$oi" "$op")
+                    echo "$idx|$name|1|1|$new_act|$type|$paths|$oi|$op"
+                done < "${map_file}.tmp" > "$map_file"
+                rm -f "${map_file}.tmp"
+                ;;
+            n|N)
+                # Step 1: Force targets to 0|0 for all rows
+                awk -F'|' -v OFS='|' '{$3=0; $4=0; print}' "$map_file" > "${map_file}.tmp"
+                
+                # Step 2: Re-calculate the "Smart" action text for all 9 columns
+                while IFS='|' read -r idx name ti tp act type paths oi op; do
+                    new_act=$(get_action_text 0 0 "$oi" "$op")
+                    echo "$idx|$name|0|0|$new_act|$type|$paths|$oi|$op"
+                done < "${map_file}.tmp" > "$map_file"
+                rm -f "${map_file}.tmp"
+                ;;
+            [1-9]*)
+                if grep -q "^$cmd|" "$map_file"; then
+                    local line=$(grep "^$cmd|" "$map_file")
+                    # Extract columns (Note the new positions for Orig_I and Orig_P)
+                    local name=$(echo "$line" | cut -d'|' -f2)
+                    local cur_i=$(echo "$line" | cut -d'|' -f3)
+                    local cur_p=$(echo "$line" | cut -d'|' -f4)
+                    local type=$(echo "$line" | cut -d'|' -f6)
+                    local paths=$(echo "$line" | cut -d'|' -f7)
+                    local o_i=$(echo "$line" | cut -d'|' -f8)
+                    local o_p=$(echo "$line" | cut -d'|' -f9)
+                    
+                    # 3-Way Cycle: (0,0) -> (1,0) -> (1,1) -> Back to (0,0)
+                    local next_i=0; local next_p=0
+                    if [ "$cur_i" -eq 0 ] && [ "$cur_p" -eq 0 ]; then
+                        next_i=1; next_p=0
+                    elif [ "$cur_i" -eq 1 ] && [ "$cur_p" -eq 0 ]; then
+                        next_i=1; next_p=1
+                    else
+                        next_i=0; next_p=0
+                    fi
+                    
+                    # Get the smart action text based on the NEW targets vs ORIGINAL live state
+                    local next_act=$(get_action_text "$next_i" "$next_p" "$o_i" "$o_p")
+                    
+                    # Update the map file
+                    grep -v "^$cmd|" "$map_file" > "${map_file}.tmp"
+                    echo "$cmd|$name|$next_i|$next_p|$next_act|$type|$paths|$o_i|$o_p" >> "${map_file}.tmp"
+                    sort -n "${map_file}.tmp" > "$map_file" && rm -f "${map_file}.tmp"
+                fi
+                ;;
+            c)
+                # 1. Build Confirmation Lists
+                local to_add=""; local to_rem=""
+                while IFS='|' read -r idx name t_i t_p action type paths o_i o_p; do
+                    # Skip if no change
+                    [ "$action" == "No Change" ] && continue
+
+                    # Match specific strings for Additions
+                    case "$action" in
+                        "> Install Package")
+                            to_add="${to_add}\n  + $name (Install)"
+                            ;;
+                        "> Install + Persist")
+                            to_add="${to_add}\n  + $name (Install + Persist)"
+                            ;;
+                        "> Enable Persistence")
+                            to_add="${to_add}\n  + $name (Persist)"
+                            ;;
+                    esac
+
+                    # Match specific strings for Removals
+                    case "$action" in
+                        "> Remove Package")
+                            to_rem="${to_rem}\n  - $name (Remove)"
+                            ;;
+                        "> Remove + Unpersist")
+                            to_rem="${to_rem}\n  - $name (Remove + Unpersist)"
+                            ;;
+                        "> Disable Persistence")
+                            to_rem="${to_rem}\n  - $name (Unpersist)"
+                            ;;
+                    esac
+                done < "$map_file"
+
+                if [ -z "$to_add" ] && [ -z "$to_rem" ]; then
+                    print_error "No changes planned."; sleep 1; continue
+                fi
+
+                clear
+                print_centered_header "Confirm System Changes"
+                [ -n "$to_add" ] && { printf "${GREEN}TO BE INSTALLED or PERSISTED:${RESET}"; printf "$to_add\n\n"; }
+                [ -n "$to_rem" ] && { printf "${RED}TO BE REMOVED or UNPERSISTED:${RESET}"; printf "$to_rem\n\n"; }
+                
+                printf "Proceed with changes? [y/N]: "; read -r confirm; printf "\n"
+                if [[ "$confirm" =~ ^[Yy]$ ]]; then
+                    # CRITICAL FIX: Read all 9 columns here!
+                    while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
+                        [ "$action" == "No Change" ] && continue
+                        
+                        # EXECUTE REMOVALS
+                        if [[ "$action" == *"> Remove"* ]] || [[ "$action" == *"> Unpersist"* ]]; then
+                            if [ "$i_t" -eq 0 ]; then
+                                if [ "$name" == "speedtest" ]; then
+                                    rm -f /usr/bin/speedtest
+                                else
+                                    opkg remove "$name" >/dev/null 2>&1
+                                fi
+                            fi
+                            
+                            # Standard cleanup for paths and survival lists
+                            for p in $paths; do sed -i "\|$p|d" "$sys_conf" 2>/dev/null; done
+                            [ -f "$laz_list" ] && sed -i "\|$name|d" "$laz_list" 2>/dev/null
+                        fi
+
+                        # EXECUTE INSTALLS
+                        if [[ "$action" == *"Install"* ]] || [[ "$action" == *"Persist"* ]]; then
+                            if [ "$i_t" -eq 1 ]; then
+                                if [ "$name" == "speedtest" ]; then
+                                    install_ookla_speedtest
+                                else
+                                    [ "$opkg_updated" -eq 0 ] && check_opkg_updated
+                                    printf "\n"
+                                    print_info "Installing $name..."
+                                    opkg install "$name" >/dev/null 2>&1
+                                fi
+                            fi
+
+                            if [ "$p_t" -eq 1 ]; then
+                                for p in $paths; do grep -qFx "$p" "$sys_conf" || echo "$p" >> "$sys_conf"; done
+                                if [ "$type" == "R" ]; then
+                                    grep -qFx "$name" "$laz_list" 2>/dev/null || echo "$name" >> "$laz_list"
+                                    create_lazarus_hook
+                                fi
+                            fi
+                        fi
+                    done < "$map_file"
+                    print_success "System changes applied."
+                    press_any_key
+                    init_system_state
+                    continue
+                fi
+                ;;
+            0) rm -f "$map_file" 2>/dev/null; return ;;
+            \?|h|H|❓) show_package_help ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+show_ssh_help() {
+    clear
+    print_centered_header "SSH Key Management - Help"
+    
+    cat << 'HELPEOF'
+SSH Key Management – Quick Help
+
+What is an SSH Key?
+───────────────────
+An SSH key is a "digital passport" that allows you to log into your router
+securely without typing your password every time. It consists of a 
+Public Key (which stays on the router) and a Private Key (which stays on 
+your computer). 
+
+Main Benefits:
+• Security: Keys are virtually impossible to brute-force compared to passwords.
+• Convenience: Log in instantly from your terminal or script.
+• Persistence: This script can ensure your keys survive firmware updates.
+
+How to find or generate your Public Key:
+────────────────────────────────────────
+Your Public Key usually ends in .pub. DO NOT paste your Private Key.
+
+• macOS / Linux:
+  1. Open Terminal.
+  2. Check for existing keys: cat ~/.ssh/id_rsa.pub (or id_ed25519.pub)
+  3. To generate new: ssh-keygen -t ed25519
+  4. Copy the output of: cat ~/.ssh/id_ed25519.pub
+
+• Windows (PowerShell/CMD):
+  1. Open PowerShell.
+  2. Check for existing keys: cat $HOME\.ssh\id_rsa.pub
+  3. To generate new: ssh-keygen -t ed25519
+  4. Copy the text starting with "ssh-ed25519..."
+
+• Windows (PuTTY):
+  1. Open 'PuTTYgen'.
+  2. Click 'Load' (for existing) or 'Generate' (for new).
+  3. Copy the text from the box labeled: 
+     "Public key for pasting into OpenSSH authorized_keys file"
+
+Usage in this Menu:
+───────────────────
+1. Add Key: Paste the entire line (starts with ssh-rsa, ssh-ed25519, etc.).
+2. Manage: View existing keys. Use [✓] to mark keys for deletion.
+3. Toggle Persistence: Adds /etc/dropbear/authorized_keys to the 
+   sysupgrade list so you don't lose access after a firmware update.
+
+Security Warning:
+─────────────────
+Never share your PRIVATE key with anyone. Only the PUBLIC key belongs
+on the router.
+HELPEOF
+    
+    press_any_key
+}
+
+manage_ssh_keys() {
+    local auth_file="/etc/dropbear/authorized_keys"
+    local up_conf="/etc/sysupgrade.conf"
+    local ssh_data="/tmp/ssh_mgr.data"
+
+    while true; do
+        # 1. Status Calculations
+        local key_count=0
+        [ -f "$auth_file" ] && key_count=$(grep -c "^ssh-" "$auth_file")
+        
+        local persistence="${YELLOW}DISABLED${RESET}"
+        grep -qFx "$auth_file" "$up_conf" 2>/dev/null && persistence="${GREEN}ENABLED${RESET}"
+
+        clear
+        print_centered_header "SSH Key Management"
+        
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        printf "   Authorized Keys:  %d\n" "$key_count"
+        printf "   Persistence:      %b\n\n" "$persistence"
+
+        printf "1️⃣  Add a New SSH Key\n"
+        printf "2️⃣  Manage / Delete Keys\n"
+        printf "3️⃣  Toggle Persistence\n"
+        printf "0️⃣  Return to previous menu\n"
+        printf "❓ Show Help\n"
+        
+        printf "\nChoose [1-3/0/?]: "
+        read -r ssh_choice
+        
+        case "$ssh_choice" in
+            1) # ADD KEY
+                printf "\n${CYAN}Paste your public key (starts with ssh-rsa, etc.):${RESET}\n"
+                read -r new_key
+                if echo "$new_key" | grep -qE "^ssh-(rsa|ed25519|dss|ecdsa) "; then
+                    # Extract base64 part for duplicate check
+                    local key_base64=$(echo "$new_key" | awk '{print $2}')
+                    if [ -f "$auth_file" ] && grep -q "$key_base64" "$auth_file"; then
+                        print_warning "Key already exists in authorized_keys."
+                    else
+                        mkdir -p /etc/dropbear
+                        echo "$new_key" >> "$auth_file"
+                        chmod 0700 /etc/dropbear && chmod 0600 "$auth_file"
+                        print_success "Key added successfully."
+                    fi
+                else
+                    print_error "Invalid key format."
+                fi
+                press_any_key ;;
+
+            2) # MANAGE / DELETE UI
+                if [ ! -s "$auth_file" ]; then
+                    print_error "No keys found to manage."
+                    sleep 1; continue
+                fi
+
+                while true; do
+                    # Generate fresh temp data: Index | Type | Identity | Selected(0/1)
+                    # Use awk to handle keys with no comments by truncating the key string itself
+                    awk '{
+                        type=$1; 
+                        # If comment (field 3) exists, use it. Otherwise, truncate field 2.
+                        if ($3 != "") { 
+                            id=$3; for(i=4;i<=NF;i++) id=id" "$i 
+                        } else { 
+                            id="(No comment) " substr($2,1,15)"..." 
+                        }
+                        print NR "|" type "|" id "|0"
+                    }' "$auth_file" > "$ssh_data"
+
+                    while true; do
+                        clear
+                        print_centered_header "SSH Authorized Keys Manager"
+                        printf "\n"
+                        printf " %-5s %-4s %-12s %-30s\n" "Sel" "Idx" "Key Type" "Identity / Comment"
+                        printf " ──────────────────────────────────────────────────────────────\n"
+                        while IFS='|' read -r idx type id sel; do
+                            s_box="[ ]"; [ "$sel" -eq 1 ] && s_box="[✓]"
+                            printf " %s %-1s %-4s %-12s %-40s\n" "$s_box" "" "$idx." "$type" "$id"
+                        done < "$ssh_data"
+                        printf " ──────────────────────────────────────────────────────────────\n"
+                        printf " [A] All   [N] None   [#] Toggle   [D] Delete   [0] Back\n"
+                        printf " Command: "
+                        read -r cmd
+
+                        case "$cmd" in
+                            a|A) sed -i 's/|0$/|1/' "$ssh_data" ;;
+                            n|N) sed -i 's/|1$/|0/' "$ssh_data" ;;
+                            [0-9]*)
+                                [ "$cmd" -eq 0 ] && break 2
+                                awk -F'|' -v t="$cmd" 'BEGIN{OFS="|"} {if($1==t) $4=($4==1?0:1); print}' "$ssh_data" > "$ssh_data.tmp" && mv "$ssh_data.tmp" "$ssh_data" ;;
+                            d|D)
+                                local to_del=$(awk -F'|' '$4==1' "$ssh_data")
+                                if [ -z "$to_del" ]; then
+                                    print_warning "No keys selected."; sleep 1; continue
+                                fi
+                                
+                                clear
+                                print_centered_header "Confirm Deletion"
+                                echo "$to_del" | awk -F'|' '{print "  - " $2 " (" $3 ")"}'
+                                printf "\nDelete selected keys? [y/N]: "; read -r confirm
+                                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                                    # Create a keep-list of line numbers
+                                    local lines_to_keep=$(awk -F'|' '$4==0 {print $1}' "$ssh_data")
+                                    if [ -z "$lines_to_keep" ]; then
+                                        > "$auth_file" # Wipe if all deleted
+                                    else
+                                        # Use awk to reconstruct the file from original line numbers
+                                        local tmp_auth="/tmp/auth.keep"
+                                        for l in $lines_to_keep; do
+                                            sed -n "${l}p" "$auth_file" >> "$tmp_auth"
+                                        done
+                                        mv "$tmp_auth" "$auth_file"
+                                    fi
+                                    chmod 0600 "$auth_file"
+                                    print_success "Keys updated."
+                                    break 2
+                                fi ;;
+                            0) break 2 ;;
+                        esac
+                    done
+                done
+                rm -f "$ssh_data" ;;
+
+            3) # TOGGLE PERSISTENCE
+                printf "\n"
+                if grep -qFx "$auth_file" "$up_conf" 2>/dev/null; then
+                    sed -i "\|$auth_file|d" "$up_conf"
+                    print_warning "Persistence disabled. Keys will be lost on firmware upgrade."
+                else
+                    echo "$auth_file" >> "$up_conf"
+                    print_success "Persistence enabled. Keys will survive firmware upgrades."
+                fi
+                press_any_key ;;
+                
+            0) return ;;
+            \?|h|H|❓) show_ssh_help ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+system_tweaks() {
+    while true; do
+        clear
+        print_centered_header "System Tweaks"
+        printf "1️⃣  Device Fan Settings\n"
+        printf "2️⃣  Manage Zram Swap\n"
+        printf "3️⃣  Package and Persistence Manager\n"
+        printf "4️⃣  SSH Key Management\n"
+        printf "0️⃣  Main menu\n"
+        printf "❓ Help\n"
+        printf "\nChoose [1-4/0/?]: "
+        read -r st_choice
+        printf "\n"
+        case $st_choice in
+            1) manage_fan_settings ;;
+            2) manage_zram ;;
+            3) manage_packages ;;
+            4) manage_ssh_keys ;;
+            \?|h|H|❓) show_system_tweaks_help ;;
+            0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
@@ -2473,6 +3341,38 @@ manage_librespeed() {
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
+}
+
+install_ookla_speedtest() {
+    if ! command -v speedtest >/dev/null 2>&1 || ! speedtest --version 2>&1 | grep -qi "ookla"; then
+        print_warning "Ookla Speedtest not found, installing..."
+        arch=$(uname -m)
+        case "$arch" in
+            aarch64) suffix="aarch64" ;;
+            armv7*)  suffix="armhf"   ;;
+            armv8*)  suffix="aarch64" ;;
+            mips*)   suffix="mips"    ;;
+            x86_64)  suffix="x86_64"  ;;
+            *) print_error "Unsupported Arch: $arch"; continue ;;
+        esac
+        ver=$(wget -qO- https://www.speedtest.net/apps/cli | grep -oE "ookla-speedtest-[0-9.]+-linux-$suffix.tgz" | head -n1)
+        [ -z "$ver" ] && ver="ookla-speedtest-1.2.0-linux-$suffix.tgz"
+        if [ -n "$ver" ]; then
+            url="https://install.speedtest.net/app/cli/$ver"
+            wget -qO- "$url" | tar xz -C /usr/bin speedtest 2>/dev/null
+            chmod +x /usr/bin/speedtest 2>/dev/null
+            print_success "Installed: $(speedtest --version | head -n1)"
+        else
+            print_error "Could not find download link for $suffix"
+            press_any_key
+            continue
+        fi
+        if ! command -v speedtest >/dev/null 2>&1; then
+            print_error "Failed to install Ookla Speedtest"
+            press_any_key
+            continue
+        fi
+    fi
 }
 
 benchmark_system() {
@@ -2868,36 +3768,7 @@ EOF
             6)
                 clear
                 print_centered_header "Ookla Network SpeedTest"
-                
-                if ! command -v speedtest >/dev/null 2>&1 || ! speedtest --version 2>&1 | grep -qi "ookla"; then
-                    print_warning "Ookla Speedtest not found, installing..."
-                    arch=$(uname -m)
-                    case "$arch" in
-                        aarch64) suffix="aarch64" ;;
-                        armv7*)  suffix="armhf"   ;;
-                        armv8*)  suffix="aarch64" ;;
-                        mips*)   suffix="mips"    ;;
-                        x86_64)  suffix="x86_64"  ;;
-                        *) print_error "Unsupported Arch: $arch"; continue ;;
-                    esac
-                    ver=$(wget -qO- https://www.speedtest.net/apps/cli | grep -oE "ookla-speedtest-[0-9.]+-linux-$suffix.tgz" | head -n1)
-                    [ -z "$ver" ] && ver="ookla-speedtest-1.2.0-linux-$suffix.tgz"
-                    if [ -n "$ver" ]; then
-                        url="https://install.speedtest.net/app/cli/$ver"
-                        wget -qO- "$url" | tar xz -C /usr/bin speedtest 2>/dev/null
-                        chmod +x /usr/bin/speedtest 2>/dev/null
-                        print_success "Installed: $(speedtest --version | head -n1)"
-                    else
-                        print_error "Could not find download link for $suffix"
-                        press_any_key
-                        continue
-                    fi
-                    if ! command -v speedtest >/dev/null 2>&1; then
-                        print_error "Failed to install Ookla Speedtest"
-                        press_any_key
-                        continue
-                    fi
-                fi
+                install_ookla_speedtest
                 
                 printf "\n%b\n" "${YELLOW}⏳ Running Ookla SpeedTest...${RESET}"
                 printf "──────────────────────────────────────────────────────────────────────\n"
@@ -2910,7 +3781,7 @@ EOF
                 ;;
             7)  manage_librespeed ;;
             8)  install_openspeedtest ;;
-            m|M|0)
+            0)
                 return
                 ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -3209,7 +4080,7 @@ view_uci_config() {
                 printf "\n"
                 press_any_key
                 ;;
-            m|M|0)
+            0)
                 return
                 ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -3296,7 +4167,7 @@ show_menu() {
         printf "%b\n" "${CYAN}Please select an option:${RESET}\n"
         printf "1️⃣  Show Hardware Information\n"
         printf "2️⃣  AdGuardHome Control Center\n"
-        printf "3️⃣  Manage Zram Swap\n"
+        printf "3️⃣  System Tweaks\n"
         printf "4️⃣  System Benchmarks\n"
         printf "5️⃣  View System Configuration (UCI)\n"
         printf "6️⃣  Check for Update\n"
@@ -3307,7 +4178,7 @@ show_menu() {
         case $opt in
             1) show_hardware_info ;;
             2) [ $AGH_DISABLED != 1 ] && agh_control_center || { print_error "AGH not found. Feature disabled."; sleep 2; } ;;
-            3) manage_zram ;;
+            3) system_tweaks ;;
             4) benchmark_system ;;
             5) view_uci_config ;;
             6) check_self_update "$@"; press_any_key ;;

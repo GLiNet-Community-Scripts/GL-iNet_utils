@@ -65,12 +65,12 @@ Main Menu
 ```
 1️⃣  Show Hardware Information
 2️⃣  AdGuardHome Control Center
-3️⃣  Manage Zram Swap
+3️⃣  System Tweaks
 4️⃣  System Benchmarks
 5️⃣  View System Configuration (UCI)
-6️⃣  Install/Manage OpenSpeedTest Server
-7️⃣  Check for Update
+6️⃣  Check for Update
 0️⃣  Exit
+
 
 ```
 
@@ -86,6 +86,17 @@ AdGuardHome Control Center
 ❓ Help
 ```
 
+System Tweaks
+
+```
+1️⃣  Device Fan Settings
+2️⃣  Manage Zram Swap
+3️⃣  Package and Persistence Manager
+4️⃣  SSH Key Management
+0️⃣  Main menu
+❓ Help
+```
+
 System Benchmarks
 
 ```
@@ -93,9 +104,12 @@ System Benchmarks
 2️⃣  CPU Benchmark (OpenSSL)
 3️⃣  Disk I/O Benchmark
 4️⃣  Memory I/O Benchmark
-5️⃣  DNS Benchmark
-6️⃣  Ookla Network SpeedTest
+5️⃣  DNS Latency Benchmark
+6️⃣  Ookla Internet SpeedTest
+7️⃣  LibreSpeed SpeedTest Server
+8️⃣  OpenSpeedTest Server
 0️⃣  Main menu
+
 ```
 
 System Configuation Viewer

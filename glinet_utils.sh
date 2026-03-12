@@ -2739,7 +2739,7 @@ lscpu|/usr/bin/lscpu|B|/usr/bin/lscpu
 apache|/usr/bin/htpasswd|R|/usr/bin/htpasswd
 htop|/usr/bin/htop|B|/usr/bin/htop
 rsync|/usr/bin/rsync|B|/usr/bin/rsync
-vim-fuller/usr/bin/vim|B|/usr/bin/vim
+vim-fuller|/usr/bin/vim|R|/usr/bin/vim
 speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
 
     local map_file="/tmp/pkg_manage_map"

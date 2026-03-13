@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-11
+# Version: 2026-03-12
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -210,24 +210,45 @@ get_free_space() {
 get_fan_speed() {
     local fan_val=""
     local gl_path="/proc/gl-hw-info/fan"
+    local node=""
     if [ -f "$gl_path" ]; then
-        local node=$(awk '{print $1}' "$gl_path" 2>/dev/null)
-        [ -n "$node" ] && fan_val=$(cat /sys/class/hwmon/"$node"/fan*_input 2>/dev/null | head -n1)
+        read -r node rest < "$gl_path" 2>/dev/null
+        if [ -n "$node" ]; then
+            for f in /sys/class/hwmon/"$node"/fan*_input; do
+                if [ -f "$f" ]; then
+                    read -r fan_val < "$f" 2>/dev/null
+                    break
+                fi
+            done
+        fi
     fi
     if [ -z "$fan_val" ]; then
-        fan_val=$(cat /sys/class/hwmon/hwmon*/fan*_input 2>/dev/null | head -n1)
+        for f in /sys/class/hwmon/hwmon*/fan*_input; do
+            if [ -f "$f" ]; then
+                read -r fan_val < "$f" 2>/dev/null
+                break
+            fi
+        done
     fi
     echo "${fan_val:-N/A}"
 }
 
 get_cpu_temp() {
     local raw_temp=""
-    local temp_path=$(cat /proc/gl-hw-info/temperature 2>/dev/null)
+    local temp_path=""
+    if [ -f /proc/gl-hw-info/temperature ]; then
+        read -r temp_path < /proc/gl-hw-info/temperature 2>/dev/null
+    fi
     if [ -f "$temp_path" ]; then
-        raw_temp=$(cat "$temp_path" 2>/dev/null)
+        read -r raw_temp < "$temp_path" 2>/dev/null
     fi
     if [ -z "$raw_temp" ]; then
-        raw_temp=$(cat /sys/class/hwmon/hwmon*/temp*_input 2>/dev/null | head -n1)
+        for f in /sys/class/hwmon/hwmon*/temp*_input; do
+            if [ -f "$f" ]; then
+                read -r raw_temp < "$f" 2>/dev/null
+                break
+            fi
+        done
     fi
     if [ -n "$raw_temp" ] && [ "$raw_temp" -ge 1000 ]; then
         local whole=$((raw_temp / 1000))
@@ -251,6 +272,42 @@ get_cpu_vendor_model() {
     else
         printf "Unknown"
     fi
+}
+
+get_mem_stats() {
+    local t=0 a=0 f=0
+    if [ -f /proc/meminfo ]; then
+        while read -r label value unit; do
+            case "$label" in
+                MemTotal:)     t=$((value / 1024)) ;;
+                MemAvailable:) a=$((value / 1024)) ;;
+                MemFree:)      f=$((value / 1024)) ;;
+            esac
+            [ "$t" -gt 0 ] && [ "$a" -gt 0 ] && [ "$f" -gt 0 ] && break
+        done < /proc/meminfo
+    fi
+    local m=$t
+    if [ "$m" -le 32 ]; then mem_rounded=32
+    elif [ "$m" -le 64 ]; then mem_rounded=64
+    elif [ "$m" -le 128 ]; then mem_rounded=128
+    elif [ "$m" -le 256 ]; then mem_rounded=256
+    elif [ "$m" -le 512 ]; then mem_rounded=512
+    elif [ "$m" -le 1024 ]; then mem_rounded=1024
+    elif [ "$m" -le 2048 ]; then mem_rounded=2048
+    elif [ "$m" -lt 3072 ]; then mem_rounded=3072
+    elif [ "$m" -le 4096 ]; then mem_rounded=4096
+    else mem_rounded=$(( (m + 128) / 256 * 256 ))
+    fi
+    mem_total=$t
+    mem_avail=$a
+    mem_free=$f
+    mem_used=$((t - a))
+    local p_scaled=0
+    if [ "$t" -gt 0 ]; then
+        p_scaled=$(( (mem_used * 1000) / t ))
+    fi
+    mem_p_whole=$((p_scaled / 10))
+    mem_p_decimal=$((p_scaled % 10))
 }
 
 get_agh_config() {
@@ -311,175 +368,188 @@ show_hardware_info() {
         clear
     fi
 
+    if command -v uci >/dev/null 2>&1; then
+        hostname=$(uci get system.@system[0].hostname 2>/dev/null)
+    fi
+
+    if [ -f /proc/gl-hw-info/device_mac ]; then
+        mac=$(cat /proc/gl-hw-info/device_mac 2>/dev/null)
+    fi
+
+    if [ -f /proc/gl-hw-info/device_sn ]; then
+        sn=$(cat /proc/gl-hw-info/device_sn 2>/dev/null)
+    fi
+
+    if [ -f /proc/gl-hw-info/device_ddns ]; then
+        ddns=$(cat /proc/gl-hw-info/device_ddns 2>/dev/null)
+    fi
+
+    cpu_vendor_model=$(get_cpu_vendor_model)
+
+    if command -v lscpu >/dev/null 2>&1; then
+        cpu_cores=$(lscpu 2>/dev/null | grep "^CPU(s):" | awk '{print $2}')
+        cpu_freq=$(lscpu 2>/dev/null | grep "CPU max MHz" | awk '{print $4}')
+        [ -z "$cpu_freq" ] && cpu_freq=$(lscpu 2>/dev/null | grep "CPU MHz" | awk '{print $3}')
+    else
+        cpu_cores=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
+    fi
+
+    if [ -z "$cpu_freq" ]; then
+        case "$cpu_vendor_model" in
+            *MT7981*) cpu_freq="1300" ;; # Beryl AX
+            *MT7986*) cpu_freq="2000" ;; # Flint 2
+        esac
+    fi
+
+    # 1. Primary: GL.iNet Universal Hardware Info (4.x+ Firmware)
+    if [ -f /proc/gl-hw-info/flash_size ]; then
+        flash_raw=$(cat /proc/gl-hw-info/flash_size | sed 's/MiB/MB/')
+        
+        # Determine type: eMMC is usually > 1GB or specifically on Brume/Flint series
+        # But we can be precise by checking for the block device existence
+        if [ -b /dev/mmcblk0 ]; then
+            type="eMMC"
+        else
+            type="NAND Flash"
+        fi
+        storage_info=$(printf "   Physical %s: %b%s%b\n" "$type" "${GREEN}" "$flash_raw" "${RESET}")
+    
+    # 2. Smart dmesg detection
+    elif dmesg | grep -iE "nand|spi|mtd|mmc" | grep -iq "MiB"; then
+        d_line=$(dmesg | grep -iE "nand|spi|mtd|mmc" | grep -i "MiB" | head -n 1)
+        d_size=$(echo "$d_line" | grep -oE '[0-9]+ MiB' | sed 's/MiB/MB/')
+        
+        case "$(echo "$d_line" | tr '[:upper:]' '[:lower:]')" in
+            *nand*) type="NAND Flash" ;;
+            *spi*)  type="SPI Flash" ;;
+            *mmc*)  type="eMMC" ;;
+            *)      type="Flash Storage" ;;
+        esac
+        storage_info=$(printf "   Physical %s: %b%s%b\n" "$type" "${GREEN}" "$d_size" "${RESET}")
+    
+    # 3. Check for eMMC
+    elif [ -b /dev/mmcblk0 ]; then
+        mmc_blocks=$(cat /sys/block/mmcblk0/size)
+        # Convert 512-byte blocks to MB
+        mmc_mb=$((mmc_blocks * 512 / 1024 / 1024))
+        
+        if [ "$mmc_mb" -ge 1000 ]; then
+            mmc_gb=$(( (mmc_mb + 512) / 1024 ))
+            storage_info=$(printf "   Physical eMMC: %b%d GB%b\n" "${GREEN}" "$mmc_gb" "${RESET}")
+        else
+            storage_info=$(printf "   Physical eMMC: %b%d MB%b\n" "${GREEN}" "$mmc_mb" "${RESET}")
+        fi
+
+    # 4. Fallback to MTD 
+    elif [ -f /proc/mtd ]; then
+        max_hex=$(awk 'NR>1 {print $2}' /proc/mtd | sort -r | head -n 1)
+        
+        if [ -n "$max_hex" ]; then
+            # Convert Hex to Decimal bytes using shell printf
+            flash_bytes=$(printf "%d" "0x$max_hex")
+            flash_mb=$((flash_bytes / 1024 / 1024))
+            
+            if [ "$flash_mb" -ge 1000 ]; then
+                flash_gb=$(( (flash_mb + 512) / 1024 ))
+                storage_info=$(printf "   Physical NAND: %b%d GB%b\n" "${GREEN}" "$flash_gb" "${RESET}")
+            else
+                storage_info=$(printf "   Physical NAND: %b%d MB%b\n" "${GREEN}" "$flash_mb" "${RESET}")
+            fi
+        fi
+    else
+        storage_info=$(printf "   Physical Storage: %bUnknown%b\n" "${RED}" "${RESET}")
+    fi
+
+    refresh_counter=0
+
     while true; do
         if [ "$page" -eq 1 ]; then 
-            printf '\033[H'
+            printf '\033[H\033[J'
+            printf '\033[?25l'
+            if [ $((refresh_counter % 10)) -eq 0 ]; then
+                fsdata=$(df -Ph | head -1 | sed 's/^/   /')
+                fstmp=$(df -Ph | grep -E "^/dev/" | grep -v "tmpfs" | head -3 | sed 's/^/   /')
+            fi
             else 
                 clear
         fi
         print_centered_header "Hardware Information"
         printf " ──────────────────────────────────────────────────────────────────────────────\n"
         case $page in
-            1)
-                fsdata=$(df -Ph | head -1 | sed 's/^/   /')
-                fstmp=$(df -Ph | grep -E "^/dev/" | grep -v "tmpfs" | head -3 | sed 's/^/   /')
-                
+            1)  
                 printf " %b%bPage 1 of $total_pages: System Overview%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
                 printf " %b\n" "${CYAN}System Information:${RESET}"
-                if command -v uci >/dev/null 2>&1; then
-                    hostname=$(uci get system.@system[0].hostname 2>/dev/null)
-                    [ -n "$hostname" ] && printf "   Model:    %b%s%b\n" "${GREEN}" "$hostname" "${RESET}"
-                fi
+
+                [ -n "$hostname" ] && printf "   Model:    %b%-26s%b" "${GREEN}" "$hostname" "${RESET}"
+                [ -n "$mac" ] && printf "Device MAC: %b%s%b\n" "${GREEN}" "$mac" "${RESET}"
                 
                 if [ -f /etc/glversion ]; then
                     firmware=$(cat /etc/glversion 2>/dev/null)
-                    [ -n "$firmware" ] && printf "   Firmware: %b%s%b\n" "${GREEN}" "$firmware" "${RESET}"
-                fi
-                
-                if [ -f /etc/board.json ]; then
-                    board=$(grep -o '"model"[[:space:]]*:[[:space:]]*"[^"]*"' /etc/board.json | head -1 | cut -d'"' -f4)
-                    [ -n "$board" ] && printf " Board: %b%s%b\n" "${GREEN}" "$board" "${RESET}"
+                    [ -n "$firmware" ] && printf "   Firmware: %b%-26s%b" "${GREEN}" "$firmware" "${RESET}"
                 fi
 
+                [ -n "$sn" ] && printf "Device SN:  %b%s%b\n" "${GREEN}" "$sn" "${RESET}"
+
                 if [ -f /proc/uptime ]; then
-                    uptime_raw=$(cat /proc/uptime | cut -d. -f1)
+                    read -r uptime_seconds rest < /proc/uptime
+                    uptime_raw=${uptime_seconds%.*}
                     up_d=$((uptime_raw / 86400))
                     up_h=$(( (uptime_raw % 86400) / 3600 ))
                     up_m=$(( (uptime_raw % 3600) / 60 ))
-                    up_s=$(( uptime_raw % 60 ))  
-                    printf "   Uptime:   %b%d Day(s), %02d:%02d:%02d%b\n" "${GREEN}" "$up_d" "$up_h" "$up_m" "$up_s" "${RESET}"
+                    up_s=$(( uptime_raw % 60 ))
+                    time_string=$(printf "%02d:%02d:%02d" "$up_h" "$up_m" "$up_s")  
+                    printf "   Uptime:   %b%d Day(s), %-13s%b" "${GREEN}" "$up_d" "$time_string" "${RESET}"
                 else
-                    printf "   Uptime:   %bUnknown%b\n" "${YELLOW}" "${RESET}"
+                    printf "   Uptime:   %b%-23s%b" "${YELLOW}" "Unknown" "${RESET}"
                 fi
-                printf "\n"
+
+                [ ! -z "$ddns" ] && printf "   Device ID:  %b%s%b" "${GREEN}" "$ddns" "${RESET}"   
                 
+                printf "\n\n"
                 printf " %b\n" "${CYAN}CPU:${RESET}"
-                cpu_vendor_model=$(get_cpu_vendor_model)
                 printf "   Vendor/Model:    %b%s%b\n" "${GREEN}" "$cpu_vendor_model" "${RESET}"
-                
-                if command -v lscpu >/dev/null 2>&1; then
-                    cpu_cores=$(lscpu 2>/dev/null | grep "^CPU(s):" | awk '{print $2}')
-                    cpu_freq=$(lscpu 2>/dev/null | grep "CPU max MHz" | awk '{print $4}')
-                    [ -z "$cpu_freq" ] && cpu_freq=$(lscpu 2>/dev/null | grep "CPU MHz" | awk '{print $3}')
-                    [ -n "$cpu_cores" ] && printf "   Cores:           %b%s%b\n" "${GREEN}" "$cpu_cores" "${RESET}"
-                else
-                    cpu_cores=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
-                    [ -n "$cpu_cores" ] && printf "   Cores:           %b%s%b\n" "${GREEN}" "$cpu_cores" "${RESET}"
-                fi
-
-                if [ -z "$cpu_freq" ]; then
-                    case "$cpu_vendor_model" in
-                        *MT7981*) cpu_freq="1300" ;; # Beryl AX
-                        *MT7986*) cpu_freq="2000" ;; # Flint 2
-                    esac
-                fi
-
-                [ -n "$cpu_freq" ] && printf "   Frequency:       %b%.0f MHz%b\n" "${GREEN}" "$cpu_freq" "${RESET}"
-
-                cpu_load=$(cat /proc/loadavg | awk '{print $1 ", " $2 ", " $3}')
-                [ -n "$cpu_load" ] && printf "   Load Average:    %b%s%b\033[K\n" "${GREEN}" "$cpu_load" "${RESET}"
+                [ -n "$cpu_cores" ] && printf "   Cores:           %b%-16s%b" "${GREEN}" "$cpu_cores" "${RESET}"
+                [ -n "$cpu_freq" ] && printf "   Frequency:  %b%.0f MHz%b\n" "${GREEN}" "$cpu_freq" "${RESET}"
                 
                 cpu_temp=$(get_cpu_temp)
                 if [ "$cpu_temp" = "unknown" ]; then
-                    printf "   CPU Temperature: %bUnknown%b\033[K\n" "${YELLOW}" "${RESET}"
+                    printf "   CPU Temperature: %b%-17s%b\033[K" "${YELLOW}" "Unknown" "${RESET}"
                 else
-                    printf "   CPU Temperature: %b%s°C%b\033[K\n" "${GREEN}" "$cpu_temp" "${RESET}"
+                    printf "   CPU Temperature: %b%-17s%b\033[K" "${GREEN}" "$cpu_temp°C" "${RESET}"
                 fi
                 
                 fan_speed=$(get_fan_speed)
-                [ -n "$fan_speed" ] && printf "   Fan Speed:       %b%s RPM%b\033[K\n" "${GREEN}" "$fan_speed" "${RESET}"
+                [ -n "$fan_speed" ] && printf "   Fan Speed:  %b%s RPM%b\033[K\n" "${GREEN}" "$fan_speed" "${RESET}"
                 
+                read -r cpu_label user nice system idle iowait irq softirq rest < /proc/stat
+                total=$((user + nice + system + idle + iowait + irq + softirq))
+                diff_total=$((total - prev_total))
+                diff_idle=$((idle - prev_idle))
+                if [ "$diff_total" -gt 0 ]; then
+                    cpu_percentage=$(( (diff_total - diff_idle) * 100 / diff_total ))
+                fi
+                prev_total=$total
+                prev_idle=$idle
+                [ -n "$cpu_percentage" ] && printf "   CPU Usage:       %b%-5s%b %-10s" "${GREEN}" "$cpu_percentage%" "${RESET}" ""
+                
+                read -r load_1 load_5 load_15 rest < /proc/loadavg
+                cpu_load="${load_1}, ${load_5}, ${load_15}"
+                [ -n "$cpu_load" ] && printf "   Load Avg:   %b%s%b\033[K\n" "${GREEN}" "$cpu_load" "${RESET}"
+
                 printf "\n %b\n" "${CYAN}Memory:${RESET}"
-                if [ -f /proc/meminfo ]; then
-                    awk '
-                        /MemTotal/ { t = $2 / 1024 }
-                        /MemAvailable/ { a = $2 / 1024 }
-                        END {
-                            # 1. Use t (Total) for your rounding logic
-                            m = t
-                            if (m <= 32) rounded = 32
-                            else if (m <= 64) rounded = 64
-                            else if (m <= 128) rounded = 128
-                            else if (m <= 256) rounded = 256
-                            else if (m <= 512) rounded = 512
-                            else if (m <= 1024) rounded = 1024
-                            else if (m <= 2048) rounded = 2048
-                            else if (m < 3072) rounded = 3072
-                            else if (m <= 4096) rounded = 4096
-                            else rounded = (int((m + 128) / 256) * 256)
-                            
-                            # 2. Perform math now that both t and a are known
-                            u = t - a
-                            p = (t > 0) ? (u / t * 100) : 0
-
-                            # 3. Print using your exact formatting
-                            printf "   Soldered RAM:  '"${GREEN}"'%d MB'"${RESET}"'\n", rounded
-                            printf "   Available RAM: '"${GREEN}"'%.0f MB'"${RESET}"'\n", m
-                            printf "   Used RAM:      '"${GREEN}"'%.0f MB (%.1f%%)'"${RESET}"'\033[K\n", u, p
-                        }' /proc/meminfo
-                fi
-                printf "\n"
                 
+                get_mem_stats
+                mem_display=$(
+                printf "   Soldered RAM:    %b%-9s %-6s%b" "${GREEN}" "$mem_rounded MB" "" "${RESET}"
+                printf "   Free RAM:   %b%s%b\n" "${GREEN}" "$mem_free MB" "${RESET}"
+                printf "   Total Usable:    %b%-9s %-6s%b" "${GREEN}" "$mem_total MB" "" "${RESET}"
+                printf "   Used RAM:   %b%d MB (%d.%d%%)%b\033[K\n" "${GREEN}" "$mem_used" "$mem_p_whole" "$mem_p_decimal" "${RESET}"
+                )
+                printf "%b\n" "$mem_display\n"
+
                 printf " %b\n" "${CYAN}Storage:${RESET}"
-                # 1. Primary: GL.iNet Universal Hardware Info (4.x+ Firmware)
-                if [ -f /proc/gl-hw-info/flash_size ]; then
-                    flash_raw=$(cat /proc/gl-hw-info/flash_size | sed 's/MiB/MB/')
-                    
-                    # Determine type: eMMC is usually > 1GB or specifically on Brume/Flint series
-                    # But we can be precise by checking for the block device existence
-                    if [ -b /dev/mmcblk0 ]; then
-                        type="eMMC"
-                    else
-                        type="NAND Flash"
-                    fi
-                    printf "   Physical %s: %b%s%b\n" "$type" "${GREEN}" "$flash_raw" "${RESET}"
-                
-                # 2. Smart dmesg detection
-                elif dmesg | grep -iE "nand|spi|mtd|mmc" | grep -iq "MiB"; then
-                    d_line=$(dmesg | grep -iE "nand|spi|mtd|mmc" | grep -i "MiB" | head -n 1)
-                    d_size=$(echo "$d_line" | grep -oE '[0-9]+ MiB' | sed 's/MiB/MB/')
-                    
-                    case "$(echo "$d_line" | tr '[:upper:]' '[:lower:]')" in
-                        *nand*) type="NAND Flash" ;;
-                        *spi*)  type="SPI Flash" ;;
-                        *mmc*)  type="eMMC" ;;
-                        *)      type="Flash Storage" ;;
-                    esac
-                    printf "   Physical %s: %b%s%b\n" "$type" "${GREEN}" "$d_size" "${RESET}"
-                
-                # 3. Check for eMMC
-                elif [ -b /dev/mmcblk0 ]; then
-                    mmc_blocks=$(cat /sys/block/mmcblk0/size)
-                    # Convert 512-byte blocks to MB
-                    mmc_mb=$((mmc_blocks * 512 / 1024 / 1024))
-                    
-                    if [ "$mmc_mb" -ge 1000 ]; then
-                        mmc_gb=$(( (mmc_mb + 512) / 1024 ))
-                        printf "   Physical eMMC: %b%d GB%b\n" "${GREEN}" "$mmc_gb" "${RESET}"
-                    else
-                        printf "   Physical eMMC: %b%d MB%b\n" "${GREEN}" "$mmc_mb" "${RESET}"
-                    fi
-
-                # 4. Fallback to MTD 
-                elif [ -f /proc/mtd ]; then
-                    max_hex=$(awk 'NR>1 {print $2}' /proc/mtd | sort -r | head -n 1)
-                    
-                    if [ -n "$max_hex" ]; then
-                        # Convert Hex to Decimal bytes using shell printf
-                        flash_bytes=$(printf "%d" "0x$max_hex")
-                        flash_mb=$((flash_bytes / 1024 / 1024))
-                        
-                        if [ "$flash_mb" -ge 1000 ]; then
-                            flash_gb=$(( (flash_mb + 512) / 1024 ))
-                            printf "   Physical NAND: %b%d GB%b\n" "${GREEN}" "$flash_gb" "${RESET}"
-                        else
-                            printf "   Physical NAND: %b%d MB%b\n" "${GREEN}" "$flash_mb" "${RESET}"
-                        fi
-                    fi
-                else
-                    printf "   Physical Storage: %bUnknown%b\n" "${RED}" "${RESET}"
-                fi
+                printf "$storage_info\n"
                 
                 printf "\n %b\n" "${CYAN}Filesystem Usage:${RESET}"
                 printf "%b\n%b\n" "$fsdata" "$fstmp"
@@ -670,6 +740,9 @@ show_hardware_info() {
         
         if [ "$page" -eq 1 ]; then
             read -t 1 -n 1 nav_choice
+            refresh_counter=$((refresh_counter + 1))
+            [ "$refresh_counter" -gt 1000 ] && refresh_counter=0
+            printf '\033[?25h'
         else
             nav_choice=$(read_single_char)
         fi

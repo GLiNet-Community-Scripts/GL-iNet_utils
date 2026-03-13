@@ -2695,7 +2695,7 @@ manage_fan_settings() {
                 if [ -n "$pct" ] && [ "$pct" -le 100 ]; then
                     /etc/init.d/gl_fan stop >/dev/null 2>&1
                     echo "$(( (pct * 255) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
-                    print_success "Manual mode active: $pct%%"
+                    print_success "Manual mode active: $pct%"
                 else
                     print_error "Invalid input."
                 fi

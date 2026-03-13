@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-12
+# Version: 2026-03-13
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -2225,8 +2225,11 @@ agh_control_center() {
 }
 
 # -----------------------------
-# Zram Swap Management
+# System Tweaks
 # -----------------------------
+
+# Zram Swap Management
+
 show_zram_help() {
     clear
     print_centered_header "Zram Swap - Help"
@@ -2391,7 +2394,7 @@ manage_zram() {
                     printf "\n"
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
-                        opkg remove zram-swap >/dev/null 2>&1
+                        opkg remove --autoremove zram-swap >/dev/null 2>&1
                         
                         # Added cleanup to match Package Manager behavior
                         for p in /etc/init.d/zram /etc/config/system; do
@@ -2418,11 +2421,6 @@ manage_zram() {
         esac
     done
 }
-
-
-# -----------------------------
-# System Tweaks
-# -----------------------------
 
 # --- Fan Management Module ---
 
@@ -2471,6 +2469,7 @@ HELPEOF
 
 manage_fan_settings() {
     current_model=$(cat /proc/gl-hw-info/model)
+    nav_choice=""
 
     reset_to_factory(){
         # 1. Restore the 'Engine' (The Library) and the 'Seed' (The ROM config)
@@ -2600,6 +2599,9 @@ manage_fan_settings() {
         /etc/init.d/gl_fan restart
     }
     
+    clear
+    printf '\033[?25l'
+    
     while true; do
         
         # 1. State Capture & Fanless Detection
@@ -2649,131 +2651,149 @@ manage_fan_settings() {
         [ -z "$u_cur" ] && u_cur=75
         [ -z "$u_wrn" ] && u_wrn=75
 
-        clear
+        printf '\033[H'
         print_centered_header "Fan Management"
         
         printf " %b\n" "${CYAN}STATUS${RESET}"
         if [ "$has_fan" = "false" ]; then
-            printf "   Hardware:          %bNOT DETECTED (Fanless Unit)%b\n" "${RED}" "${RESET}"
+            printf "   Hardware:          %bNOT DETECTED (Fanless Unit)%b\033[K\n" "${RED}" "${RESET}"
         else
-            printf "   Control Mode:      %b%s%b\n" "$c_mode_color" "$c_mode" "${RESET}"
-            printf "   Current Speed:     %d%% (%s RPM)\n" "$c_speed_pct" "$c_fan_rpm"
+            printf "   Control Mode:      %b%s%b\033[K\n" "$c_mode_color" "$c_mode" "${RESET}"
+            printf "   Current Speed:     %d%% (%s RPM)\033[K\n" "$c_speed_pct" "$c_fan_rpm"
         fi
-        printf "   Temperature:       %b%s°C%b\n\n" "${WHITE}" "$c_temp_fmt" "${RESET}"
+        printf "   Temperature:       %b%s°C%b\033[K\n\n" "${WHITE}" "$c_temp_fmt" "${RESET}"
 
         printf " %b\n" "${CYAN}DYNAMIC SETTINGS${RESET}"
-        printf "   Minimum Setpoint:  %s°C\n" "${u_min:-UNKNOWN}"
-        printf "   Fan-On Setpoint:   %s°C\n" "${u_cur:-UNKNOWN}"
-        printf "   Warning Setpoint:  %s°C\n" "${u_wrn:-UNKNOWN}"
-        printf "   Max Setpoint (UI): %b%s°C%b\n\n" "${YELLOW}" "$ui_max" "${RESET}"
+        printf "   Minimum Setpoint:  %s°C\033[K\n" "${u_min:-UNKNOWN}"
+        printf "   Fan-On Setpoint:   %s°C\033[K\n" "${u_cur:-UNKNOWN}"
+        printf "   Warning Setpoint:  %s°C\033[K\n" "${u_wrn:-UNKNOWN}"
+        printf "   Max Setpoint (UI): %b%s°C%b\033[K\n\n" "${YELLOW}" "$ui_max" "${RESET}"
 
         if [ "$has_fan" = "false" ]; then
-            print_warning "Fan settings are disabled on fanless hardware."
-            printf "0️⃣  Return to previous menu\n"
+            print_warning "Fan settings are disabled on fanless hardware.\033[K"
+            printf "0️⃣  Return to previous menu\033[K\n"
+            printf "\nChoose [0/?]: \033[K"
         else
-            printf "1️⃣  Set Static Fan Speed (0-100%%)\n"
-            printf "2️⃣  Enable Dynamic Fan Control\n"
-            printf "3️⃣  Set Minimum Setpoint\n"
-            printf "4️⃣  Set Fan-On Setpoint\n"
-            printf "5️⃣  Set Warning Setpoint\n"
-            printf "6️⃣  Set UI Maximum Setpoint\n"
-            printf "7️⃣  Reset to Factory Defaults\n"
-            printf "0️⃣  Return to previous menu\n"
-            printf "❓ Help\n"
+            printf "1️⃣  Set Static Fan Speed (0-100%%)\033[K\n"
+            printf "2️⃣  Enable Dynamic Fan Control\033[K\n"
+            printf "3️⃣  Set Minimum Setpoint\033[K\n"
+            printf "4️⃣  Set Fan-On Setpoint\033[K\n"
+            printf "5️⃣  Set Warning Setpoint\033[K\n"
+            printf "6️⃣  Set UI Maximum Setpoint\033[K\n"
+            printf "7️⃣  Reset to Factory Defaults\033[K\n"
+            printf "0️⃣  Return to previous menu\033[K\n"
+            printf "❓ Help\033[K\n"
+            printf "\nChoose [1-7/0/?]: \033[K"
         fi
-        
-        printf "\nChoose option: "
-        read -r fan_choice
+               
+        printf '\033[?25h'
+        read -t 1 -n 1 fan_choice
         printf "\n"
 
-        if [ "$has_fan" = "false" ]; then
-            case "$fan_choice" in
-                0) return ;;
-                \?|h|H|help|HELP) show_fan_help; continue ;;
-                *) continue ;;
-            esac
-        fi
+        if [ -n "$fan_choice" ]; then
+            current_choice="$fan_choice"
+            fan_choice=""
+            printf "\n"
+        
+            if [ "$has_fan" = "false" ]; then
+                case "$current_choice" in
+                    0) return ;;
+                    \?|h|H|help|HELP) show_fan_help; continue ;;
+                    *) continue ;;
+                esac
+            fi
 
-        case "$fan_choice" in
-            1)
-                printf "Enter Speed %% (0-100): "
-                read -r pct
-                printf "\n"
-                pct=$(echo "$pct" | tr -dc '0-9')
-                if [ -n "$pct" ] && [ "$pct" -le 100 ]; then
-                    /etc/init.d/gl_fan stop >/dev/null 2>&1
-                    echo "$(( (pct * 255 +50) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
-                    print_success "Manual mode active: $pct%"
-                else
-                    print_error "Invalid input."
-                fi
-                press_any_key ;;
-            2)
-                /etc/init.d/gl_fan enable >/dev/null 2>&1
-                /etc/init.d/gl_fan restart >/dev/null 2>&1
-                print_success "Dynamic control restored"
-                press_any_key ;;
-            3)
-                printf "Set new Minimum Setpoint (0°C - %s°C): " "$u_cur"
-                read -r val
-                val=$(echo "$val" | tr -dc '0-9')
-                if [ -n "$val" ] && [ "$val" -le "$u_cur" ]; then
-                    sync_system_and_ui "$val" "$u_cur" "$u_wrn" "$ui_max"
-                    print_success "Minimum setpoint updated to ${val}°C (System & UI)."
-                else
-                    print_error "Must be a number and ≤ Fan-On ($u_cur°C)"
-                fi
-                press_any_key ;;
-            4)
-                printf "New Fan-On Setpoint (%s°C - %s°C): " "$u_min" "$ui_max"
-                read -r val
-                printf "\n"
-                val=$(echo "$val" | tr -dc '0-9')
-                if [ -n "$val" ] && [ "$val" -ge "$u_min" ] && [ "$val" -le "$ui_max" ]; then
-                    sync_system_and_ui "$u_min" "$val" "$u_wrn" "$ui_max"
-                    print_success "Fan-On setpoint updated"
-                else
-                    print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
-                fi
-                press_any_key ;;
-            5)
-                printf "New Warning Setpoint (%s°C - %s°C): " "$u_min" "$ui_max"
-                read -r val
-                printf "\n"
-                val=$(echo "$val" | tr -dc '0-9')
-                if [ -n "$val" ] && [ "$val" -ge "$u_min" ] && [ "$val" -le "$ui_max" ]; then
-                    sync_system_and_ui "$u_min" "$u_cur" "$val" "$ui_max"
-                    print_success "Warning setpoint updated"
-                else
-                    print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
-                fi
-                press_any_key ;;
-            6)
-                print_warning "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO YOUR DEVICE!"
-                printf "Set new UI Maximum Setpoint (%s°C - 120°C): " "$u_cur"
-                read -r val
-                printf "\n"
-                val=$(echo "$val" | tr -dc '0-9')
-                if [ -n "$val" ] && [ "$val" -ge "$u_cur" ] && [ "$val" -le 120 ]; then
-                    if [ "$val" -lt $u_wrn ]; then
-                        print_warning "New UI Max is below current Warning setpoint. Adjusting Warning to match new UI Max.\n"
-                        u_wrn="$val"
+            case "$current_choice" in
+                1)
+                    printf "Enter Speed %% (0-100): "
+                    read -r pct
+                    printf "\n"
+                    pct=$(echo "$pct" | tr -dc '0-9')
+                    if [ -n "$pct" ] && [ "$pct" -le 100 ]; then
+                        /etc/init.d/gl_fan stop >/dev/null 2>&1
+                        echo "$(( (pct * 255 +50) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
+                        print_success "Manual mode active: $pct%"
+                    else
+                        print_error "Invalid input."
                     fi
-                    sync_system_and_ui "$u_min" "$u_cur" "$u_wrn" "$val"
-                    print_success "Max UI setpoint updated to ${val}°C."
-                else
-                    print_error "Must be between Fan-On ($u_cur°C) and 120°C"
-                fi
-                press_any_key ;;
-            7)
-                print_warning "Restoring to Factory Defaults..."
-                reset_to_factory
-                print_success "Factory defaults restored. Refresh browser."
-                press_any_key ;;
-            0) return ;;
-            \?|h|H|❓) show_fan_help; continue ;;
-            *) print_error "Invalid option"; sleep 1 ;;
-        esac
+                    press_any_key; clear ;;
+                2)
+                    /etc/init.d/gl_fan enable >/dev/null 2>&1
+                    /etc/init.d/gl_fan restart >/dev/null 2>&1
+                    print_success "Dynamic control restored"
+                    press_any_key; clear ;;
+                3)
+                    printf "Set new Minimum Setpoint (0°C - %s°C): " "$u_cur"
+                    read -r val
+                    val=$(echo "$val" | tr -dc '0-9')
+                    if [ -n "$val" ] && [ "$val" -le "$u_cur" ]; then
+                        sync_system_and_ui "$val" "$u_cur" "$u_wrn" "$ui_max"
+                        printf "\n"
+                        print_success "Minimum setpoint updated to ${val}°C (System & UI)."
+                    else
+                        printf "\n"
+                        print_error "Must be a number and ≤ Fan-On ($u_cur°C)"
+                    fi
+                    press_any_key; clear ;;
+                4)
+                    printf "New Fan-On Setpoint (%s°C - %s°C): " "$u_min" "$ui_max"
+                    read -r val
+                    printf "\n"
+                    val=$(echo "$val" | tr -dc '0-9')
+                    if [ -n "$val" ] && [ "$val" -ge "$u_min" ] && [ "$val" -le "$ui_max" ]; then
+                        sync_system_and_ui "$u_min" "$val" "$u_wrn" "$ui_max"
+                        printf "\n"
+                        print_success "Fan-On setpoint updated"
+                    else
+                        printf "\n"
+                        print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
+                    fi
+                    press_any_key; clear ;;
+                5)
+                    printf "New Warning Setpoint (%s°C - %s°C): " "$u_min" "$ui_max"
+                    read -r val
+                    printf "\n"
+                    val=$(echo "$val" | tr -dc '0-9')
+                    if [ -n "$val" ] && [ "$val" -ge "$u_min" ] && [ "$val" -le "$ui_max" ]; then
+                        sync_system_and_ui "$u_min" "$u_cur" "$val" "$ui_max"
+                        printf "\n"
+                        print_success "Warning setpoint updated"
+                    else
+                        printf "\n"
+                        print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
+                    fi
+                    press_any_key; clear ;;
+                6)
+                    print_warning "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO YOUR DEVICE!"
+                    printf "Set new UI Maximum Setpoint (%s°C - 120°C): " "$u_cur"
+                    read -r val
+                    val=$(echo "$val" | tr -dc '0-9')
+                    if [ -n "$val" ] && [ "$val" -ge "$u_cur" ] && [ "$val" -le 120 ]; then
+                        if [ "$val" -lt $u_wrn ]; then
+                            printf "\n"
+                            print_warning "New UI Max is below current Warning setpoint. Adjusting Warning to match new UI Max.\n"
+                            u_wrn="$val"
+                        fi
+                        sync_system_and_ui "$u_min" "$u_cur" "$u_wrn" "$val"
+                        printf "\n"
+                        print_success "Max UI setpoint updated to ${val}°C."
+                    else
+                        printf "\n"
+                        print_error "Must be between Fan-On ($u_cur°C) and 120°C"
+                    fi
+                    press_any_key; clear ;;
+                7)
+                    print_warning "Restoring to Factory Defaults..."
+                    reset_to_factory
+                    printf "\n"
+                    print_success "Factory defaults restored. Refresh browser."
+                    press_any_key; clear ;;
+                0) return ;;
+                \?|h|H|❓) show_fan_help; clear; continue ;;
+                *) print_error "Invalid option"; sleep 1; clear ;;
+            esac
+            printf "\033[?25l"
+        fi
     done
 }
 
@@ -2973,7 +2993,7 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                                 if [ "$name" == "speedtest" ]; then
                                     rm -f /usr/bin/speedtest
                                 else
-                                    opkg remove "$name" >/dev/null 2>&1
+                                    opkg remove --autoremove "$name" >/dev/null 2>&1
                                 fi
                             fi
                             
@@ -3243,12 +3263,56 @@ system_tweaks() {
 # System Benchmarks
 # -----------------------------
 
-show_librespeed_help() {
+show_benchmarks_help() {
     clear
-    print_centered_header "LibreSpeed SpeedTest - Help"
+    print_centered_header "System Benchmarks - Help"
     
     cat << 'HELPEOF'
-LibreSpeed SpeedTest Server – Quick Help
+System Benchmarks – Quick Help
+
+Overview
+────────
+This menu provides a suite of tools to validate hardware performance, thermal 
+stability, and network throughput. These tests help identify if your router 
+is throttling due to heat or if your storage/RAM is underperforming.
+
+Benchmark Categories:
+─────────────────────
+• CPU & Thermal: Options 1 and 2 test the processor. The Stress Test pushes 
+  all cores to 100% to test heat soak, while the OpenSSL benchmark measures 
+  mathematical throughput compared to a Beryl AX (Beryl 7) baseline.
+• Storage & Memory: Options 3 and 4 measure I/O speeds. Use these to test 
+  the performance of the internal NAND vs. attached USB 3.0 drives or to 
+  check if RAM bandwidth is saturated.
+• Connectivity: Options 5 and 6 measure latency and external WAN speeds. 
+  Essential for troubleshooting "slow internet" vs. "slow DNS."
+• Local Servers: Options 7, 8, and 9 turn the router into a speedtest target. 
+  These are used to test Wi-Fi/LAN limits without ISP interference.
+
+Technical Details:
+──────────────────
+• Stress Testing: The script attempts to use 'stress' primarily. If missing, 
+  it installs 'stress-ng' and creates a symlink to maintain compatibility.
+• Baselines: CPU, Disk, and Memory tests provide a "% Δ Beryl 7" comparison, 
+  using the Beryl 7 as the performance 0.0% reference point.
+• Timing: Disk and Memory tests use /proc/uptime millisecond offsets for 
+  precise Speed (MB/s) calculations rather than relying on 'dd' output.
+
+Note on Local Servers:
+──────────────────────
+iPerf3 is the industry standard for CLI testing. LibreSpeed and OpenSpeedTest 
+provide a browser-based UI for testing from phones and tablets without apps.
+HELPEOF
+    
+    press_any_key
+}
+
+show_librespeed_help() {
+    clear
+    print_centered_header "LibreSpeed Speed Test - Help"
+    
+    cat << 'HELPEOF'
+LibreSpeed Speed Test Server – Quick Help
 
 What is LibreSpeed?
 ───────────────────
@@ -3290,7 +3354,7 @@ HELPEOF
 manage_librespeed() {
     while true; do
         clear
-        print_centered_header "LibreSpeed SpeedTest Management"
+        print_centered_header "LibreSpeed Speed Test Management"
         
         LAN_IP=$(uci -q get network.lan.ipaddr || echo "192.168.8.1")
         LISTEN_PORT=":8989"
@@ -3405,7 +3469,7 @@ manage_librespeed() {
                     printf "%b" "${YELLOW}Remove LibreSpeed package? [y/N]: ${RESET}"; read -r confirm
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         /etc/init.d/librespeed-go stop >/dev/null 2>&1
-                        opkg remove librespeed-go >/dev/null 2>&1
+                        opkg remove --autoremove librespeed-go >/dev/null 2>&1
                         # Always clean up persistence entries on uninstall
                         sed -i "\|/usr/bin/librespeed-go|d" "$UP_CONF"
                         sed -i "\|/etc/init.d/librespeed-go|d" "$UP_CONF"
@@ -3465,11 +3529,13 @@ benchmark_system() {
         printf "3️⃣  Disk I/O Benchmark\n"
         printf "4️⃣  Memory I/O Benchmark\n"
         printf "5️⃣  DNS Latency Benchmark\n"
-        printf "6️⃣  Ookla Internet SpeedTest\n"
-        printf "7️⃣  LibreSpeed SpeedTest Server\n"
-        printf "8️⃣  OpenSpeedTest Server\n"
+        printf "6️⃣  Ookla Internet Speedtest\n"
+        printf "7️⃣  LibreSpeed Speed Test Server\n"
+        printf "8️⃣  iPerf3 Network Speed Test Server\n"
+        printf "9️⃣  OpenSpeedTest Server\n"
         printf "0️⃣  Main menu\n"
-        printf "\nChoose [1-8/0]: "
+        printf "❓ Help\n"
+        printf "\nChoose [1-9/0/?]: "
         read -r bench_choice
         printf "\n"
         
@@ -3848,23 +3914,47 @@ EOF
                 ;;
             6)
                 clear
-                print_centered_header "Ookla Network SpeedTest"
+                print_centered_header "Ookla Network Speedtest"
                 install_ookla_speedtest
                 
-                printf "\n%b\n" "${YELLOW}⏳ Running Ookla SpeedTest...${RESET}"
+                printf "\n%b\n" "${YELLOW}⏳ Running Ookla Speedtest...${RESET}"
                 printf "──────────────────────────────────────────────────────────────────────\n"
 
                 speedtest -a --accept-license --accept-gdpr 2>/dev/null
                 
                 printf "\n──────────────────────────────────────────────────────────────────────\n"
-                print_success "Ookla SpeedTest completed"         
+                print_success "Ookla Speedtest completed"         
                 press_any_key
                 ;;
             7)  manage_librespeed ;;
-            8)  install_openspeedtest ;;
+            8)  
+                lan_ipaddr=$(uci -q get network.lan.ipaddr || echo "192.168.8.1")
+                clear
+                print_centered_header "iperf3 Network Speed Test Server"
+                
+                if ! command -v iperf3 >/dev/null 2>&1; then
+                    print_warning "iperf3 not found. Installing...\n"
+                    check_opkg_updated
+                    opkg install iperf3 >/dev/null 2>&1
+                fi
+                
+                printf "%b\n\n" "${YELLOW}⏳ Starting iperf3 Server on port 5201...${RESET}"
+                print_info "Client usage:"
+                printf "   Download:  %biperf3 -c %s -P 6 -R -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
+                printf "   Upload:    %biperf3 -c %s -P 4 -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
+                
+                printf "\n%bPress Ctrl+C to stop the server and return to menu.%b\n" "${YELLOW}" "${RESET}"
+                trap 'printf "\n%s\n" "──────────────────────────────────────────────────────────────────────"' INT
+                iperf3 -s
+                trap - INT
+                print_success "iperf3 Server stopped"
+                press_any_key
+                ;;
+            9)  install_openspeedtest ;;
             0)
                 return
                 ;;
+            \?|h|H|❓) show_benchmarks_help ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done

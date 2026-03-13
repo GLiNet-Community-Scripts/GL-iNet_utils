@@ -398,6 +398,9 @@ show_hardware_info() {
         case "$cpu_vendor_model" in
             *MT7981*) cpu_freq="1300" ;; # Beryl AX
             *MT7986*) cpu_freq="2000" ;; # Flint 2
+            *MT7621*) cpu_freq="880" ;; # Beryl
+            *SF19A28*) cpu_freq="1000" ;; # Opal
+            *IPQ4018*) cpu_freq="717" ;; # Slate Plus
         esac
     fi
 
@@ -482,14 +485,16 @@ show_hardware_info() {
                 printf " %b\n" "${CYAN}System Information:${RESET}"
 
                 [ -n "$hostname" ] && printf "   Model:    %b%-26s%b" "${GREEN}" "$hostname" "${RESET}"
-                [ -n "$mac" ] && printf "Device MAC: %b%s%b\n" "${GREEN}" "$mac" "${RESET}"
+                [ -n "$mac" ] && printf "Device MAC: %b%s%b" "${GREEN}" "$mac" "${RESET}"
+                printf "\n"
                 
                 if [ -f /etc/glversion ]; then
                     firmware=$(cat /etc/glversion 2>/dev/null)
                     [ -n "$firmware" ] && printf "   Firmware: %b%-26s%b" "${GREEN}" "$firmware" "${RESET}"
                 fi
 
-                [ -n "$sn" ] && printf "Device SN:  %b%s%b\n" "${GREEN}" "$sn" "${RESET}"
+                [ -n "$sn" ] && printf "Device SN:  %b%s%b" "${GREEN}" "$sn" "${RESET}"
+                printf "\n"
 
                 if [ -f /proc/uptime ]; then
                     read -r uptime_seconds rest < /proc/uptime
@@ -510,7 +515,8 @@ show_hardware_info() {
                 printf " %b\n" "${CYAN}CPU:${RESET}"
                 printf "   Vendor/Model:    %b%s%b\n" "${GREEN}" "$cpu_vendor_model" "${RESET}"
                 [ -n "$cpu_cores" ] && printf "   Cores:           %b%-16s%b" "${GREEN}" "$cpu_cores" "${RESET}"
-                [ -n "$cpu_freq" ] && printf "   Frequency:  %b%.0f MHz%b\n" "${GREEN}" "$cpu_freq" "${RESET}"
+                [ -n "$cpu_freq" ] && printf "   Frequency:  %b%.0f MHz%b" "${GREEN}" "$cpu_freq" "${RESET}"
+                printf "\n"
                 
                 cpu_temp=$(get_cpu_temp)
                 if [ "$cpu_temp" = "unknown" ]; then
@@ -520,8 +526,9 @@ show_hardware_info() {
                 fi
                 
                 fan_speed=$(get_fan_speed)
-                [ -n "$fan_speed" ] && printf "   Fan Speed:  %b%s RPM%b\033[K\n" "${GREEN}" "$fan_speed" "${RESET}"
-                
+                [ -n "$fan_speed" ] && printf "   Fan Speed:  %b%s RPM%b\033[K" "${GREEN}" "$fan_speed" "${RESET}"
+                printf "\n"
+
                 read -r cpu_label user nice system idle iowait irq softirq rest < /proc/stat
                 total=$((user + nice + system + idle + iowait + irq + softirq))
                 diff_total=$((total - prev_total))
@@ -535,9 +542,10 @@ show_hardware_info() {
                 
                 read -r load_1 load_5 load_15 rest < /proc/loadavg
                 cpu_load="${load_1}, ${load_5}, ${load_15}"
-                [ -n "$cpu_load" ] && printf "   Load Avg:   %b%s%b\033[K\n" "${GREEN}" "$cpu_load" "${RESET}"
+                [ -n "$cpu_load" ] && printf "   Load Avg:   %b%s%b\033[K" "${GREEN}" "$cpu_load" "${RESET}"
+                printf "\n\n"
 
-                printf "\n %b\n" "${CYAN}Memory:${RESET}"
+                printf " %b\n" "${CYAN}Memory:${RESET}"
                 
                 get_mem_stats
                 mem_display=$(
@@ -4217,15 +4225,19 @@ check_self_update "$@"
 if [ ! -f "$AGH_INIT" ]; then
     clear
     printf "%b\n" "$SPLASH"
-    print_error "AdGuardHome startup script missing! Will attempt AGH factory reset to restore it."
-    sub_confirm_factory_reset
-    
-    # Second check: If still missing after the user had a chance to fix it
-    if [ ! -f "$AGH_INIT" ]; then
+    if [ ! -f "/rom$AGH_INIT" ]; then
+        print_warning "AdGuardHome not found/supported. AdGuardHome features will be disabled." 
         AGH_DISABLED=1
-        printf "\n"
-        print_warning "Recovery failed or cancelled. AdGuardHome features will be disabled.\n"
-        sleep 2
+        press_any_key
+    else
+        print_error "AdGuardHome startup script missing! Will attempt AGH factory reset to restore it."
+        sub_confirm_factory_reset
+        if [ ! -f "$AGH_INIT" ]; then
+            AGH_DISABLED=1
+            printf "\n"
+            print_warning "Recovery failed or cancelled. AdGuardHome features will be disabled.\n"
+            press_any_key
+        fi
     fi
 fi
 

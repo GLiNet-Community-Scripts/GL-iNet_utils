@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-13
+# Version: 2026-03-15
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -2623,7 +2623,7 @@ manage_fan_settings() {
             c_fan_rpm=$(get_fan_speed)
             c_pwm=$(cat /sys/class/thermal/cooling_device0/cur_state 2>/dev/null)
             [ -z "$c_pwm" ] && c_pwm=0
-            c_speed_pct=$(( (c_pwm * 100) / 255 ))
+            c_speed_pct=$(( (c_pwm * 100 + 127) / 255 ))
         fi
 
         # 2. Get Current UI Max Setpoint
@@ -2711,7 +2711,7 @@ manage_fan_settings() {
                     pct=$(echo "$pct" | tr -dc '0-9')
                     if [ -n "$pct" ] && [ "$pct" -le 100 ]; then
                         /etc/init.d/gl_fan stop >/dev/null 2>&1
-                        echo "$(( (pct * 255 +50) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
+                        echo "$(( (pct * 255 + 50) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
                         print_success "Manual mode active: $pct%"
                     else
                         print_error "Invalid input."

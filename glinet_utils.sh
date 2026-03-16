@@ -359,7 +359,7 @@ show_hardware_info() {
     nav_choice=""
     
     clear
-    
+    hash -r
     if ! command -v lscpu >/dev/null 2>&1; then
         print_centered_header "Hardware Information"
         check_opkg_updated
@@ -2277,6 +2277,7 @@ manage_zram() {
     local laz_list="/etc/lazarus.list"
 
     while true; do
+		hash -r
         zram_persisting=0
         if grep -qFx "/etc/init.d/zram" "$up_conf" 2>/dev/null; then
             zram_persisting=1
@@ -2395,7 +2396,6 @@ manage_zram() {
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
                         opkg remove --autoremove zram-swap >/dev/null 2>&1
-                        
                         # Added cleanup to match Package Manager behavior
                         for p in /etc/init.d/zram /etc/config/system; do
                             sed -i "\|$p|d" "$up_conf" 2>/dev/null
@@ -3361,6 +3361,7 @@ manage_librespeed() {
         UP_CONF="/etc/sysupgrade.conf"
         
         # Determine installation status once for the whole loop
+		hash -r 
         if command -v librespeed-go >/dev/null 2>&1; then
             IS_INSTALLED=1
         else

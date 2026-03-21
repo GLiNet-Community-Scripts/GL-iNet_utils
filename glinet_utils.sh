@@ -3871,7 +3871,7 @@ system_tweaks() {
         printf "5️⃣  SSH Key Management\n"
         printf "0️⃣  Main menu\n"
         printf "❓ Help\n"
-        printf "\nChoose [1-4/0/?]: "
+        printf "\nChoose [1-5/0/?]: "
         read -r st_choice
         printf "\n"
         case $st_choice in

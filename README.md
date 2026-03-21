@@ -91,8 +91,9 @@ System Tweaks
 ```
 1️⃣  Device Fan Settings
 2️⃣  Manage Zram Swap
-3️⃣  Package and Persistence Manager
-4️⃣  SSH Key Management
+3️⃣  Guest Network Bandwidth Limiter
+4️⃣  Package and Persistence Manager
+5️⃣  SSH Key Management
 0️⃣  Main menu
 ❓ Help
 ```
@@ -105,10 +106,13 @@ System Benchmarks
 3️⃣  Disk I/O Benchmark
 4️⃣  Memory I/O Benchmark
 5️⃣  DNS Latency Benchmark
-6️⃣  Ookla Internet SpeedTest
-7️⃣  LibreSpeed SpeedTest Server
-8️⃣  OpenSpeedTest Server
+6️⃣  Ookla Internet Speedtest
+7️⃣  LibreSpeed Speed Test Server
+8️⃣  iPerf3 Network Speed Test Server
+9️⃣  OpenSpeedTest Server
 0️⃣  Main menu
+❓ Help
+
 
 ```
 

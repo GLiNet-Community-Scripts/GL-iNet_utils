@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-15
+# Version: 2026-03-21
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -193,9 +193,41 @@ check_self_update() {
 check_opkg_updated() {
     if [ "$opkg_updated" -eq 0 ]; then
         print_info "Updating package lists...\n"
-        opkg update >/dev/null 2>&1
+        if ! opkg update > /tmp/opkg-update.log 2>&1; then
+            print_error "Fatal error: opkg update failed!"
+            if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+                print_error "→ No internet connectivity (cannot reach 8.8.8.8)\n"
+            elif ! ping -c 1 -W 3 downloads.openwrt.org >/dev/null 2>&1; then
+                print_error "→ Internet works, but cannot reach package server (DNS or repo issue?)\n"
+            fi
+
+            print_info "Collected errors of opkg output:\n"
+            tail -n 20 /tmp/opkg-update.log | grep -E '^(\*|\*\*\*|Collected errors:|wget returned)' | sed 's/^/  /' | while read -r line; do
+                printf "$line\n"
+            done
+
+            printf "\n"
+            print_info "Common fixes:"
+            printf "   • Check your internet connection\n"
+            printf "   • Try: ping fw.gl-inet.com or ping downloads.openwrt.org\n"
+            printf "   • Check date/time is correct (HTTPS validation)\n"
+            printf "   • Re-flash firmware if repositories are very old or corrupted\n\n"
+
+            print_warning "Now exiting...\n"
+            rm -f /tmp/opkg-update.log
+            exit 1
+        fi
+    rm -f /tmp/opkg-update.log 2>/dev/null
         opkg_updated=1
     fi
+}
+
+get_lan_ip() {
+    local lan_ip
+    lan_ip=$(ip -4 addr show br-lan 2>/dev/null | grep inet | awk '{print $2}' | cut -d/ -f1 | head -n1)
+    [ -z "$lan_ip" ] && lan_ip=$(uci -q get network.lan.ipaddr)
+    [ -z "$lan_ip" ] && lan_ip="192.168.8.1"
+    echo "${lan_ip}"
 }
 
 get_free_space() {
@@ -1561,7 +1593,7 @@ manage_agh_direct_access() {
     while true; do
         clear
         print_centered_header "AdGuardHome Direct Access"
-        lan_ipaddr=$(uci get network.lan.ipaddr 2>/dev/null)
+        lan_ipaddr=$(get_lan_ip)
         AGH_CONF=$(get_agh_config)
         DIRECT_STATUS="❌"
         grep -q -- "--glinet" "$AGH_INIT" || DIRECT_STATUS="✅"
@@ -1570,8 +1602,8 @@ manage_agh_direct_access() {
         grep -q "users: \[\]" "$AGH_CONF" && PASS_STATUS="❌"
         
         printf " ${CYAN}STATUS${RESET}\n"
-        printf "   Direct WebUI Access: %b" "$DIRECT_STATUS\n"
-        printf "   WebUI Username / Password Set: %b" "$PASS_STATUS\n\n"
+        printf "   Direct Web UI Access: %b" "$DIRECT_STATUS\n"
+        printf "   Web UI Username / Password Set: %b" "$PASS_STATUS\n\n"
         printf "1️⃣  Toggle Direct Access (Standalone vs Integrated)\n"
         printf "2️⃣  Add/Update Web UI Credentials (Username/Password)\n"
         printf "3️⃣  Remove Web UI Password (Set to Open Access)\n"
@@ -1713,7 +1745,7 @@ CL. FACTORY RESET: Reconstructs the environment using read-only
     firmware defaults located in the /rom partition.
 
 NOTES:
-- RULE DISCREPANCY: 'Raw' counts include all text lines. The WebUI 
+- RULE DISCREPANCY: 'Raw' counts include all text lines. The Web UI 
   displays a lower 'Optimized' count after deduplication.
 - 10MB LIMIT: Crucial for routers with small flash storage. When
   active, it restricts filter space to prevent storage exhaustion.
@@ -2109,7 +2141,7 @@ sub_confirm_factory_reset() {
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
                 $L_INIT enable >/dev/null 2>&1; sleep 1
-                print_success "AdGuardHome enabled in GL-WebUI and UCI.\n"
+                print_success "AdGuardHome enabled in GL Web UI and UCI.\n"
                 was_uci_enabled=1
             fi
         fi
@@ -2196,7 +2228,7 @@ agh_control_center() {
         get_agh_stats
         clear
         print_centered_header "AdGuardHome Control Center"
-        printf " ${CYAN}STATUS${RESET}\n   Run: %s  ⌯  GL-WebUI: %s  ⌯  Version: v%s\n\n" "${run_icon:-❌}" "${web_icon:-❌}" "${v_num:-N/A}"
+        printf " ${CYAN}STATUS${RESET}\n   Run: %s  ⌯  GL WebUI: %s  ⌯  Version: v%s\n\n" "${run_icon:-❌}" "${web_icon:-❌}" "${v_num:-N/A}"
         printf " ${CYAN}FILTERS${RESET}\n   Lists: %s  ⌯  Rules: %s\n\n" "${list_count:-0}" "${cached_rules:-0}"
         printf " ${CYAN}STORAGE${RESET}\n   Filters: %s/%s  ⌯  Logs: %s/%s\n\n" "${filt_u:-0B}" "${filt_f:-N/A}" "${qlog_u:-0B}" "${qlog_f:-N/A}"
         printf " ${CYAN}BACKUP${RESET}\n   Date: %s  ⌯  Size: %s  ⌯  Files: %s\n\n" "${bk_date:-None}" "${bk_total_u:-0B}" "${bk_file_count:-0}"
@@ -2228,7 +2260,7 @@ agh_control_center() {
 # System Tweaks
 # -----------------------------
 
-# Zram Swap Management
+# --- Zram Swap Management ---
 
 show_zram_help() {
     clear
@@ -2797,6 +2829,598 @@ manage_fan_settings() {
     done
 }
 
+# --- Guest Network Bandwidth Limiter ---
+
+show_guestnetwork_help() {
+    clear
+    print_centered_header "Guest Network Limiter - Help"
+    
+    cat << 'HELPEOF'
+Guest Network Bandwidth Limiter – Quick Help
+
+What is a Bandwidth Limiter?
+───────────────────────────
+This tool allows you to set a "speed ceiling" for your Guest Wi-Fi. 
+Unlike per-client limits, this sets a Global Cap for the entire 
+Guest bridge (br-guest). 
+
+Main Benefits:
+• Congestion Control: Prevents guests from saturating your 10G/1G line.
+• Fair Sharing: Uses 'FQ_CoDel' to ensure one guest's 4K video doesn't 
+  cause "lag" or high ping for another guest's Zoom call.
+• Priority: Protects your "Home" network's performance during heavy use.
+
+How it Works (The Technical Bit):
+────────────────────────────────
+• Upload (Egress): Limits traffic leaving the router via br-guest.
+• Download (Ingress): Redirects incoming traffic to a virtual device 
+  (ifb0) to "shape" the flow before it reaches the guest's device.
+• HW Acceleration: Some high-speed routers bypass the CPU. If your 
+  limits aren't working, you may need to disable "Network Acceleration" 
+  in the GL.iNet Dashboard.
+
+Usage in this Menu:
+───────────────────
+1. Set Download/Upload: Enter the max speed in Mbps (Megabits). 
+   Entering '0' removes the limit for that direction.
+2. Toggle Persistence: Ensures your limits are reapplied automatically 
+   after a reboot or a firmware sysupgrade.
+3. Reset to Defaults: Cleans all kernel tables, stops the background 
+   service, and offers to uninstall the 'tc' power tools.
+
+Testing your Limits:
+────────────────────
+To verify it's working:
+1. Connect a phone or laptop to the GUEST Wi-Fi SSID.
+2. Run a speed test (e.g., Speedtest.net or your script's tester).
+3. The result should stay slightly below the Mbps you defined.
+
+Note: Setting a limit too low (e.g., < 2 Mbps) may cause some modern 
+apps and websites to time out or feel "broken."
+HELPEOF
+    
+    press_any_key
+}
+
+manage_guest_limiter() {
+    local choice new_dl new_ul
+    
+    mgl_dependency_check() {
+        hash -r
+        if ! command -v tc >/dev/null 2>&1; then
+            print_info "Required package 'tc-full' missing. Installing..."
+            check_opkg_updated 
+            opkg install tc-full >/dev/null 2>&1
+            hash -r
+        fi
+    }
+
+    get_hw_accel_info() {
+        # --- 1. Qualcomm Logic (Master) ---
+        if [ -f "/etc/config/ecm" ]; then
+            if [ "$(uci -q get ecm.global.enabled)" = "1" ]; then
+                echo -e "${RED}ENABLED (Qualcomm)${RESET}"
+            else
+                echo -e "${GREEN}DISABLED (Qualcomm)${RESET}"
+            fi
+            return
+        fi
+
+        # --- 2. MediaTek Logic ---
+        if [ -f "/etc/config/mtkhnat" ]; then
+            if [ "$(uci -q get mtkhnat.global.enable)" = "1" ]; then
+                echo -e "${RED}ENABLED (MediaTek)${RESET}"
+            else
+                echo -e "${GREEN}DISABLED (MediaTek)${RESET}"
+            fi
+            return
+        fi
+
+        # --- 3. SFE Fallback (For older/non-offloading specific chips) ---
+        if [ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "1" ]; then
+            echo -e "${RED}ENABLED (SFE/Direct)${RESET}" && return
+        else
+            echo -e "${GREEN}DISABLED (SFE/Direct)${RESET}" && return
+        fi
+    
+        echo -e "${YELLOW}UNKNOWN${RESET}"
+    }
+
+    toggle_admin_access() {
+        local action=$1  # "on" or "off"
+        local rule_name="guest_admin_access"
+        local lan_ip=$(get_lan_ip)
+        [ -z "$lan_ip" ] && lan_ip=$(ip -4 addr show br-lan | grep inet | awk '{print $2}' | cut -d/ -f1)
+        [ -z "$lan_ip" ] && lan_ip="192.168.8.1"
+
+        # 1. Always start by removing the named rule 
+        uci -q delete firewall."$rule_name"
+
+        # 2. Add it back only if we want it ON
+        if [ "$action" = "on" ]; then
+            uci set firewall."$rule_name"=rule
+            uci set firewall."$rule_name".name='Allow-Guest-Admin'
+            uci set firewall."$rule_name".src='guest'
+            uci set firewall."$rule_name".dest_ip="$lan_ip"
+            uci set firewall."$rule_name".target='ACCEPT'
+        fi
+
+        # 3. Commit and Reload
+        uci commit firewall
+        /etc/init.d/firewall reload >/dev/null 2>&1
+    }
+
+    while true; do
+        # 1. Get Guest Radio Status (Detecting 2.4, 5, and 6G)
+        local g24 g50 g60 mlo wstatus dl_status ul_status persist_status
+        wrs="0"
+        if uci -q get wireless.guest2g >/dev/null; then
+            if [ "$(uci -q get wireless.guest2g.disabled)" = "0" ]; then
+                g24="${GREEN}ON${RESET}"
+                wrs="1"
+            else
+                g24="${RED}OFF${RESET}"
+            fi
+        else g24="0"
+        fi
+        if uci -q get wireless.guest5g >/dev/null; then
+            if [ "$(uci -q get wireless.guest5g.disabled)" = "0" ]; then
+                g50="${GREEN}ON${RESET}"
+                wrs="1"
+            else
+                g50="${RED}OFF${RESET}"
+            fi
+        else g50="0"
+        fi
+        if uci -q get wireless.guest6g >/dev/null; then
+            if [ "$(uci -q get wireless.guest6g.disabled)" = "0" ]; then 
+                g60="${GREEN}ON${RESET}"
+                wrs="1"
+            else
+                g60="${RED}OFF${RESET}"
+            fi
+        else
+            g60="0"
+        fi
+        if uci -q get wireless.wlanmldguest2g >/dev/null; then
+            mlo="${RED}OFF${RESET}"
+            # If ANY MLO band is enabled, set the whole MLO status to ON
+            if [ "$(uci -q get wireless.wlanmldguest2g.disabled)" = "0" ] || \
+               [ "$(uci -q get wireless.wlanmldguest5g.disabled)" = "0" ] || \
+               [ "$(uci -q get wireless.wlanmldguest6g.disabled)" = "0" ]; then
+                mlo="${GREEN}ON${RESET}"
+                wrs="1"
+            fi
+        else
+            mlo="0"
+        fi
+
+        if [ "$g60" = "0" ] && [ "$g50" = "0" ] && [ "$g24" = "0" ] && [ "$mlo" = "0" ]; then
+            printf "\n"
+            print_error "No wireless interfaces found. Exiting..."
+            press_any_key
+            return
+        fi
+
+        # 2. Get HW acceleration status
+
+        hw_status=$(get_hw_accel_info)
+        case "$hw_status" in
+            *ENABLED*)
+                hw_message="⃗→ Limits Blocked"
+                ;;
+            *)
+                hw_message="→ Limits Ready"
+                ;;
+        esac
+        lan_ipaddr=$(get_lan_ip)
+
+        # 3. Read Current Limits from Init Script
+        local hw_state_raw=$(get_hw_accel_info)
+        cur_dl=""
+        cur_ul=""
+        if echo "$hw_state_raw" | grep -q "DISABLED"; then
+            if [ -f /etc/init.d/guest_limiter ]; then
+                cur_dl=$(grep "LIMIT_DL=" /etc/init.d/guest_limiter 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+                cur_ul=$(grep "LIMIT_UL=" /etc/init.d/guest_limiter 2>/dev/null | cut -d'=' -f2 | tr -d '"')
+            fi
+            [ -z "$cur_dl" ] || [ "$cur_dl" -eq 0 ] && dl_status="${CYAN}UNLIMITED${RESET}" || dl_status="${GREEN}${cur_dl} Mbps${RESET}"
+            [ -z "$cur_ul" ] || [ "$cur_ul" -eq 0 ] && ul_status="${CYAN}UNLIMITED${RESET}" || ul_status="${GREEN}${cur_ul} Mbps${RESET}"
+        else
+            dl_status="${GREY}UNLIMITED (HW Accel Active)${RESET}"
+            ul_status="${GREY}UNLIMITED (HW Accel Active)${RESET}"
+        fi
+
+         
+        # 4. Check Persistence
+        grep -q "/etc/init.d/guest_limiter" /etc/sysupgrade.conf 2>/dev/null && persist_status="${GREEN}ENABLED${RESET}" || persist_status="${RED}DISABLED${RESET}"
+
+        # 5. Get Guest network to GL web-ui access
+        if uci -q get firewall.guest_admin_access >/dev/null; then
+            admin_access="${GREEN}ENABLED${RESET}"
+        else
+            admin_access="${RED}DISABLED${RESET}"
+        fi
+
+        clear
+        print_centered_header "Guest Network Bandwidth Limiter"
+        printf " %b\n" "${CYAN}INTERFACE STATUS${RESET}"
+        [ "$g24" != "0" ] && printf "   Guest Wi-Fi (2.4G): %b\n" "$g24"
+        [ "$g50" != "0" ] && printf "   Guest Wi-Fi (5G):   %b\n" "$g50"
+        [ "$g60" != "0" ] && printf "   Guest Wi-Fi (6G):   %b\n" "$g60"
+        [ "$mlo" != "0" ] && printf "   Guest Wi-Fi (MLO):  %b\n" "$mlo"
+        printf "\n"
+        printf " %b\n" "${CYAN}CONFIGURATION STATUS${RESET}"
+        printf "   Download Limit:     %b\n" "$dl_status"
+        printf "   Upload Limit:       %b\n" "$ul_status"
+        printf "   Guest -> GL Web UI: %b\n" "$admin_access" 
+        printf "   HW Acceleration:    %b %b\n" "$hw_status" "$hw_message"
+        printf "   Persistence:        %b\n" "$persist_status"
+        printf "\n"
+        printf " 1️⃣  Set Download Limit (Mbps) - 0 to disable\n"
+        printf " 2️⃣  Set Upload Limit   (Mbps) - 0 to disable\n"
+        printf " 3️⃣  Toggle Guest Network to Web UI access\n"
+        printf " 4️⃣  Toggle HW Acceleration\n"
+        printf " 5️⃣  Toggle Persistence\n"
+        printf " 6️⃣  Reset to Defaults (Clean Uninstall)\n"
+        printf " 0️⃣  Main menu\n"
+        printf " ❓ Help\n\n"
+        
+        read -p " Choose [1-6/0/?]: " choice
+
+        case "$choice" in
+            1) 
+                if [ "$wrs" = "0" ]; then
+                    printf "\n"
+                    print_error "No active wireless guest interfaces found."
+                    press_any_key
+                    continue
+                fi
+                printf "\n"
+                local hw_state_raw=$(get_hw_accel_info)
+                if echo "$hw_state_raw" | grep -q "DISABLED"; then
+                    read -p " Enter Download Limit (0-10000 Mbps): " new_dl
+                    if echo "$new_dl" | grep -qE '^[0-9]+$'; then
+                        mgl_dependency_check
+                        apply_guest_config "$new_dl" "$cur_ul"
+                        press_any_key
+                    else
+                        print_error "Invalid input. Please enter a whole number."
+                        sleep 2
+                    fi
+                else
+                    print_error "HW acceleration must be DISABLED."
+                    press_any_key
+                fi
+                ;;
+            2) 
+                if [ "$wrs" = "0" ]; then
+                    printf "\n"
+                    print_error "No active wireless guest interfaces found."
+                    press_any_key
+                    continue
+                fi
+                printf "\n"
+                local hw_state_raw=$(get_hw_accel_info)
+                if echo "$hw_state_raw" | grep -q "DISABLED"; then
+                    read -p " Enter Upload Limit (0-10000 Mbps): " new_ul
+                    if echo "$new_ul" | grep -qE '^[0-9]+$'; then
+                        mgl_dependency_check
+                        apply_guest_config "$cur_dl" "$new_ul"
+                        press_any_key
+                    else
+                        print_error "Invalid input. Please enter a whole number."
+                        sleep 2
+                    fi
+                else
+                    print_error "HW acceleration must be DISABLED."
+                    press_any_key
+                fi
+                ;;
+            3) 
+                if [ "$wrs" = "0" ]; then
+                    printf "\n"
+                    print_error "No active wireless guest interfaces found."
+                    press_any_key
+                    continue
+                fi
+                printf "\n"
+                if uci -q get firewall.guest_admin_access >/dev/null; then
+                    toggle_admin_access "off"
+                    print_info "Guest -> Web UI Access: DISABLED."
+                else
+                    toggle_admin_access "on"
+                    print_info "Guest -> Web UI Access: ENABLED."
+                fi
+                press_any_key
+                ;;
+            4)
+                printf "\n"
+                local hw_state_raw=$(get_hw_accel_info)
+                if echo "$hw_state_raw" | grep -q "ENABLED"; then
+                    print_info "Disabling HW Acceleration..."
+                    set_hw_accel 0 >/dev/null 2>&1
+                    [ -x /etc/init.d/guest_limiter ] && /etc/init.d/guest_limiter restart >/dev/null 2>&1
+                elif echo "$hw_state_raw" | grep -q "DISABLED"; then
+                    print_info "Enabling HW Acceleration..."
+                    if set_hw_accel 1 >/dev/null 2>&1; then
+                        [ -x /etc/init.d/guest_limiter ] && /etc/init.d/guest_limiter stop && /etc/init.d/guest_limiter disable
+                    else
+                        printf "\n"
+                        print_error "Cannot enable Hardware Acceleration. Client speed limits in effect."
+                    fi
+                else
+                    print_error "Unknown hardware engine. Set HW acceleration through Web-UI."
+                fi
+                press_any_key
+                ;;
+            5) 
+                printf "\n"
+                if [ ! -f "/etc/init.d/guest_limiter" ]; then
+                    print_warning "No limits configured. Set a limit (Option 1 or 2) first."
+                    press_any_key
+                    continue
+                fi
+                
+                if [ "$persist_status" = "${GREEN}ENABLED${RESET}" ]; then
+                    sed -i '/\/etc\/init.d\/guest_limiter/d' /etc/sysupgrade.conf
+                    print_info "Persistence Disabled."
+                else
+                    if ! grep -q "/etc/init.d/guest_limiter" /etc/sysupgrade.conf; then
+                        echo "/etc/init.d/guest_limiter" >> /etc/sysupgrade.conf
+                    fi
+                    print_info "Persistence Enabled (saved to sysupgrade.conf)."
+                fi
+                press_any_key
+                ;;
+            6) 
+                if [ "$wrs" = "0" ]; then
+                    printf "\n"
+                    print_error "No active wireless guest interfaces found."
+                    press_any_key
+                    continue
+                fi
+                printf "\n"
+                print_info "Restoring to factory settings...\n"
+                
+                # 1. Stop the service 
+                if [ -f "/etc/init.d/guest_limiter" ]; then
+                    /etc/init.d/guest_limiter stop >/dev/null 2>&1
+                    /etc/init.d/guest_limiter disable >/dev/null 2>&1
+                fi
+                
+                # 2. Hard Cleanup
+                tc qdisc del dev br-guest root >/dev/null 2>&1
+                tc qdisc del dev br-guest clsact >/dev/null 2>&1
+                if [ -d "/sys/class/net/br-guest-ifb" ]; then
+                    ip link set dev br-guest-ifb down >/dev/null 2>&1
+                    ip link del dev br-guest-ifb >/dev/null 2>&1
+                fi
+
+                # 3. Final Hardware Flush (Restore full speed)
+                [ -x /etc/init.d/mtk-hwnat ] && /etc/init.d/mtk-hwnat restart >/dev/null 2>&1
+                [ -x /etc/init.d/mtk-hwnat-post ] && /etc/init.d/mtk-hwnat-post restart >/dev/null 2>&1
+                [ -x /etc/init.d/shortcut-fe ] && /etc/init.d/shortcut-fe restart >/dev/null 2>&1
+                [ -x /etc/init.d/bridger ] && /etc/init.d/bridger restart >/dev/null 2>&1
+
+                # 4. Remove Files and Persistence
+                rm -f /etc/init.d/guest_limiter
+                sed -i '/\/etc\/init.d\/guest_limiter/d' /etc/sysupgrade.conf
+                
+                cur_dl=0
+                cur_ul=0
+
+                # 5. Enable HW Acceleration and Disable Web-UI Access
+                toggle_admin_access "off" >/dev/null 2>&1
+                if set_hw_accel 1 >/dev/null 2>&1; then 
+                    print_success "Guest network limits removed and HW Acceleration restored."
+                else
+                    print_error "Guest network limits removed. HW Acceleration NOT restored. (User QoS rules may exist)"
+                fi
+                press_any_key
+                ;;
+            0) break ;;
+            \?|h|H|❓) show_guestnetwork_help ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+
+# Set HW Acceleration
+# To Disable: set_hw_accel 0
+# To Disable and disabled web-UI toggle: set_hw_accel 0 restrict
+# To Enable:  set_hw_accel 1
+
+set_hw_accel() {
+    local target_state=$1  # 0 (Off) or 1 (On)
+    local mode=$2          # "restrict" to disable web-UI toggle
+    local kicked=0
+
+    # --- A. PRE-FLIGHT & UI LOCK MANAGEMENT ---
+    if [ "$target_state" = "1" ]; then
+        # 1. Precision Check: Block enable if REAL user QoS rules exist
+        local real_limits=$(uci show qos | grep "\.mac=" | grep -v "00:00:00:00:00:00" | wc -l)
+        if [ "$real_limits" -gt 0 ]; then
+            return 1
+        fi
+        
+        # 2. Surgical Unlock: Remove our padlock 
+        uci -q delete qos.000000000000
+        local idx=0
+        while [ -n "$(uci -q get qos.@client[$idx])" ]; do
+            if [ "$(uci -q get qos.@client[$idx].mac)" = "00:00:00:00:00:00" ]; then
+                uci delete qos.@client[$idx]
+            else
+                idx=$((idx + 1))
+            fi
+        done
+        uci commit qos
+    else
+        # 3. Handle Disabling: Apply UI padlock only if in 'restrict' mode
+        if [ "$mode" = "restrict" ]; then
+            uci set qos.000000000000=queue
+            uci set qos.000000000000.mac='00:00:00:00:00:00'
+            uci set qos.000000000000.download='1000000'
+            uci set qos.000000000000.upload='1000000'
+            uci set qos.000000000000.cnt='1'
+            uci commit qos
+        else
+            uci -q delete qos.000000000000
+            local idx=0
+            while [ -n "$(uci -q get qos.@client[$idx])" ]; do
+                if [ "$(uci -q get qos.@client[$idx].mac)" = "00:00:00:00:00:00" ]; then
+                    uci delete qos.@client[$idx]
+                else
+                    idx=$((idx + 1))
+                fi
+            done
+            uci commit qos
+        fi
+    fi
+    
+    # 1. OPENWRT FIREWALL OFFLOADING
+    # Skip raw firewall offload on Qualcomm/ECM routers to prevent Web UI bugs
+    if [ ! -f "/etc/config/ecm" ]; then
+        uci -q set firewall.@defaults[0].flow_offloading="$target_state"
+        uci -q set firewall.@defaults[0].flow_offloading_hw="$target_state"
+        uci -q set firewall.@defaults[0].nss_offloading="$target_state"
+        uci commit firewall
+    fi
+
+    # 2. HARDWARE SPECIFIC: Qualcomm 
+    if [ -f "/etc/config/ecm" ] && [ -x "/etc/init.d/qca-nss-ecm" ]; then
+        uci set ecm.global.enabled="$target_state"
+        uci commit ecm
+        if [ "$target_state" = "0" ]; then
+            /etc/init.d/qca-nss-ecm stop
+            [ -e /sys/kernel/debug/ecm/ecm_db/defunct_all ] && echo 1 > /sys/kernel/debug/ecm/ecm_db/defunct_all
+        else
+            /etc/init.d/qca-nss-ecm start
+        fi
+        kicked=1
+    fi
+
+    # 3. HARDWARE SPECIFIC: MediaTek 
+    if [ -f "/etc/config/mtkhnat" ] && [ -x "/etc/init.d/mtk-hwnat-post" ]; then
+        uci set mtkhnat.global.enable="$target_state"
+        uci commit mtkhnat
+        if [ "$target_state" = "0" ]; then
+            /etc/init.d/mtk-hwnat-post stop
+        else
+            /etc/init.d/mtk-hwnat-post start
+        fi
+        kicked=1
+    fi
+
+    # 4. THE CATCH-ALL: Standard/Beryl (MT1300) or Unknown
+    if [ "$kicked" -eq 0 ]; then
+        /etc/init.d/firewall reload >/dev/null 2>&1
+    fi
+
+    # 5. UI SYNC: Ensure gl_eqos picks up the ghost changes immediately
+    [ -x /usr/bin/gl_eqos ] && /usr/bin/gl_eqos restart >/dev/null 2>&1
+}
+
+# Apply Function (Internal Template Generation)
+
+apply_guest_config() {
+    local dl=$1
+    local ul=$2
+    [ -z "$dl" ] && dl=0
+    [ -z "$ul" ] && ul=0
+    
+    # 1. Convert to kbit with overhead (2% DL, 4% UL)
+    local dl_kbit=$(( dl * 1020 ))
+    local ul_kbit=$(( ul * 1040 ))
+
+    # 2. Uninstall if 0/0
+    if [ "$dl" -eq 0 ] && [ "$ul" -eq 0 ]; then
+        if [ -f "/etc/init.d/guest_limiter" ]; then
+            /etc/init.d/guest_limiter stop >/dev/null 2>&1
+            /etc/init.d/guest_limiter disable >/dev/null 2>&1
+            rm -f /etc/init.d/guest_limiter
+        fi
+        printf "\n"
+        print_info "Guest network limits removed."
+        return
+    fi
+
+    # 3. Create the Init Script
+    cat <<EOF > /etc/init.d/guest_limiter
+#!/bin/sh /etc/rc.common
+# LIMIT_DL=$dl
+# LIMIT_UL=$ul
+START=99
+
+# --- CLEANUP ---
+clean_all() {
+    [ -x /usr/bin/gl_eqos ] && /usr/bin/gl_eqos stop >/dev/null 2>&1
+    tc qdisc del dev br-guest root >/dev/null 2>&1
+    tc qdisc del dev br-guest clsact >/dev/null 2>&1
+    if [ -d "/sys/class/net/br-guest-ifb" ]; then
+        tc qdisc del dev br-guest-ifb root >/dev/null 2>&1
+        ip link set dev br-guest-ifb down >/dev/null 2>&1
+        ip link del dev br-guest-ifb >/dev/null 2>&1
+    fi
+    sleep 1
+}
+
+start() {
+    local i=0
+    while [ ! -d "/sys/class/net/br-guest" ] && [ \$i -lt 30 ]; do
+        sleep 1
+        i=\$((i+1))
+    done
+    clean_all
+    # --- SETUP UPLOAD PIPE ---
+    # Upload Control (fq_codel + HTB)
+    if [ "$ul" != "0" ]; then
+        ip link add dev br-guest-ifb type ifb
+        ip link set dev br-guest-ifb up
+        
+        tc qdisc add dev br-guest-ifb root handle 1: htb default 1
+        tc class add dev br-guest-ifb parent 1: classid 1:1 htb rate ${ul_kbit}kbit ceil ${ul_kbit}kbit burst 15k cbuffer 15k
+ 
+        # --- THE REDIRECT HOOK ---
+        tc qdisc add dev br-guest clsact
+        tc filter add dev br-guest ingress protocol ip u32 match u32 0 0 action mirred egress redirect dev br-guest-ifb
+        tc filter add dev br-guest ingress protocol ipv6 u32 match u32 0 0 action mirred egress redirect dev br-guest-ifb
+    fi
+
+    # --- SETUP DOWNLOAD PIPE ---
+    if [ "$dl" != "0" ]; then
+        tc qdisc add dev br-guest root handle 1: htb default 1
+        tc class add dev br-guest parent 1: classid 1:1 htb rate ${dl_kbit}kbit ceil ${dl_kbit}kbit burst 15k cbuffer 15k
+    fi
+
+    # --- HARDWARE ACCELERATION FLUSH ---
+    [ -x /etc/init.d/mtk-hwnat ] && /etc/init.d/mtk-hwnat restart 2>/dev/null
+    [ -x /etc/init.d/mtk-hwnat-post ] && /etc/init.d/mtk-hwnat-post restart 2>/dev/null
+    [ -x /etc/init.d/shortcut-fe ] && /etc/init.d/shortcut-fe restart 2>/dev/null
+    [ -x /etc/init.d/bridger ] && /etc/init.d/bridger restart >/dev/null 2>&1
+}
+
+stop() {
+    clean_all    
+    [ -x /etc/init.d/mtk-hwnat ] && /etc/init.d/mtk-hwnat restart 2>/dev/null
+    [ -x /etc/init.d/mtk-hwnat-post ] && /etc/init.d/mtk-hwnat-post restart 2>/dev/null
+    [ -x /etc/init.d/shortcut-fe ] && /etc/init.d/shortcut-fe restart 2>/dev/null
+    [ -x /etc/init.d/bridger ] && /etc/init.d/bridger restart >/dev/null 2>&1
+}
+EOF
+
+    # 4. Finalize and Launch
+    set_hw_accel 0 restrict
+    chmod +x /etc/init.d/guest_limiter
+    /etc/init.d/guest_limiter enable
+    /etc/init.d/guest_limiter restart
+    printf "\n"
+    print_success "Configured: $dl Mbps Down / $ul Mbps Up"
+}
+
+# --- Manage Packages ---
+
 get_action_text() {
     local t_i=$1 local t_p=$2 local o_i=$3 local o_p=$4
     
@@ -3036,6 +3660,8 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
     done
 }
 
+# --- Manage SSH ---
+
 show_ssh_help() {
     clear
     print_centered_header "SSH Key Management - Help"
@@ -3240,8 +3866,9 @@ system_tweaks() {
         print_centered_header "System Tweaks"
         printf "1️⃣  Device Fan Settings\n"
         printf "2️⃣  Manage Zram Swap\n"
-        printf "3️⃣  Package and Persistence Manager\n"
-        printf "4️⃣  SSH Key Management\n"
+        printf "3️⃣  Guest Network Bandwidth Limiter\n"
+        printf "4️⃣  Package and Persistence Manager\n"
+        printf "5️⃣  SSH Key Management\n"
         printf "0️⃣  Main menu\n"
         printf "❓ Help\n"
         printf "\nChoose [1-4/0/?]: "
@@ -3250,8 +3877,9 @@ system_tweaks() {
         case $st_choice in
             1) manage_fan_settings ;;
             2) manage_zram ;;
-            3) manage_packages ;;
-            4) manage_ssh_keys ;;
+            3) manage_guest_limiter ;;
+            4) manage_packages ;;
+            5) manage_ssh_keys ;;
             \?|h|H|❓) show_system_tweaks_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -3356,7 +3984,7 @@ manage_librespeed() {
         clear
         print_centered_header "LibreSpeed Speed Test Management"
         
-        LAN_IP=$(uci -q get network.lan.ipaddr || echo "192.168.8.1")
+        LAN_IP=$(get_lan_ip)
         LISTEN_PORT=":8989"
         UP_CONF="/etc/sysupgrade.conf"
         
@@ -3929,7 +4557,7 @@ EOF
                 ;;
             7)  manage_librespeed ;;
             8)  
-                lan_ipaddr=$(uci -q get network.lan.ipaddr || echo "192.168.8.1")
+                lan_ipaddr=$(get_lan_ip)
                 clear
                 print_centered_header "iperf3 Network Speed Test Server"
                 
@@ -4084,7 +4712,7 @@ view_uci_config() {
                 [ -n "$wan_dns" ] && printf "  DNS: %s\n" "$wan_dns"
                 
                 printf "\n%b\n" "${CYAN}LAN Configuration:${RESET}"
-                lan_ipaddr=$(uci get network.lan.ipaddr 2>/dev/null)
+                lan_ipaddr=$(get_lan_ip)
                 lan_netmask=$(uci get network.lan.netmask 2>/dev/null)
                 lan_proto=$(uci get network.lan.proto 2>/dev/null)
                 

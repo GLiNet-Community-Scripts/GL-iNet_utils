@@ -18,25 +18,25 @@
 
 ## Features
 
-- 🖥️ Deep Hardware Insights
-   - Real-time Monitoring: Total visibility into CPU load, RAM utilization, storage, uptime, temperatures, and fan speeds.
-   - Network Topology: Paged navigation for network interfaces and wireless radio details (Link speeds, MIMO, Channel bandwidth).
-   - VPN Crypto Audit – Instantly verify if your hardware acceleration (AES-CE, NEON) is active at the kernel level for optimized OpenVPN and WireGuard performance.
-- 🛠️ AdGuardHome Control Center
-   - Service Management: A central hub to toggle AGH, manage UI updates, and bulk-import pre-set blocklists/allowlists.
-   - Industrial Self-Healing: Fail-safe logic that pulls pristine binaries or init scripts from /rom if your current installation becomes corrupted.
-   - Surgical Backups: Precision tracking of configurations, binaries, and scripts with automated timestamping and integrity checks that persist through firmware upgrades.
-- ⚙️ System Tweaks
-   - Zram Tuning: Essential for low-RAM devices (e.g., Beryl G7/MT3000). Easily install and tune compressed RAM swap to prevent OOM (Out-of-Memory) crashes.
-   - Guest Network Limiter: Global speed control for the entire guest subnet and the ability to toggle guest access to the router’s local IP.
-   - Advanced Fan Control: Granular management of Min/Max thresholds, "Fan-on" triggers, and thermal warnings with direct UI integration.
-   - DevOps Tools: Automated SSH Key installer and a Package Manager to persist essential CLI tools across sysupgrades.
-- 📊 Performance Benchmarks –
-   - Hardware Stress Testing: Real-world testing of CPU cycles, OpenSSL throughput, raw Disk/Memory I/O, and DNS latency compared to a Beryl G7 baseline.
-   - Network Probing: Integrated support for Ookla Speedtest, LibreSpeed, and OpenSpeedTest server environments.
-- 📋 Secure UCI Viewer – Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
-- 🔄 Native Self-Updater – Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
-- 🆓 GPL-3.0 Licensed – Free, open, and community-driven.
+- 🖥️ **Deep Hardware Insights**
+  -  **Real-time Monitoring:** Total visibility into CPU load, RAM utilization, storage, uptime, temperatures, and fan speeds.
+  -  **Network Topology:** Paged navigation for network interfaces and wireless radio details (Link speeds, MIMO, Channel bandwidth).
+  -  **VPN Crypto Audit** – Instantly verify if your hardware acceleration (AES-CE, NEON) is active at the kernel level for optimized OpenVPN and WireGuard performance.
+- 🛠️ **AdGuardHome Control Center**
+  -  **Service Management:** A central hub to toggle AGH, manage UI updates, and bulk-import pre-set blocklists/allowlists.
+  -  **Industrial Self-Healing:** Fail-safe logic that pulls pristine binaries or init scripts from /rom if your current installation becomes corrupted.
+  -  **Surgical Backups:** Precision tracking of configurations, binaries, and scripts with automated timestamping and integrity checks that persist through firmware upgrades.
+- ⚙️ **System Tweaks**
+  -  **Zram Tuning:** Essential for low-RAM devices (e.g., Beryl G7/MT3000). Easily install and tune compressed RAM swap to prevent OOM (Out-of-Memory) crashes.
+  -  **Guest Network Limiter:** Global speed control for the entire guest subnet and the ability to toggle guest access to the router’s local IP.
+  -  **Advanced Fan Control:** Granular management of Min/Max thresholds, "Fan-on" triggers, and thermal warnings with direct UI integration.
+  -  **DevOps Tools:** Automated SSH Key installer and a Package Manager to persist essential CLI tools across sysupgrades.
+- 📊 **Performance Benchmarks**
+  -  **Hardware Stress Testing:** Real-world testing of CPU cycles, OpenSSL throughput, raw Disk/Memory I/O, and DNS latency compared to a Beryl G7 baseline.
+  -  **Network Probing:** Integrated support for Ookla Speedtest, LibreSpeed, and OpenSpeedTest server environments.
+- 📋 **Secure UCI Viewer:** Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
+- 🔄 **Native Self-Updater:** Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
+- 🆓 **GPL-3.0 Licensed:** Free, open, and community-driven.
 
 Tested on various GL.iNet models (Beryl, Beryl AX, Beryl 7, Slate 7, Flint 3, Flint 3e, etc.) running recent firmware.
 

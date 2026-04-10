@@ -101,8 +101,9 @@ System Tweaks
 1️⃣  Device Fan Settings
 2️⃣  Manage Zram Swap
 3️⃣  Guest Network Bandwidth Limiter
-4️⃣  Package and Persistence Manager
-5️⃣  SSH Key Management
+4️⃣  Web-UI Terminal Interface
+5️⃣  Package and Persistence Manager
+6️⃣  SSH Key Management
 0️⃣  Main menu
 ❓ Help
 ```

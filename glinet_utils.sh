@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-03-21
+# Version: 2026-04-10
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -3419,6 +3419,326 @@ EOF
     print_success "Configured: $dl Mbps Down / $ul Mbps Up"
 }
 
+# --- Web-UI Terminal Manager ---
+show_terminal_help() {
+    clear
+    print_centered_header "Web Terminal Management - Help"
+    
+    cat << 'HELPEOF'
+Web Terminal (ttyd) Management – Quick Help
+
+What is the Web Terminal?
+───────────────────────────
+This tool embeds a fully functional Linux terminal directly into your 
+GL.iNet Admin Panel. It allows you to execute commands, edit configs, 
+and manage your router without needing an external SSH client.
+
+Main Benefits:
+• Zero Config: Access your shell from any browser (Safari/Chrome/Edge).
+• Secure: Uses '/bin/login' to require your root password.
+• Integrated: Adds a custom icon ( >_ ) to the top navigation bar.
+
+How it Works (The Technical Bit):
+────────────────────────────────
+• Backend (ttyd): A lightweight C-based terminal-to-web server that 
+  runs as a Procd service (Start Priority: 99).
+• Frontend (JS Injection): Patches the 'app.*.js.gz' file in /www/js/ 
+  to inject a draggable, minimizable terminal modal.
+• The "Fast-UI" Label: The window header automatically pulls your 
+  router's model (e.g., gl-be3600) from the browser's LocalStorage 
+  to match a native macOS/Linux terminal feel.
+
+Usage in this Menu:
+───────────────────
+1. Install & Deploy: Automatically installs the 'ttyd' package, 
+   configures the black-background theme via UCI, starts the service, 
+   and injects the Web UI button.
+2. Disable Service & UI: Stops the background process and reverts the 
+   Admin Panel JS to its original ROM state. The 'ttyd' package 
+   remains installed for quick re-activation.
+3. Completely Uninstall: Stops the service, uninstalls the 'ttyd' 
+   binary, deletes its config, and restores the factory UI.
+
+Important UX Notes:
+────────────────────
+• Hard Refresh: After deploying or disabling, you MUST perform a 
+  "Hard Refresh" (Cmd+Shift+R or Ctrl+F5) in your browser. This 
+  clears the Nginx cache ( /var/lib/nginx ) and forces the new UI.
+• Security: The service is bound to the 'LAN' interface by default. 
+  It is not accessible from the WAN (Internet) unless you manually 
+  open Port 7681 in the firewall.
+• Persistence: Configuration is handled via UCI (/etc/config/ttyd), 
+  ensuring your terminal settings survive a reboot.
+
+Note: If the icon does not appear after a refresh, ensure "Network 
+Acceleration" isn't preventing the UI from updating, though the 
+script attempts to force this by clearing the Nginx cache.
+HELPEOF
+    
+    press_any_key
+}
+
+manage_web_terminal() {
+    while true; do
+        clear
+        print_centered_header "Web-UI Terminal Interface"
+        
+        TARGET_GZ=$(ls /www/js/app.*.js.gz | head -n 1)
+        if [ -z "$TARGET_GZ" ]; then
+            print_error "Cannot find target JS file for patching. Exiting..."
+            press_any_key
+            return
+        fi
+        
+        # Check Service Status via Procd
+        if pgrep ttyd >/dev/null; then
+            svc_status="${GREEN}RUNNING${RESET}"
+        else
+            svc_status="${RED}STOPPED${RESET}"
+        fi
+        
+        zcat "$TARGET_GZ" 2>/dev/null | grep -q "term-wrapper" && inj_status="${GREEN}ENABLED${RESET}" || inj_status="${YELLOW}DISABLED${RESET}"
+        
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        printf "   ttyd Service:   %b\n" "$svc_status"
+        printf "   Web UI Button:  %b\n\n" "$inj_status"
+        
+        printf "1️⃣  Enable Web-UI Terminal\n"
+        printf "2️⃣  Disable Web-UI Terminal\n"
+        printf "3️⃣  Completely Uninstall\n"
+        printf "0️⃣  Return to previous menu\n"
+        printf "❓ Help\n"
+        printf "\nChoose [1-3/0/?]: "
+        read -r term_choice
+        printf "\n"
+        
+        case $term_choice in
+            1)
+                if pgrep ttyd >/dev/null; then
+                    if [ "$inj_status" = "${GREEN}ENABLED${RESET}" ]; then
+                         print_warning "Web-UI Terminal is already running and patched."
+                         press_any_key
+                         continue
+                    else
+                         print_warning "Web-UI Terminal service is running but UI is not patched. Re-patching..."
+                    fi
+                else 
+                    print_info "Enabling Web-UI Terminal...\n"
+                    if ! command -v ttyd >/dev/null 2>&1; then
+                        print_info "Installing ttyd...\n"
+                        check_opkg_updated
+                        opkg install ttyd >/dev/null 2>&1
+                        hash -r
+                    fi
+
+                    print_info "Configuring ttyd service...\n"
+                    
+                    # Reset config to known state
+                    cat << 'UCIEOF' > /etc/config/ttyd
+config ttyd
+	option enable '1'
+	option port '7681'
+	option interface '@lan'
+	option command '/bin/login'
+    list client_option 'scrollback=10000'
+	list client_option 'theme={"background":"#000000"}'
+	list client_option 'titleFixed="Terminal"'
+UCIEOF
+
+                    /etc/init.d/ttyd enable
+                    /etc/init.d/ttyd restart >/dev/null 2>&1
+ 
+                fi
+               
+                # UI Injection 
+                print_info "Patching Web-UI...\n"
+                TARGET_JS="${TARGET_GZ%.gz}"
+                cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
+                zcat "$TARGET_GZ" > "$TARGET_JS"
+
+                # JS Patch logic
+                cat << 'EOF' >> "$TARGET_JS"
+;(function(){
+  const inject = () => {
+    if (document.getElementById('term-wrapper')) return;
+    const anchor = document.querySelector('.icon-reboot');
+    if (!anchor) return;
+    const rs = window.getComputedStyle(anchor);
+    const rml = parseInt(rs.marginLeft)||0, rmr = parseInt(rs.marginRight)||0;
+    const wML = rml > 0 ? rml+'px' : '0px';
+    const wMR = rml > 0 ? '0px' : rmr+'px';
+    const wrapper = document.createElement('span');
+    wrapper.id = 'term-wrapper';
+    wrapper.className = 'btn-icon';
+    wrapper.style.cssText = 'margin-left:'+wML+'; margin-right:'+wMR+'; display:inline-flex; align-items:center; cursor:pointer; color:#606266; font-size:18px;';
+    wrapper.innerHTML = ' >_ ';
+    wrapper.onclick = () => {
+      if(document.getElementById('term-modal')) return;
+      const host = window.location.hostname;
+      const aliasEl = document.querySelector('.alias span');
+      const hostLabel = (aliasEl && aliasEl.innerText.trim())
+                        ? aliasEl.innerText.trim().toLowerCase()
+                        : host.split('.')[0];
+      const modal = document.createElement('div');
+      modal.id = 'term-modal';
+      modal.style.cssText = 'position:fixed; top:10%; left:10%; width:70%; height:60%; background:#000 !important; z-index:9999; border-radius:10px; box-shadow:0 20px 50px rgba(0,0,0,0.9); overflow:hidden; border:1px solid #444; min-width:300px;';
+      const head = document.createElement('div');
+      head.id = 'term-header';
+      head.style.cssText = 'background:#1a1a1a; padding:10px 15px; display:flex; justify-content:space-between; align-items:center; cursor:move; user-select:none; border-bottom:1px solid #333;';
+      const popOutSvg = '<svg width="14" height="14" viewBox="0 0 512 512" fill="#00a8ff" style="cursor:pointer;"><path d="M432 320H400a16 16 0 0 0-16 16v112H64V128h112a16 16 0 0 0 16-16V80a16 16 0 0 0-16-16H48a48 48 0 0 0-48 48v400a48 48 0 0 0 48 48h352a48 48 0 0 0 48-48V336a16 16 0 0 0-16-16zM488 0H360c-21.37 0-32.05 25.91-17 41l35.73 35.73L135 320.37a24 24 0 0 0 0 34L157.67 377a24 24 0 0 0 34 0l243.61-243.68L471 169c15 15 41 4.47 41-17V24a24 24 0 0 0-24-24z"/></svg>';
+      head.innerHTML = '<div style="display:flex; gap:8px;"><div id="t-cls" style="width:12px;height:12px;background:#ff5f56;border-radius:50%;cursor:pointer;"></div><div id="t-min" style="width:12px;height:12px;background:#ffbd2e;border-radius:50%;cursor:pointer;"></div><div id="t-max" style="width:12px;height:12px;background:#27c93f;border-radius:50%;cursor:pointer;"></div></div><span style="color:#888;font-family:monospace;font-size:11px;pointer-events:none;">root@'+hostLabel+': ~</span><div id="t-pop">'+popOutSvg+'</div>';
+      const ifrm = document.createElement('iframe');
+      const termUrl = 'http://' + host + ':7681/';
+      ifrm.src = termUrl;
+      ifrm.style.cssText = 'width:100%; height:calc(100% - 38px); border:none; background:#000;';
+      modal.appendChild(head); modal.appendChild(ifrm); document.body.appendChild(modal);
+      const setTrans = (on) => modal.style.transition = on ? 'all 0.3s ease-in-out' : 'none';
+      document.getElementById('t-pop').onclick = (e) => { e.stopPropagation(); window.open(termUrl,'_blank'); modal.remove(); };
+      document.getElementById('t-cls').onclick = () => modal.remove();
+      let isMin = false, minOldStyle = {};
+      document.getElementById('t-min').onclick = () => {
+        setTrans(true);
+        if (!isMin) {
+          minOldStyle = { top:modal.style.top, left:modal.style.left, width:modal.style.width, height:modal.style.height, bottom:modal.style.bottom, right:modal.style.right };
+          Object.assign(modal.style, { top:'auto', left:'auto', bottom:'20px', right:'20px', width:'250px', height:'38px' });
+          ifrm.style.display = 'none';
+          resizeHandle.style.display = 'none';
+        } else {
+          ifrm.style.display = 'block';
+          resizeHandle.style.display = '';
+          setTrans(false);
+          Object.assign(modal.style, { top:'auto', left:'auto', bottom:'20px', right:'20px', width:minOldStyle.width, height:minOldStyle.height });
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            setTrans(true);
+            Object.assign(modal.style, { top:minOldStyle.top||'10%', left:minOldStyle.left||'10%', bottom:minOldStyle.bottom||'auto', right:minOldStyle.right||'auto', width:minOldStyle.width, height:minOldStyle.height });
+          }));
+        }
+        isMin = !isMin;
+      };
+      let isMax = false, maxOldPos = {};
+      document.getElementById('t-max').onclick = () => {
+        setTrans(true);
+        if (!isMax) {
+          maxOldPos = { t:modal.style.top, l:modal.style.left, w:modal.style.width, h:modal.style.height, b:modal.style.bottom, r:modal.style.right };
+          Object.assign(modal.style, { top:'0', left:'0', width:'100%', height:'100%', borderRadius:'0', bottom:'auto', right:'auto' });
+        } else {
+          Object.assign(modal.style, { top:maxOldPos.t, left:maxOldPos.l, width:maxOldPos.w, height:maxOldPos.h, bottom:maxOldPos.b, right:maxOldPos.r, borderRadius:'10px' });
+        }
+        isMax = !isMax;
+      };
+      head.onmousedown = (e) => {
+        if (e.target.id.startsWith('t-')) return;
+        const rect = modal.getBoundingClientRect();
+        setTrans(false);
+        modal.style.top = rect.top + 'px';
+        modal.style.left = rect.left + 'px';
+        modal.style.bottom = 'auto';
+        modal.style.right = 'auto';
+        let ox = e.clientX - rect.left, oy = e.clientY - rect.top;
+        document.onmousemove = (e) => { modal.style.left=(e.clientX-ox)+'px'; modal.style.top=(e.clientY-oy)+'px'; };
+        document.onmouseup = () => { document.onmousemove = null; };
+      };
+      const resizeHandle = document.createElement('div');
+      resizeHandle.style.cssText = 'position:absolute; bottom:0; right:0; width:12px; height:12px; cursor:se-resize; z-index:10001; background:linear-gradient(135deg, transparent 50%, #888 50%);';
+      modal.appendChild(resizeHandle);
+      resizeHandle.onmousedown = (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        const startX = e.clientX, startY = e.clientY;
+        const startW = modal.offsetWidth, startH = modal.offsetHeight;
+        ifrm.style.pointerEvents = 'none';
+        document.onmousemove = (e) => {
+          modal.style.width  = Math.max(300, startW + e.clientX - startX) + 'px';
+          modal.style.height = Math.max(100, startH + e.clientY - startY) + 'px';
+        };
+        document.onmouseup = () => { document.onmousemove = null; ifrm.style.pointerEvents = ''; };
+      };
+    };
+    const _anc=[]; let _n=anchor;
+    while(_n){_anc.push(_n);_n=_n.parentElement;}
+    let _h=document.querySelector('.icon-question-circle');
+    while(_h&&!_anc.includes(_h.parentElement))_h=_h.parentElement;
+    const _fp=_h?_h.parentElement:anchor.parentNode;
+    let _ru=anchor;
+    while(_ru.parentElement!==_fp)_ru=_ru.parentElement;
+    _fp.insertBefore(wrapper,_ru);
+  };
+  setInterval(inject,1000);
+})();
+EOF
+                gzip -c "$TARGET_JS" > "$TARGET_GZ"
+                rm -f "$TARGET_JS"
+                rm -rf /var/lib/nginx/*
+                print_success "Web-UI Terminal Installed. \n   Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser to see the changes."
+                press_any_key
+                ;;
+
+            2)
+                print_info "Disabling Web Terminal...\n"
+                
+                # Only attempt to stop/disable if the service script exists
+                
+                if [ -f "/etc/init.d/ttyd" ]; then
+                    if pgrep ttyd >/dev/null; then
+                        print_info "Stopping ttyd service...\n"
+                        /etc/init.d/ttyd stop 2>/dev/null
+                        /etc/init.d/ttyd disable 2>/dev/null
+                        killall ttyd >/dev/null 2>&1
+                        print_success "Service stopped.\n"
+                    else
+                        print_warning "ttyd service is not running.\n"
+                    fi
+                else
+                    print_warning "ttyd service not found; skipping service stop.\n"
+                fi
+
+                # Restore UI to stock regardless of service status
+                if [ -f "/rom$TARGET_GZ" ]; then
+                    cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
+                    rm -rf /var/lib/nginx/*
+                    print_success "Web UI button removed and cache cleared.\n"
+                    print_info "Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser."
+                else
+                    print_error "ROM backup not found. Manual UI restoration required."
+                fi
+                press_any_key
+                ;;
+
+            3)
+                print_warning "Completely Uninstalling ttyd..."
+                
+                # Stop service before removal if it exists
+                if command -v ttyd >/dev/null 2>&1 || [ -f "/etc/init.d/ttyd" ]; then
+                    if pgrep ttyd >/dev/null; then
+                        print_info "Stopping ttyd service...\n"
+                        /etc/init.d/ttyd stop 2>/dev/null
+                        killall ttyd >/dev/null 2>&1
+                        print_success "Service stopped.\n"
+                    else
+                        print_warning "ttyd service is not running.\n"
+                    fi
+                    opkg remove --autoremove ttyd >/dev/null 2>&1
+                    rm -f /etc/config/ttyd
+                    print_success "ttyd package uninstalled.\n"
+                fi
+
+                # Always ensure the UI is restored
+                if [ -f "/rom$TARGET_GZ" ]; then
+                    cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
+                    rm -rf /var/lib/nginx/*
+                    print_success "Web UI button removed and cache cleared."
+                else
+                    print_error "ROM backup not found. Manual UI restoration required."
+                fi
+                press_any_key
+                ;;
+            0) return ;;
+            \?|h|H|❓) show_web_terminal_help ;;
+            *) print_error "Invalid choice"; sleep 1 ;;
+        esac
+    done
+}
+
 # --- Manage Packages ---
 
 get_action_text() {
@@ -3867,19 +4187,21 @@ system_tweaks() {
         printf "1️⃣  Device Fan Settings\n"
         printf "2️⃣  Manage Zram Swap\n"
         printf "3️⃣  Guest Network Bandwidth Limiter\n"
-        printf "4️⃣  Package and Persistence Manager\n"
-        printf "5️⃣  SSH Key Management\n"
+        printf "4️⃣  Web-UI Terminal Interface\n"
+        printf "5️⃣  Package and Persistence Manager\n"
+        printf "6️⃣  SSH Key Management\n"
         printf "0️⃣  Main menu\n"
         printf "❓ Help\n"
-        printf "\nChoose [1-5/0/?]: "
+        printf "\nChoose [1-6/0/?]: "
         read -r st_choice
         printf "\n"
         case $st_choice in
             1) manage_fan_settings ;;
             2) manage_zram ;;
             3) manage_guest_limiter ;;
-            4) manage_packages ;;
-            5) manage_ssh_keys ;;
+            4) manage_web_terminal ;;
+            5) manage_packages ;;
+            6) manage_ssh_keys ;;
             \?|h|H|❓) show_system_tweaks_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;

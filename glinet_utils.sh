@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-04-10
+# Version: 2026-04-16
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -2321,7 +2321,7 @@ manage_zram() {
         printf " %b\n" "${CYAN}STATUS${RESET}"
         if command -v zram >/dev/null 2>&1 || [ -f /etc/init.d/zram ]; then
             if /etc/init.d/zram enabled 2>/dev/null; then
-                printf "   Zram Swap: %bENABLED%b\n" "${GREEN}" "${RESET}"
+                printf "   Zram Swap:   %bENABLED%b\n" "${GREEN}" "${RESET}"
                 
                 if [ -f /sys/block/zram0/disksize ]; then
                     disksize=$(cat /sys/block/zram0/disksize 2>/dev/null)
@@ -2335,10 +2335,10 @@ manage_zram() {
                     printf "   Status: %bINACTIVE%b\n" "${YELLOW}" "${RESET}"
                 fi
             else
-                printf "   Zram Swap: %bDISABLED%b\n" "${YELLOW}" "${RESET}"
+                printf "   Zram Swap:   %bDISABLED%b\n" "${YELLOW}" "${RESET}"
             fi
         else
-            printf "   Zram Swap: %bNOT INSTALLED%b\n" "${RED}" "${RESET}"
+            printf "   Zram Swap:   %bNOT INSTALLED%b\n" "${RED}" "${RESET}"
         fi
         if [ "$zram_persisting" -eq 1 ]; then
                 printf "   Persistence: %bENABLED%b\n\n" "${GREEN}" "${RESET}"
@@ -3492,7 +3492,11 @@ manage_web_terminal() {
         
         # Check Service Status via Procd
         if pgrep ttyd >/dev/null; then
-            svc_status="${GREEN}RUNNING${RESET}"
+            if grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null; then
+                svc_status="${GREEN}RUNNING (HTTPS)${RESET}"
+            else
+                svc_status="${GREEN}RUNNING (HTTP)${RESET}"
+            fi
         else
             svc_status="${RED}STOPPED${RESET}"
         fi
@@ -3514,40 +3518,90 @@ manage_web_terminal() {
         
         case $term_choice in
             1)
+                ttyd_proto="http"
+                hash -r
                 if pgrep ttyd >/dev/null; then
                     if [ "$inj_status" = "${GREEN}ENABLED${RESET}" ]; then
                          print_warning "Web-UI Terminal is already running and patched."
                          press_any_key
                          continue
                     else
+                         grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_proto="https"
                          print_warning "Web-UI Terminal service is running but UI is not patched. Re-patching..."
                     fi
-                else 
-                    print_info "Enabling Web-UI Terminal...\n"
+                else
                     if ! command -v ttyd >/dev/null 2>&1; then
-                        print_info "Installing ttyd...\n"
                         check_opkg_updated
+                        print_info "Installing ttyd...\n"
                         opkg install ttyd >/dev/null 2>&1
-                        hash -r
                     fi
 
                     print_info "Configuring ttyd service...\n"
-                    
-                    # Reset config to known state
-                    cat << 'UCIEOF' > /etc/config/ttyd
+
+                    # Detect HTTPS mode and prompt for connection mode
+                    redirect_https=$(uci -q get uhttpd.main.redirect_https 2>/dev/null)
+                    if [ "$redirect_https" = "1" ]; then
+                        print_warning "The GL Admin Panel is set to force HTTPS. ttyd will be installed in HTTPS mode so the\n   embedded terminal loads correctly in your browser.\n"
+                        ttyd_proto="https"
+                    else
+                        print_info "ttyd runs over HTTP by default and will not work when accessing the Admin Panel via HTTPS.\n   ttyd over HTTPS works when accessing the Admin Panel via HTTP or HTTPS but requires a\n   one-time browser cert acceptance."
+                        printf "   Use HTTPS? [y/N]: "
+                        read -r proto_choice
+                        printf "\n"
+                        [ "$proto_choice" = "y" ] || [ "$proto_choice" = "Y" ] && ttyd_proto="https"
+                    fi
+
+                    # Generate cert if HTTPS chosen
+                    if [ "$ttyd_proto" = "https" ]; then
+                        if [ ! -f /etc/ttyd.crt ] || [ ! -f /etc/ttyd.key ]; then
+                            print_info "Generating self-signed certificate for ttyd...\n"
+                            openssl req -x509 -nodes -newkey rsa:2048 \
+                                -keyout /etc/ttyd.key \
+                                -out /etc/ttyd.crt \
+                                -days 3650 \
+                                -subj "/CN=gl-router" >/dev/null 2>&1
+                            print_success "Generated /etc/ttyd.crt\n"
+                            print_success "Generated /etc/ttyd.key\n"
+                        else
+                            print_info "SSL certificates already exist, reusing.\n"
+                        fi
+                    fi
+
+                    # Write UCI config
+                    if [ "$ttyd_proto" = "https" ]; then
+                        cat << 'UCIEOF' > /etc/config/ttyd
 config ttyd
 	option enable '1'
 	option port '7681'
 	option interface '@lan'
 	option command '/bin/login'
-    list client_option 'scrollback=10000'
+	option ssl '1'
+	option ssl_cert '/etc/ttyd.crt'
+	option ssl_key '/etc/ttyd.key'
+	list client_option 'scrollback=10000'
 	list client_option 'theme={"background":"#000000"}'
 	list client_option 'titleFixed="Terminal"'
 UCIEOF
+                        lan_ip=$(get_lan_ip)
+                        print_warning "Before using the terminal, open a new tab and visit: ${CYAN}https://${lan_ip}:7681${RESET}"
+                        print_warning "You must accept the certificate warning, then return to the Admin Panel."
+                        print_warning "The terminal will not load until this is done!\n"
+                    else
+                        cat << 'UCIEOF' > /etc/config/ttyd
+config ttyd
+	option enable '1'
+	option port '7681'
+	option interface '@lan'
+	option command '/bin/login'
+	list client_option 'scrollback=10000'
+	list client_option 'theme={"background":"#000000"}'
+	list client_option 'titleFixed="Terminal"'
+UCIEOF
+                    fi
 
                     /etc/init.d/ttyd enable
                     /etc/init.d/ttyd restart >/dev/null 2>&1
- 
+
                 fi
                
                 # UI Injection 
@@ -3578,7 +3632,7 @@ UCIEOF
       const aliasEl = document.querySelector('.alias span');
       const hostLabel = (aliasEl && aliasEl.innerText.trim())
                         ? aliasEl.innerText.trim().toLowerCase()
-                        : host.split('.')[0];
+                        : host;
       const modal = document.createElement('div');
       modal.id = 'term-modal';
       modal.style.cssText = 'position:fixed; top:10%; left:10%; width:70%; height:60%; background:#000 !important; z-index:9999; border-radius:10px; box-shadow:0 20px 50px rgba(0,0,0,0.9); overflow:hidden; border:1px solid #444; min-width:300px;';
@@ -3666,6 +3720,7 @@ UCIEOF
   setInterval(inject,1000);
 })();
 EOF
+                [ "$ttyd_proto" = "https" ] && sed -i 's|http://|https://|g' "$TARGET_JS"
                 gzip -c "$TARGET_JS" > "$TARGET_GZ"
                 rm -f "$TARGET_JS"
                 rm -rf /var/lib/nginx/*
@@ -3705,7 +3760,7 @@ EOF
                 ;;
 
             3)
-                print_warning "Completely Uninstalling ttyd..."
+                print_warning "Completely Uninstalling ttyd...\n"
                 
                 # Stop service before removal if it exists
                 if command -v ttyd >/dev/null 2>&1 || [ -f "/etc/init.d/ttyd" ]; then
@@ -3719,6 +3774,11 @@ EOF
                     fi
                     opkg remove --autoremove ttyd >/dev/null 2>&1
                     rm -f /etc/config/ttyd
+                    if [ -f /etc/ttyd.crt ] || [ -f /etc/ttyd.key ]; then
+                        print_info "Removing ttyd SSL certificates...\n"
+                        rm -f /etc/ttyd.crt /etc/ttyd.key
+                        print_success "SSL certificates removed.\n"
+                    fi
                     print_success "ttyd package uninstalled.\n"
                 fi
 
@@ -3733,7 +3793,7 @@ EOF
                 press_any_key
                 ;;
             0) return ;;
-            \?|h|H|❓) show_web_terminal_help ;;
+            \?|h|H|❓) show_terminal_help ;;
             *) print_error "Invalid choice"; sleep 1 ;;
         esac
     done

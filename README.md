@@ -27,7 +27,7 @@
   - **Industrial Self-Healing:** Fail-safe logic that pulls pristine binaries or init scripts from /rom if your current installation becomes corrupted.
   - **Surgical Backups:** Precision tracking of configurations, binaries, and scripts with automated timestamping and integrity checks that persist through firmware upgrades.
 - ⚙️ **System Tweaks**
-  - **Zram Tuning:** Essential for low-RAM devices (e.g., Beryl G7/MT3000). Easily install and tune compressed RAM swap to prevent OOM (Out-of-Memory) crashes.
+  - **Zram Tuning:** Essential for low-RAM devices (e.g., Beryl 7/MT3600). Easily install and tune compressed RAM swap to reduce OOM (Out-of-Memory) crashes.
   - **Guest Network Limiter:** Global speed control for the entire guest subnet and the ability to toggle guest access to the router’s local IP.
   - **Advanced Fan Control:** Granular management of Min/Max thresholds, "Fan-on" triggers, and thermal warnings with direct UI integration.
   - **Web-UI Terminal:** Embeds a fully functional Linux terminal directly into the GL.iNet Admin Panel. Adds a `>_` icon to the navigation bar that opens a draggable, resizable, minimizable terminal modal powered by ttyd. Supports both HTTP and HTTPS modes.

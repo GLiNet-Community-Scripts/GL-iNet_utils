@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-04-16
+# Version: 2026-04-19
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -1016,7 +1016,7 @@ Risks if you remove it without mitigation
 
 Strong recommendation
 ─────────────────────
-Enable **zram swap** first (Toolkit → option 4: Manage Zram Swap → Install & Enable).  
+Enable **zram swap** first (Manage Zram Swap → Install & Enable).  
 Zram gives fast compressed swap in RAM, greatly reduces memory pressure, 
 and is safe for most GL.iNet 512MB devices.
 
@@ -1214,10 +1214,15 @@ ad blocking and streaming compatibility:
   protection, curated for GL.iNet performance. (Auto-updates, GPL-3.0).
   URL: https://github.com/phantasm22/AdGuardHome-Lists/blocklist.txt
 
-- **Phantasm22's Allow List**:
+- **Phantasm22's CDN Allow List**:
   Unblocks domains for Roku, Apple TV, NBC, Peacock, Hulu, Disney+, 
   YouTube, Prime, Max, and more. Prevents false positives.
   URL: https://github.com/phantasm22/AdGuardHome-Lists/allowlist.txt
+
+- **Phantasm22's Apps and User Flow Allow List**:
+  Unblocks domains necessary for common day to day use like clicking on
+  a WSJ or Home Depot link or using other common apps.
+  URL: https://github.com/phantasm22/AdGuardHome-Lists/allowlist2.txt
 
 - **HaGeZi's Pro++ Blocklist**:
   Aggressive protection against ads, tracking, phishing, and malware.
@@ -1241,7 +1246,8 @@ HELPEOF
 manage_agh_lists() {
     LIST_REGISTRY="1|Phantasm22's Blocklist|Blocklist|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/blocklist.txt
 2|HaGeZi's Pro++ Blocklist|Blocklist|https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/pro.plus.txt
-3|Phantasm22's Allow List|Allowlist|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/allowlist.txt"
+3|Phantasm22's CDN Allow List|Allowlist|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/allowlist.txt
+4|Phantasm22's Apps and User Flow Allow List|Allowlist|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/allowlist2.txt"
 
     while true; do
         clear
@@ -2278,11 +2284,11 @@ compresses the data and keeps it in RAM. This is much faster and protects your N
 Main benefits on GL.iNet routers:
 • Greatly improves performance when RAM is low (e.g. heavy VPN, AdGuardHome, many clients)
 • Reduces lag and stuttering under memory pressure
-• Significantly extends the lifespan of your router's flash storage
-• Uses very little CPU overhead on modern router SoCs
+• Does not use or impact the router's flash storage
+• Uses minimal CPU overhead on modern router SoCs
 
 Typical recommendations:
-• 25–50% of total RAM is a good starting size (e.g. 128–256 MB on a 512 MB router)
+• 50% of total RAM is a good starting size (e.g. 256 MB on a 512 MB router)
 • Most GL.iNet users enable it if they run AdGuardHome + VPN or have ≥10–15 devices connected
 
 When should you use it?
@@ -2293,12 +2299,12 @@ Important notes:
 • Zram uses some CPU to compress/decompress → not ideal on very old/slow CPUs
 • Data in zram is lost on reboot (normal for swap)
 • Routers with 512MB flash or less will have a forced limit for AdGuardHome allow/block lists.
-  See Option 3 - Manage AdGuardHome Storage
 
 In this menu you can:
 1. Install & enable zram swap
 2. Disable it (stops and disables on boot)
-3. Completely uninstall the package
+3. Toggle Persistence - survives firmware updates
+4. Completely uninstall the package
 HELPEOF
     
     press_any_key

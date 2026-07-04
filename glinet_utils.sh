@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-04-19
+# Version: 2026-07-04
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -15,6 +15,185 @@
 # - Robust error handling and input validation
 # - Designed for OpenWrt-based GL.iNet routers, tested on various models
 # Note: Some features may require specific hardware capabilities or firmware versions.
+
+# =============================================================================
+# UI / UX STANDARDS  (read before changing any prompt, menu, or message)
+# =============================================================================
+# Governance principle
+# --------------------
+# Clarity first, concision second. Every prompt and selectable label names the
+# specific thing it acts on ("Delete this backup?" not "Confirm"). Use plain,
+# conversational language and the fewest words that keep the action
+# unambiguous - cut filler, never cut comprehension. Generic verbs ("OK", bare
+# "Confirm", "Submit") and cryptic abbreviations are prohibited, as is padding
+# that adds no information.
+#
+# "Choose" vs "Enter command"
+#   "Choose [...]:"   one input is definitive/terminal (a choice).
+#   "Enter command:"  inputs mutate pending on-screen state in a loop until a
+#                     separate [C] Confirm (a command is a subset of choice).
+#
+# Vocabulary (locked)
+#   [C] Confirm   [0] Exit / Main menu / Back / Cancel (by depth/context)
+#   [?] Help      multi-select: [A] All  [N] None  [#] Toggle
+#   pager: [P] Prev  [N] Next         [X] is never used.
+#
+# [0] label by depth
+#   root -> Exit ;  depth-1 child -> Main menu ;  depth-2+ -> Back ;
+#   pending/discard screen -> Cancel  (tie-break: does [0] discard pending state?)
+#
+# Prompt & flow rules
+# 1. Disclose-then-ask, in exactly two parts: a disclosure and a terse prompt.
+#    The disclosure (consequence of the non-default answer) is carried by status
+#    message(s) - one or more, each properly iconed (ℹ️ info / ⚠️ warning) - OR
+#    folded into the prompt line itself; never spread across a status line PLUS
+#    separate UNPREFIXED body text. Each status line STATES, it never asks; the
+#    one question is the terse prompt, phrased with a specific action verb (not a
+#    generic "Continue/Yes"), especially for destructive actions. Don't re-ask
+#    what the disclosure already said (no "Are you sure?"). Spacing depends on
+#    what the disclosure IS - read => tight, scan => separated: inline PROSE (a
+#    warning/explanation that is the decision's context) hugs the prompt, no blank
+#    above it (Gestalt proximity); multiple independent warnings get one blank
+#    BETWEEN them but still hug the prompt. A reviewable BLOCK the user scans - a
+#    list, table, or change-summary - is its own region: separate it from the
+#    action/prompt with one blank line or a divider (Gestalt common region; the
+#    modal body-vs-footer pattern, same as a menu's options => "Choose").
+# 2. Yes = the action; the capitalized default marks the safe side
+#    (destructive => [y/N], expected/safe => [Y/n]). Never invert (no Yes=no-op).
+# 3. Wording is the behavioral contract. Transition framing ("Enable it?") =>
+#    N is a no-op (keep current). Declarative framing ("Should this persist?")
+#    => N enforces the opposite (removes). Code MUST match the words. Prefer
+#    transition framing for stateful toggles; never let N silently destroy.
+# 4. State-first, valid transitions only. Show current state, then offer only
+#    reachable transitions: for binary state, a single adaptive label that names
+#    the concrete next action ("Enable X" when off / "Disable X" when on); an
+#    action set (e.g. AGH Service Health [D]/[R]/[0]) for multi-state. Never force
+#    the user to act twice to reach a state, and never label an item "Toggle" -
+#    the label must state what it will do now. ([#] Toggle stays reserved for the
+#    multi-select selection key, a different meaning.)
+# 5. Check before you ask. Never present a [y/N] for an action already satisfied
+#    or currently impossible. Refuse early and quietly when impossible;
+#    warn-and-explain when already satisfied. No silent greying-out of menu
+#    items without explanation.
+# 6. Idempotent, truthful results. Report the ACTUAL delta ("Enabled" /
+#    "Already set - no change" / "Removed" only when something was removed),
+#    never a blanket success message.
+# 7. Context-appropriate status. Every status/info/success/warning line must be
+#    a direct response to the user's preceding action or answer. Never emit a
+#    status about a topic the user didn't act on (no orphaned status). If a
+#    state is worth surfacing absent a related action, fold it into the relevant
+#    action's output rather than printing it standalone.
+# 8. Ambient-state, not re-asked. For low-harm, easily reversible state, show
+#    the state as status and expose the change as a named action: ask at most
+#    once at the natural decision point, never re-ask once satisfied, always
+#    offer a visible reversal. Forced/repeated confirmation is reserved for
+#    destructive or irreversible actions.
+# 9. Dwell mechanism. Match how a screen waits to its information value. User-
+#    paced ("Press any key") for anything the user must READ - help, reports,
+#    status/lists, and action results whose detail won't survive the return to a
+#    cleared menu; also for any error needing user action. Timed auto-clear
+#    (toast) ONLY for self-evident feedback that returns to a screen already
+#    showing the situation: wrong-key validation (~1s) and content-bearing
+#    no-op/cancel notices (~2s). Never zero-dwell - a message must never flash
+#    and vanish with no pause.
+# 10. Vertical spacing. One blank line is the unit of separation between
+#     components (a section and the next prompt, a result and its footer).
+#     Separators are leading-owned: the element BELOW emits the gap (a menu's
+#     "\nChoose", press_any_key's leading "\n", a section's leading blank);
+#     content never carries trailing blanks at a boundary - that is what causes
+#     accidental double blanks. press_any_key is the single source of truth for
+#     footer spacing (one blank); callers MUST NOT prepend printf "\n" before it.
+#     Double blank lines are reserved for major in-screen section dividers only,
+#     never at a component boundary. A printf "\n" is context-dependent: after
+#     `read -r` (Enter echoed a newline) it is a BLANK line; after read_single_char
+#     / `read -rsn1` / a bare prompt (no echoed newline) it is the line TERMINATOR,
+#     not a blank - don't add a second expecting a gap. The single-source rule
+#     generalizes beyond press_any_key: any function that emits its OWN leading
+#     blank (press_any_key, agh_apply_and_restart) is the sole source of that
+#     blank - callers MUST NOT emit a blank immediately before calling it.
+#
+# Help screens
+#   Navigation menus get a [?] Help entry; pickers / numbered-selection /
+#   binary-state / action screens do NOT (out of scope by rule). Help content is
+#   generic and idempotent (no option numbers).
+#
+# Menu & picker input
+#   Input mode is decided at the FUNCTIONAL-GROUP level, by constraint:
+#     - A group containing any live/refreshing screen (or a paged VIEW like the
+#       Hardware Info / Display Settings pagers) is KEY-ONLY - a single keypress
+#       (read_single_char, or read -t for refresh); a blocking read would freeze
+#       the redraw.
+#     - Otherwise the group is KEY + ENTER (read -r) if any member can present a
+#       multi-character token: an item number that reaches >=10, or a multi-char
+#       command like "CL". ALL members of that group then use key+Enter for
+#       consistency, even fixed <=9-item screens within it.
+#     - A standalone fixed-<=9 single-char screen MAY be key-only, but never when
+#       grouped with a line-based sibling. Text/value entry is always key+Enter.
+#     - All major navigation menus are key+Enter.
+#   The input prompt is separated from the options/action-bar block by ONE blank
+#   line (Gestalt common region: options are a content region, the prompt is the
+#   action). Wording is "Choose [<keys>]:" - the bracket lists valid keys, with
+#   the item token from picker_range(): the live count as a range ("1-10"), but
+#   just "1" for a single item (a range only when there IS a range - never
+#   "1-1"), and never a literal "#".
+#
+# Rendering note
+#   Trailing "\033[K" (erase-to-EOL) is load-bearing on in-place redraw screens
+#   (fan / status / spinner). Do NOT remove it there.
+#
+# Progress indicators
+#   spin_run (gear/⚙) = indeterminate wait - duration unknown until the command
+#   finishes (opkg, openssl, a dd test whose throughput we're measuring).
+#   countdown_run (hourglass/⏳) = determinate wait - the caller already knows
+#   and told the user the total duration (e.g. a fixed-length stress test); it
+#   counts down instead of spinning. Pick by determinacy, not by "which looks
+#   nicer" - showing a spinner when the duration is already known withholds
+#   information the user was already given.
+#
+# Table & List Alignment
+#   Column justification is decided per-column by a 3-part test - right-justify
+#   ONLY if all three hold, else left-justify:
+#     1. Values are NOT normalized to near-constant width (i.e. not auto-scaled
+#        across units specifically to keep text length ~constant regardless of
+#        magnitude - that scaling defeats the entire mechanism right-justify
+#        relies on: comparing magnitude by digit position).
+#     2. No other element in the row (a bar, icon, or color) already shows
+#        relative magnitude.
+#     3. The reader's task is genuinely comparing/summing many values, not
+#        reading one row as a self-contained status card about one entity.
+#   Fails any of the three -> left-justify uniformly (Docker/kubectl-style: all
+#   columns left, including numeric-looking ones - this is the default for our
+#   small device-comparison leaderboards and toggle/checkbox lists).
+#   A column's header MUST share its data row's exact format string (or at
+#   minimum identical field-width declarations) wherever feasible - a
+#   hand-typed separate header string WILL drift from computed data over time;
+#   this is the root cause behind every alignment bug found in this audit.
+#   Never center a column header. Screen/section TITLES (print_centered_header)
+#   are a different UI element (a heading, not a table column) and are exempt.
+#   Boolean/toggle indicators use tight brackets: [Y] [N] [✓] [ ] - content
+#   flush against both brackets, no internal space padding. Under a column
+#   header, a checkbox/toggle IS centered within its field (the one explicit
+#   exception to "never center") - it is a symbol/glyph, not text or a
+#   magnitude to compare, and the header word above it stays left-justified
+#   per the normal text rule; the two don't need to share a visual midpoint,
+#   just the same declared field width.
+#   Placeholder/null-value markers (e.g. "---") that mean "not applicable"
+#   rather than a real value ARE exempt from the column's justification and
+#   may be centered within their field - they are not content being compared,
+#   they are a symbol of incomparability, and distinct treatment aids scanning.
+#   Centering with an odd remainder (can't split the padding evenly): give the
+#   extra space to the right, so content sits one space left of true-center,
+#   never right of it.
+#   Out of scope: output piped directly from an external command (df, dd) that
+#   has its own native formatting; vertical Label: Value blocks (System
+#   Information, STATUS panels) which aren't row/column tables at all.
+#
+# Naming
+#   Functions: lowercase snake_case, NO leading underscore, descriptive verb-led
+#   (check_*, get_*, is_*, manage_*, show_*, install_*). A leading "_" is reserved
+#   for internal runtime STATE variables only (_S_* mode symbols, _TERM_PROFILE).
+#   Comments describe the code AS-IS, not its history - changelogs/diffs carry that.
+# =============================================================================
 
 # -----------------------------
 # Color & Emoji
@@ -44,13 +223,185 @@ SPLASH="
 # -----------------------------
 AGH_INIT="/etc/init.d/adguardhome"
 AGH_DISABLED=0  # 0 = Available, 1 = Missing/Uninstalled
-BLA_BOX="┤ ┴ ├ ┬"
+SPIN_LOG="/tmp/.glnet-op.$$"   # scratch log captured from spin_run output
 opkg_updated=0
 SCRIPT_URL="https://raw.githubusercontent.com/phantasm22/GL-iNet_utils/refs/heads/main/glinet_utils.sh"
 TMP_NEW_SCRIPT="/tmp/glinet_utils_new.sh"
-SCRIPT_PATH="$0"
-[ "${SCRIPT_PATH#*/}" != "$SCRIPT_PATH" ] || SCRIPT_PATH="$(pwd)/$SCRIPT_PATH"
-opkg_updated=0
+case "$0" in
+    /*)  SCRIPT_PATH="$0" ;;
+    */*) SCRIPT_PATH="$(pwd)/$0" ;;
+    *)   SCRIPT_PATH="$(command -v "$0" 2>/dev/null)" ;;
+esac
+[ -z "$SCRIPT_PATH" ] && SCRIPT_PATH="$(pwd)/$0"
+INSTALL_PROMPTED=0    # Set to 1 after user responds to install prompt; reset by each new version
+INSTALL_PATH="/usr/sbin/glinet_utils"
+OUTPUT_PREF="auto"    # "auto"|"full"|"compat" — saved in script; "auto" = detect each run
+OUTPUT_MODE="full"    # Runtime: "full"|"compat"; set by detect_output_mode
+_TERM_PROFILE="mac"   # Runtime: "mac"|"wt"|"ttyd"; set by detect_output_mode (full mode only)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Terminal Output Mode Detection
+#
+# OUTPUT_PREF   "auto"|"full"|"compat"  — persisted in script
+# OUTPUT_MODE   "full"|"compat"         — runtime mode
+# _TERM_PROFILE "mac"|"wt"|"ttyd"       — full-mode sub-profile (internal)
+#
+# Detection flow (auto mode):
+#   TERM=xterm/screen/linux/vt*/ansi/putty* → compat (legacy/PuTTY terminals)
+#   Otherwise → ensure stty (install coreutils-stty if missing), then probe:
+#     Probe 1: ✅ advance=1 → ttyd  (xterm.js: all emoji narrow)
+#     Probe 1: ✅ advance=2 → Probe 2: ⚠️+VS16 advance
+#       advance=1 → mac  (keycaps ✓, 2sp after ambig+VS symbols)
+#       advance=2 → wt   (keycaps ✗, 1sp after ambig+VS symbols)
+#
+# The probe REQUIRES a real stty (ESC[6n raw read); busybox does not ship one.
+# ensure_stty installs coreutils-stty silently on first run. If it cannot be
+# installed (no network), the profile falls back to wt — the safest spacing.
+#
+# NO_COLOR strips ANSI colors but does not change mode or symbols.
+# Two display modes: Full and Compatible.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ensure a real `stty` is available for the cursor-advance probe. busybox does
+# NOT ship stty, so on first run we install coreutils-stty silently (no prompt)
+# with a small spinner. Returns 0 if stty is usable afterwards, 1 if it could
+# not be installed (e.g. no network) — the caller then falls back to the
+# Windows Terminal profile, the safest default for spacing.
+ensure_stty() {
+    command -v stty >/dev/null 2>&1 && return 0
+
+    local log="/tmp/.stty-install.$$" pid spin='-\|/' c
+    ( opkg update && opkg install coreutils-stty ) >"$log" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        c=${spin%"${spin#?}"}                  # first character
+        spin=${spin#?}$c                       # rotate frames
+        printf '\rSetting up terminal support... %s' "$c" >/dev/tty
+        usleep 100000 2>/dev/null || sleep 1
+    done
+    wait "$pid"
+    printf '\r\033[K' >/dev/tty                # erase the spinner line
+    rm -f "$log"
+    command -v stty >/dev/null 2>&1
+}
+
+# Cursor advance probe: prints sym at col 1, queries cursor via ESC[6n,
+# returns number of columns advanced. Cleans up after itself. Falls back to 2
+# (which resolves to the Windows Terminal profile) if stty/the probe is absent.
+probe_advance() {
+    local sym="$1" col saved stty_bin tmpf="/tmp/.probe.$$"
+    stty_bin=$(command -v stty 2>/dev/null) || { printf '2'; return; }
+    saved=$("$stty_bin" -g 2>/dev/null)       || { printf '2'; return; }
+    "$stty_bin" raw -echo min 0 time 2 2>/dev/null
+    printf '\r%s\033[6n' "$sym" >/dev/tty
+    dd if=/dev/tty bs=20 count=1 >"$tmpf" 2>/dev/null
+    "$stty_bin" "$saved" 2>/dev/null
+    printf '\r\033[K' >/dev/tty
+    col=$(sed 's/.*\[\([0-9]*\);\([0-9]*\)R.*/\2/' "$tmpf" 2>/dev/null)
+    rm -f "$tmpf"
+    case "$col" in
+        [0-9]*) printf '%d' $((col - 1)) ;;
+        *)      printf '2' ;;
+    esac
+}
+
+detect_output_mode() {
+
+    # ── Step 1: Determine base mode ──────────────────────────────────────────
+    if [ "$OUTPUT_PREF" = "compat" ]; then
+        OUTPUT_MODE="compat"
+    elif [ "$OUTPUT_PREF" = "full" ]; then
+        OUTPUT_MODE="full"
+    else
+        # "auto" (or any unrecognised value) → detect from environment
+        OUTPUT_MODE="full"
+        case "${TERM:-dumb}" in
+            dumb|unknown|""|xterm|screen|linux|vt100|vt220|ansi|putty*)
+                OUTPUT_MODE="compat" ;;
+        esac
+        [ "${GL_COMPAT+x}" ] && OUTPUT_MODE="compat"   # env var power-user override (force Compatible)
+    fi
+
+    # ── Step 2: NO_COLOR — strip ANSI colors only, keep symbols/mode ─────────
+    if [ "${NO_COLOR+x}" ]; then
+        RESET=""; CYAN=""; GREEN=""; RED=""; YELLOW=""
+        GREY=""; BOLD=""; BLUE=""
+    fi
+
+    # ── Step 3: Probe terminal sub-profile (full mode only) ──────────────────
+    # The probe needs a real stty (busybox lacks it). ensure_stty installs
+    # coreutils-stty on first run; if that fails (no network) we fall back to
+    # the Windows Terminal profile, the safest choice for spacing.
+    _TERM_PROFILE="mac"
+    if [ "$OUTPUT_MODE" = "full" ]; then
+        if ensure_stty; then
+            _wide=$(probe_advance '✅')
+            if [ "$_wide" = "1" ]; then
+                _TERM_PROFILE="ttyd"            # xterm.js: all emoji adv=1
+            else
+                _ambig=$(probe_advance '⚠️')
+                [ "$_ambig" = "2" ] && _TERM_PROFILE="wt"
+            fi
+        else
+            _TERM_PROFILE="wt"                  # no stty → safe fallback
+        fi
+    fi
+
+    # ── Step 4: Set symbol variables ─────────────────────────────────────────
+    if [ "$OUTPUT_MODE" = "full" ]; then
+
+        # Wide emoji (✅ ❌ ⏳): adv=2 on mac/wt, adv=1 on ttyd — 1sp correct for all
+        # (⏳ is wide-by-default, NOT ambig+VS like ⚠️ ℹ️ ⚙️ — it takes 1sp even
+        # in the default profile where those take 2sp)
+        _S_OK="✅ "
+        _S_ERR="❌ "
+        _S_ON="✅"; _S_OFF="❌"           # status icons (emoji already carry color)
+
+        case "$_TERM_PROFILE" in
+            ttyd)
+                # xterm.js: all emoji adv=1 — 1 trailing space after everything
+                _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ ";  _S_TIME="⏳ "
+                N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
+                N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
+                NQ="❓"; NCL="🆑"
+                ;;
+            wt)
+                # Windows Terminal: ambig+VS adv=2 — 1sp sufficient
+                # Keycaps render as □1 — use text numbers
+                _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ ";  _S_TIME="⏳ "
+                N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
+                N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
+                NQ="[?] "; NCL="[CL]"
+                ;;
+            *)
+                # macOS Terminal + Linux terminals (default)
+                # ambig+VS: adv=1 but visual 2-wide — 2sp leaves 1 visible gap
+                _S_WARN="⚠️  ";  _S_INFO="ℹ️  ";  _S_ACT="⚙️  ";  _S_TIME="⏳ "
+                N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
+                N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
+                NQ="❓"; NCL="🆑"
+                ;;
+        esac
+
+    else    # compat — PuTTY, legacy, bare vt terminals
+        _S_OK="[√] "
+        _S_ERR="[×] "
+        _S_ON="${GREEN}√${RESET}"; _S_OFF="${RED}×${RESET}"   # status icons (need explicit color)
+        _S_WARN="[!] "
+        _S_INFO="[i] "
+        _S_ACT="[❋] "
+        _S_TIME="[…] "   # all single-width & PuTTY-safe; [√]/[×] mirror on/off √/× and full-mode ✅/❌, [❋]≈gear, […]=wait
+        N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
+        N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
+        NQ="[?] "; NCL="[CL]"
+    fi
+}
+# Show the splash first, then detect the terminal. On first run this installs
+# coreutils-stty, so the "Setting up terminal support..." spinner appears under
+# the splash (before the menu) rather than on a blank screen.
+command -v clear >/dev/null 2>&1 && clear
+printf "%b\n" "$SPLASH"
+detect_output_mode
 
 # -----------------------------
 # Cleanup any previous updates
@@ -58,9 +409,9 @@ opkg_updated=0
 case "$0" in
     *.new)
         ORIGINAL="${0%.new}"
-        printf "🧹 Applying update...\n"
+        printf "%s Applying update...\n" "$_S_ACT"
         mv -f "$0" "$ORIGINAL" && chmod +x "$ORIGINAL"
-        printf "✅ Update applied. Restarting main script...\n"
+        printf "%s Update applied. Restarting...\n" "$_S_OK"
         sleep 3
         exec "$ORIGINAL" "$@"
         ;;
@@ -78,6 +429,12 @@ press_any_key() {
 read_single_char() {
     read -rsn1 char
     printf "%s" "$char"
+}
+
+# Item-selection token for a picker prompt: "1-N" only when there is an actual
+# range; a single item prints just "1". Empty/zero count -> "1" (safe default).
+picker_range() {
+    [ "${1:-0}" -gt 1 ] 2>/dev/null && printf '1-%s' "$1" || printf '1'
 }
 
 print_centered_header() {
@@ -100,21 +457,11 @@ print_centered_header() {
     printf "%b\n\n" "${CYAN}└────────────────────────────────────────────────┘${RESET}"
 }
 
-print_success() {
-    printf "%b\n" "${GREEN}✅ $1${RESET}"
-}
-
-print_error() {
-    printf "%b\n" "${RED}❌ $1${RESET}"
-}
-
-print_warning() {
-    printf "%b\n" "${YELLOW}⚠️  $1${RESET}"
-}
-
-print_info() {
-    printf "%b\n" "${BLUE}ℹ️  $1${RESET}"
-}
+print_success() { printf "%b\n" "${BOLD}${GREEN}${_S_OK}${RESET}${GREEN}$1${RESET}"; }
+print_error()   { printf "%b\n" "${BOLD}${RED}${_S_ERR}${RESET}${RED}$1${RESET}"; }
+print_warning() { printf "%b\n" "${BOLD}${YELLOW}${_S_WARN}${RESET}${YELLOW}$1${RESET}"; }
+print_info()    { printf "%b\n" "${BOLD}${BLUE}${_S_INFO}${RESET}${BLUE}$1${RESET}"; }
+print_action()  { printf "%b\n" "${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}$1${RESET}"; }
 
 # Helper: Secure Password Input with Asterisks
 get_password() {
@@ -149,77 +496,139 @@ get_password() {
 # Self-update function
 # -----------------------------
 check_self_update() {
-    printf "\n🔍 Checking for script updates...\n"
-
     LOCAL_VERSION="$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r')"
     [ -z "$LOCAL_VERSION" ] && LOCAL_VERSION="0000-00-00"
 
-    if ! wget -q -O "$TMP_NEW_SCRIPT" "$SCRIPT_URL"; then
-        printf "⚠️  Unable to check for updates (network or GitHub issue).\n"
+    if ! spin_run "Checking for updates" wget -q -O "$TMP_NEW_SCRIPT" "$SCRIPT_URL"; then
+        rm -f "$SPIN_LOG" 2>/dev/null
+        print_warning "Unable to check for updates (network or GitHub issue)."
         return 1
     fi
+    rm -f "$SPIN_LOG" 2>/dev/null
 
     REMOTE_VERSION="$(grep -m1 '^# Version:' "$TMP_NEW_SCRIPT" | awk '{print $3}' | tr -d '\r')"
     [ -z "$REMOTE_VERSION" ] && REMOTE_VERSION="0000-00-00"
 
-    printf "📦 Current version: %s\n" "$LOCAL_VERSION"
-    printf "🌐 Latest version:  %s\n" "$REMOTE_VERSION"
+    printf "   Current version: %s\n" "$LOCAL_VERSION"
+    printf "   Latest version:  %s\n" "$REMOTE_VERSION"
 
     if [ "$REMOTE_VERSION" \> "$LOCAL_VERSION" ]; then
         printf "\nA new version is available. Update now? [y/N]: "
         read -r ans
+        printf "\n"
         case "$ans" in
             y|Y)
-                printf "⬆️  Updating...\n"
+                print_action "Updating..."
                 cp "$TMP_NEW_SCRIPT" "$SCRIPT_PATH.new" && chmod +x "$SCRIPT_PATH.new"
-                printf "✅ Upgrade complete. Restarting script...\n"
+                print_success "Upgrade complete. Restarting..."
                 exec "$SCRIPT_PATH.new" "$@"
                 ;;
             *)
-                printf "⏭️  Skipping update. Continuing with current version.\n"
+                print_info "Skipping update. Continuing with current version."
                 ;;
         esac
     else
-        printf "✅ You are already running the latest version.\n"
+        print_success "Already running the latest version."
     fi
 
     rm -f "$TMP_NEW_SCRIPT" >/dev/null 2>&1
-    printf "\n"
 }
 
 # -----------------------------
 # System Detection Functions
 # -----------------------------
-check_opkg_updated() {
-    if [ "$opkg_updated" -eq 0 ]; then
-        print_info "Updating package lists...\n"
-        if ! opkg update > /tmp/opkg-update.log 2>&1; then
-            print_error "Fatal error: opkg update failed!"
-            if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
-                print_error "→ No internet connectivity (cannot reach 8.8.8.8)\n"
-            elif ! ping -c 1 -W 3 downloads.openwrt.org >/dev/null 2>&1; then
-                print_error "→ Internet works, but cannot reach package server (DNS or repo issue?)\n"
-            fi
+# Run a command in the background with a "<label>... <spinner>" indicator, then
+# finalize the line (label, no spinner) and return the command's exit status.
+# Output is captured to $SPIN_LOG so the caller can inspect it on failure.
+spin_run() {
+    local label="$1"; shift
+    local pid rc c spin='-\|/'
+    "$@" >"$SPIN_LOG" 2>&1 &
+    pid=$!
+    while kill -0 "$pid" 2>/dev/null; do
+        c=${spin%"${spin#?}"}; spin=${spin#?}$c
+        printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}%s...${RESET} %s" "$label" "$c"
+        usleep 100000 2>/dev/null || sleep 1
+    done
+    wait "$pid"; rc=$?
+    printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}%s...${RESET}\033[K\n" "$label"
+    return "$rc"
+}
 
-            print_info "Collected errors of opkg output:\n"
-            tail -n 20 /tmp/opkg-update.log | grep -E '^(\*|\*\*\*|Collected errors:|wget returned)' | sed 's/^/  /' | while read -r line; do
-                printf "$line\n"
-            done
+# Like spin_run, but for a command with a KNOWN fixed duration (the caller
+# already told the user how long) - shows seconds remaining instead of a
+# generic spinner. Output is captured to $SPIN_LOG, same as spin_run.
+countdown_run() {
+    local label="$1" total="$2"; shift 2
+    local pid rc remain
+    "$@" >"$SPIN_LOG" 2>&1 &
+    pid=$!
+    remain=$total
+    while kill -0 "$pid" 2>/dev/null; do
+        printf "\r${BOLD}${CYAN}${_S_TIME}${RESET}${CYAN}%s...${RESET} %ds remaining" "$label" "$remain"
+        sleep 1
+        [ "$remain" -gt 0 ] && remain=$((remain - 1))
+    done
+    wait "$pid"; rc=$?
+    printf "\r${BOLD}${CYAN}${_S_TIME}${RESET}${CYAN}%s...${RESET}\033[K\n" "$label"
+    return "$rc"
+}
 
-            printf "\n"
-            print_info "Common fixes:"
-            printf "   • Check your internet connection\n"
-            printf "   • Try: ping fw.gl-inet.com or ping downloads.openwrt.org\n"
-            printf "   • Check date/time is correct (HTTPS validation)\n"
-            printf "   • Re-flash firmware if repositories are very old or corrupted\n\n"
-
-            print_warning "Now exiting...\n"
-            rm -f /tmp/opkg-update.log
-            exit 1
-        fi
-    rm -f /tmp/opkg-update.log 2>/dev/null
-        opkg_updated=1
+# Diagnose a failed network operation: pings the internet, then the package
+# server, and prints targeted advice. Returns 0 only if both are reachable.
+check_connectivity() {
+    if ! ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+        print_error "→ No internet connectivity (cannot reach 8.8.8.8)"
+    elif ! ping -c 1 -W 3 downloads.openwrt.org >/dev/null 2>&1; then
+        print_error "→ Internet works, but cannot reach the package server (DNS or repo issue?)"
+    else
+        return 0
     fi
+    printf "\n"
+    print_info "Common fixes:"
+    printf "   • Check your internet connection\n"
+    printf "   • Try: ping fw.gl-inet.com or ping downloads.openwrt.org\n"
+    printf "   • Check date/time is correct (HTTPS validation)\n"
+    printf "   • Re-flash firmware if repositories are very old or corrupted\n"
+    return 1
+}
+
+# Refresh opkg package lists once per session (gated by $opkg_updated). Shows a
+# spinner; on failure prints diagnostics and returns non-zero - callers decide
+# how to recover (it no longer exits the program).
+check_opkg_updated() {
+    [ "$opkg_updated" -eq 1 ] && return 0
+    if spin_run "Updating package lists" opkg update; then
+        opkg_updated=1
+        rm -f "$SPIN_LOG" 2>/dev/null
+        return 0
+    fi
+    print_error "opkg update failed."
+    check_connectivity
+    print_info "Collected errors:"
+    tail -n 20 "$SPIN_LOG" 2>/dev/null | grep -E '^(\*|\*\*\*|Collected errors:|wget returned)' | sed 's/^/  /'
+    printf "\n"
+    rm -f "$SPIN_LOG" 2>/dev/null
+    return 1
+}
+
+# Ensure <pkg> is installed: no-op if already present, else refresh lists and
+# install it with a spinner. $2 = optional friendly name for messages.
+# Returns 0 if the package is installed afterwards, 1 otherwise.
+install_package() {
+    local pkg="$1" name="${2:-$1}"
+    opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
+    check_opkg_updated || return 1
+    spin_run "Installing $name" opkg install "$pkg"
+    if opkg list-installed 2>/dev/null | grep -q "^$pkg "; then
+        print_success "Installed: $name"
+        rm -f "$SPIN_LOG" 2>/dev/null
+        return 0
+    fi
+    print_error "Failed to install $name."
+    check_connectivity
+    rm -f "$SPIN_LOG" 2>/dev/null
+    return 1
 }
 
 get_lan_ip() {
@@ -306,6 +715,51 @@ get_cpu_vendor_model() {
     fi
 }
 
+# Best-effort max CPU clock in MHz. Sources, most authoritative first; prints
+# nothing if none are readable, so the caller simply omits the Frequency line.
+#   1) lscpu             - x86 and boards that populate the MHz fields
+#   2) cpufreq sysfs max - boards with a running DVFS governor
+#   3) device-tree OPP   - opp-hz (64-bit big-endian Hz) decoded via hexdump;
+#                          boards with an OPP table but no cpufreq driver loaded
+#   4) last resort       - known fixed clocks for legacy SoCs that expose no
+#                          OPP/cpufreq/lscpu data; only reached when 1-3 fail
+get_cpu_freq_mhz() {
+    local mhz khz v f
+
+    if command -v lscpu >/dev/null 2>&1; then
+        mhz=$(lscpu 2>/dev/null | awk -F: '/CPU max MHz/{print $2; exit}' | tr -dc '0-9.')
+        [ -z "$mhz" ] && mhz=$(lscpu 2>/dev/null | awk -F: '/CPU MHz/{print $2; exit}' | tr -dc '0-9.')
+        [ -n "$mhz" ] && { printf '%s' "$mhz"; return; }
+    fi
+
+    khz=0
+    for f in /sys/devices/system/cpu/cpufreq/policy*/cpuinfo_max_freq \
+             /sys/devices/system/cpu/cpu*/cpufreq/cpuinfo_max_freq; do
+        [ -r "$f" ] || continue
+        v=$(cat "$f" 2>/dev/null)
+        [ "${v:-0}" -gt "$khz" ] 2>/dev/null && khz=$v
+    done
+    [ "$khz" -gt 0 ] 2>/dev/null && { printf '%s' "$((khz / 1000))"; return; }
+
+    if command -v hexdump >/dev/null 2>&1; then
+        mhz=$(for f in /proc/device-tree/cpus/opp_table*/opp*/opp-hz; do
+                  [ -f "$f" ] && hexdump -v -e '1/1 "%u "' "$f"
+                  echo
+              done | awk '{v=0; for(i=1;i<=NF;i++) v=v*256+$i; if(v>m) m=v}
+                         END{if(m>0) printf "%.0f", m/1000000}')
+        [ -n "$mhz" ] && { printf '%s' "$mhz"; return; }
+    fi
+
+    # Last resort: known fixed clocks for legacy SoCs with no programmatic source.
+    case "$(get_cpu_vendor_model)" in
+        *MT7986*)  printf '2000' ;; # Flint 2
+        *MT7981*)  printf '1300' ;; # Beryl AX
+        *MT7621*)  printf '880'  ;; # Beryl
+        *SF19A28*) printf '1000' ;; # Opal
+        *IPQ4018*) printf '717'  ;; # Slate Plus
+    esac
+}
+
 get_mem_stats() {
     local t=0 a=0 f=0
     if [ -f /proc/meminfo ]; then
@@ -334,6 +788,7 @@ get_mem_stats() {
     mem_avail=$a
     mem_free=$f
     mem_used=$((t - a))
+    mem_buffcache=$((a - f))
     local p_scaled=0
     if [ "$t" -gt 0 ]; then
         p_scaled=$(( (mem_used * 1000) / t ))
@@ -382,11 +837,95 @@ is_agh_running() {
     return 1
 }
 
+# Apply a config/file change while PRESERVING AdGuardHome's run-state.
+# Restarts AGH only if it was running before the change; a deliberately-stopped
+# service is left stopped (no false "failed to start"). Reverts from backup only
+# if AGH WAS running and fails to come back.
+#   $1 = was_running (1/0)
+#   $2 = backup file ("" to skip revert)
+#   $3 = restore target ("" to skip revert)
+#   $4 = success context message (optional)
+#   $5 = note shown when AGH is stopped (optional; default = deferred-apply note; "-" suppresses)
+# Returns 0 when AGH ends in its expected state, 1 on a genuine restart failure.
+agh_apply_and_restart() {
+    local was_running="$1" backup="$2" target="$3" ctx="$4"
+    local stopped_note="${5:-AdGuardHome is stopped — changes will apply when it next starts.}"
+    printf "\n"
+    if [ "$was_running" != "1" ]; then
+        print_success "${ctx:-Changes saved.}"
+        [ "$stopped_note" = "-" ] || print_info "$stopped_note"
+        return 0
+    fi
+    $AGH_INIT start >/dev/null 2>&1; sleep 2
+    if is_agh_running; then
+        print_success "${ctx:-Changes applied.}"
+        print_success "AdGuardHome restarted successfully."
+        return 0
+    fi
+    if [ -n "$backup" ] && [ -n "$target" ]; then
+        print_error "AdGuardHome failed to start! Reverting..."
+        cp "$target" "${target}.error.$(date +%Y%m%d%H%M%S)" 2>/dev/null
+        cp "$backup" "$target"
+        $AGH_INIT start >/dev/null 2>&1; sleep 2
+        if is_agh_running; then
+            print_warning "Restored last known good configuration."
+            return 1
+        fi
+        print_error "Could not restart AdGuardHome even after reverting — check the configuration manually."
+        return 1
+    fi
+    print_error "AdGuardHome failed to start — check the configuration manually."
+    return 1
+}
+
+# Service run-state control (Start / Restart / Stop). Surfaced at the top of the
+# Control Center because it is the most-used action and answers the STATUS line.
+agh_service_control() {
+    if is_agh_running; then
+        printf "\n"
+        print_warning "Service is RUNNING."
+        printf "Disable, Restart, or Cancel? [D/R/0]: "; read -r confirm
+        if [ "$confirm" = "d" ] || [ "$confirm" = "D" ]; then
+            uci set adguardhome.config.enabled='0' && uci set adguardhome.config.dns_enabled='0' && uci commit adguardhome
+            $AGH_INIT stop >/dev/null 2>&1; sleep 1; printf "\n"; print_success "Service Disabled"
+        elif [ "$confirm" = "r" ] || [ "$confirm" = "R" ]; then
+            $AGH_INIT restart >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Restarted"
+        fi
+    else
+        printf "\n"
+        print_warning "Service is STOPPED."
+        printf "Enable the service? [y/N]: "; read -r confirm
+        if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+            uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
+            $AGH_INIT enable >/dev/null 2>&1; sleep 1; $AGH_INIT start >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Enabled"
+        fi
+    fi
+    press_any_key
+}
+
+# Mask a colon-delimited MAC address, keeping only the last octet visible.
+mask_mac() {
+    printf '%s' "$1" | awk -F: '{out=""; for(i=1;i<NF;i++) out=out"**:"; print out $NF}'
+}
+
+# Mask a string, keeping only its last 2 characters visible (same length out
+# as in, so masking never shifts column alignment).
+mask_keep_tail() {
+    local s="$1" len tail_part stars i=0
+    len=${#s}
+    [ "$len" -le 2 ] && { printf '%s' "$s"; return; }
+    tail_part=$(printf '%s' "$s" | tail -c 2)
+    stars=""
+    while [ "$i" -lt "$((len - 2))" ]; do stars="${stars}*"; i=$((i + 1)); done
+    printf '%s%s' "$stars" "$tail_part"
+}
+
 # -----------------------------
 # Hardware Information Display
 # -----------------------------
 show_hardware_info() {
     page=1
+    reveal_ids=0
     total_pages=4
     nav_choice=""
     
@@ -394,9 +933,7 @@ show_hardware_info() {
     hash -r
     if ! command -v lscpu >/dev/null 2>&1; then
         print_centered_header "Hardware Information"
-        check_opkg_updated
-        print_info "Installing lscpu for enhanced CPU information...\n"
-        opkg install lscpu >/dev/null 2>&1
+        install_package lscpu "lscpu (enhanced CPU info)"
         clear
     fi
 
@@ -420,21 +957,11 @@ show_hardware_info() {
 
     if command -v lscpu >/dev/null 2>&1; then
         cpu_cores=$(lscpu 2>/dev/null | grep "^CPU(s):" | awk '{print $2}')
-        cpu_freq=$(lscpu 2>/dev/null | grep "CPU max MHz" | awk '{print $4}')
-        [ -z "$cpu_freq" ] && cpu_freq=$(lscpu 2>/dev/null | grep "CPU MHz" | awk '{print $3}')
     else
         cpu_cores=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
     fi
 
-    if [ -z "$cpu_freq" ]; then
-        case "$cpu_vendor_model" in
-            *MT7981*) cpu_freq="1300" ;; # Beryl AX
-            *MT7986*) cpu_freq="2000" ;; # Flint 2
-            *MT7621*) cpu_freq="880" ;; # Beryl
-            *SF19A28*) cpu_freq="1000" ;; # Opal
-            *IPQ4018*) cpu_freq="717" ;; # Slate Plus
-        esac
-    fi
+    cpu_freq=$(get_cpu_freq_mhz)
 
     # 1. Primary: GL.iNet Universal Hardware Info (4.x+ Firmware)
     if [ -f /proc/gl-hw-info/flash_size ]; then
@@ -454,7 +981,7 @@ show_hardware_info() {
         d_line=$(dmesg | grep -iE "nand|spi|mtd|mmc" | grep -i "MiB" | head -n 1)
         d_size=$(echo "$d_line" | grep -oE '[0-9]+ MiB' | sed 's/MiB/MB/')
         
-        case "$(echo "$d_line" | tr '[:upper:]' '[:lower:]')" in
+        case "$(echo "$d_line" | tr 'A-Z' 'a-z')" in
             *nand*) type="NAND Flash" ;;
             *spi*)  type="SPI Flash" ;;
             *mmc*)  type="eMMC" ;;
@@ -514,18 +1041,23 @@ show_hardware_info() {
             1)  
                 printf " %b%bPage 1 of $total_pages: System Overview%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
-                printf " %b\n" "${CYAN}System Information:${RESET}"
+                if [ "$reveal_ids" -eq 1 ]; then
+                    reveal_label="${YELLOW}[*] Hide${RESET}"; mac_disp="$mac"; sn_disp="$sn"
+                else
+                    reveal_label="${YELLOW}[*] Reveal${RESET}"; mac_disp=$(mask_mac "$mac"); sn_disp=$(mask_keep_tail "$sn")
+                fi
+                printf " %b%-38s%b%b\n" "${CYAN}" "System Information:" "${RESET}" "$reveal_label"
 
                 [ -n "$hostname" ] && printf "   Model:    %b%-26s%b" "${GREEN}" "$hostname" "${RESET}"
-                [ -n "$mac" ] && printf "Device MAC: %b%s%b" "${GREEN}" "$mac" "${RESET}"
+                [ -n "$mac" ] && printf "Device MAC: %b%s%b" "${GREEN}" "$mac_disp" "${RESET}"
                 printf "\n"
-                
+
                 if [ -f /etc/glversion ]; then
                     firmware=$(cat /etc/glversion 2>/dev/null)
                     [ -n "$firmware" ] && printf "   Firmware: %b%-26s%b" "${GREEN}" "$firmware" "${RESET}"
                 fi
 
-                [ -n "$sn" ] && printf "Device SN:  %b%s%b" "${GREEN}" "$sn" "${RESET}"
+                [ -n "$sn" ] && printf "Device SN:  %b%s%b" "${GREEN}" "$sn_disp" "${RESET}"
                 printf "\n"
 
                 if [ -f /proc/uptime ]; then
@@ -541,7 +1073,8 @@ show_hardware_info() {
                     printf "   Uptime:   %b%-23s%b" "${YELLOW}" "Unknown" "${RESET}"
                 fi
 
-                [ ! -z "$ddns" ] && printf "   Device ID:  %b%s%b" "${GREEN}" "$ddns" "${RESET}"   
+                ddns_disp="$ddns"; [ "$reveal_ids" -ne 1 ] && ddns_disp=$(mask_keep_tail "$ddns")
+                [ ! -z "$ddns" ] && printf "   Device ID:  %b%s%b" "${GREEN}" "$ddns_disp" "${RESET}"
                 
                 printf "\n\n"
                 printf " %b\n" "${CYAN}CPU:${RESET}"
@@ -584,7 +1117,9 @@ show_hardware_info() {
                 printf "   Soldered RAM:    %b%-9s %-6s%b" "${GREEN}" "$mem_rounded MB" "" "${RESET}"
                 printf "   Free RAM:   %b%s%b\n" "${GREEN}" "$mem_free MB" "${RESET}"
                 printf "   Total Usable:    %b%-9s %-6s%b" "${GREEN}" "$mem_total MB" "" "${RESET}"
-                printf "   Used RAM:   %b%d MB (%d.%d%%)%b\033[K\n" "${GREEN}" "$mem_used" "$mem_p_whole" "$mem_p_decimal" "${RESET}"
+                printf "   Used RAM:   %b%d MB (%d.%d%%)%b\n" "${GREEN}" "$mem_used" "$mem_p_whole" "$mem_p_decimal" "${RESET}"
+                printf "   Available RAM:   %b%-9s %-6s%b" "${GREEN}" "$mem_avail MB" "" "${RESET}"
+                printf "   Buff/Cache: %b%s MB%b\033[K\n" "${GREEN}" "$mem_buffcache" "${RESET}"
                 )
                 printf "%b\n" "$mem_display\n"
 
@@ -598,36 +1133,48 @@ show_hardware_info() {
             2)
                 printf " %b%bPage 2 of $total_pages: Hardware Crypto Acceleration%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
-                cpu_features=$(cat /proc/cpuinfo | grep Features | head -1 | grep -o "aes\|sha1\|sha2\|pmull\|neon" | tr '\n' ' ')
-                [ -n "$cpu_features" ] && printf " CPU Features: %b%s%b\n\n" "${GREEN}" "$cpu_features" "${RESET}"
-                
-                aes_accel="NO"
-                chacha_accel="NO"
-                poly_accel="NO"
-                sha_accel="NO"
-                
-                if [ -f /proc/crypto ]; then
-                    grep -q 'aes-ce\|aes-arm64' /proc/crypto && aes_accel="YES"
-                    grep -q 'chacha20-neon' /proc/crypto && chacha_accel="YES"
-                    grep -q 'poly1305-neon' /proc/crypto && poly_accel="YES"
-                    grep -q 'sha.*-ce' /proc/crypto && sha_accel="YES"
-                fi
-                
+                # Capabilities come from CPU HWCAP feature flags, NOT /proc/crypto.
+                # OpenSSL/OpenVPN (userspace) and kernel/Go WireGuard both pick their
+                # accelerated paths from these flags; /proc/crypto is the wrong layer.
+                feat_line=$(grep -m1 -iE '^(features|flags)[[:space:]]*:' /proc/cpuinfo 2>/dev/null)
+                has_aes=0; has_pmull=0; has_sha1=0; has_sha2=0; has_sha512=0; has_simd=0
+                case " $feat_line " in *" aes "*)    has_aes=1    ;; esac
+                case " $feat_line " in *" pmull "*)  has_pmull=1  ;; esac
+                case " $feat_line " in *" sha1 "*)   has_sha1=1   ;; esac
+                case " $feat_line " in *" sha2 "*)   has_sha2=1   ;; esac
+                case " $feat_line " in *" sha512 "*) has_sha512=1 ;; esac
+                case " $feat_line " in *" asimd "*|*" neon "*) has_simd=1 ;; esac
+
+                cpu_features=$(printf '%s\n' "$feat_line" | grep -oE 'aes|pmull|sha1|sha2|sha512|sha3|asimd|neon' | tr '\n' ' ')
+                [ -n "$cpu_features" ] && printf " CPU Features: %b%s%b\n\n" "${GREEN}" "${cpu_features% }" "${RESET}"
+
+                # Per-algorithm value color/text (AES-GCM auth = GHASH needs PMULL;
+                # ChaCha20-Poly1305 needs SIMD/NEON).
+                aes_c=$RED; aes_t=NO; [ "$has_aes" -eq 1 ]    && { aes_c=$GREEN; aes_t=YES; }
+                gcm_c=$RED; gcm_t=NO; [ "$has_pmull" -eq 1 ]  && { gcm_c=$GREEN; gcm_t=YES; }
+                cha_c=$RED; cha_t=NO; [ "$has_simd" -eq 1 ]   && { cha_c=$GREEN; cha_t=YES; }
+                s1_c=$RED;  s1_t=NO;  [ "$has_sha1" -eq 1 ]   && { s1_c=$GREEN;  s1_t=YES; }
+                s2_c=$RED;  s2_t=NO;  [ "$has_sha2" -eq 1 ]   && { s2_c=$GREEN;  s2_t=YES; }
+                s5_c=$RED;  s5_t=NO;  [ "$has_sha512" -eq 1 ] && { s5_c=$GREEN;  s5_t=YES; }
+
                 printf " %b\n" "${CYAN}Hardware-Accelerated Algorithms:${RESET}"
-                printf "   AES-CE / ARM64 (OpenVPN) : %b%s%b\n" "$([ "$aes_accel" = "YES" ] && echo "$GREEN" || echo "$RED")" "$aes_accel" "${RESET}"
-                printf "   ChaCha20-Neon (WireGuard): %b%s%b\n" "$([ "$chacha_accel" = "YES" ] && echo "$GREEN" || echo "$RED")" "$chacha_accel" "${RESET}"
-                printf "   Poly1305-Neon (WireGuard): %b%s%b\n" "$([ "$poly_accel" = "YES" ] && echo "$GREEN" || echo "$RED")" "$poly_accel" "${RESET}"
-                printf "   SHA256 / SHA1-CE (System): %b%s%b\n" "$([ "$sha_accel" = "YES" ] && echo "$GREEN" || echo "$RED")" "$sha_accel" "${RESET}"
-                
-                printf "\n %b\n" "${CYAN}VPN Performance Assessment:${RESET}"
-                if [ "$aes_accel" = "YES" ] && [ "$chacha_accel" = "YES" ] && [ "$poly_accel" = "YES" ]; then
-                    printf "   %b%s%b\n" "${GREEN}" "   ✅ Both OpenVPN (AES) and WireGuard (ChaCha20+Poly1305)" "${RESET}"
-                    printf "   %b%s%b\n" "${GREEN}" "      have hardware acceleration" "${RESET}"
-                elif [ "$chacha_accel" = "YES" ] && [ "$poly_accel" = "YES" ]; then
-                    printf "   %b%s%b\n" "${YELLOW}" "   ⚠️  WireGuard has HW acceleration, OpenVPN AES does not" "${RESET}"
-                else
-                    printf "   %b%s%b\n" "${YELLOW}" "   ⚠️  Partial acceleration detected" "${RESET}"
+                printf "   %-43s%b%s%b\n" "AES (OpenVPN, IPsec, TLS):"                "$aes_c" "$aes_t" "${RESET}"
+                printf "   %-43s%b%s%b\n" "AES-GCM / GHASH (OpenVPN AEAD):"           "$gcm_c" "$gcm_t" "${RESET}"
+                printf "   %-43s%b%s%b\n" "ChaCha20-Poly1305 (WireGuard, Tailscale):" "$cha_c" "$cha_t" "${RESET}"
+                printf "   %-43s%b%s%b\n" "SHA-1 (HMAC, legacy TLS):"                 "$s1_c"  "$s1_t"  "${RESET}"
+                printf "   %-43s%b%s%b\n" "SHA-256 (TLS, HMAC, firmware integrity):"  "$s2_c"  "$s2_t"  "${RESET}"
+                printf "   %-43s%b%s%b\n" "SHA-512 (TLS/HMAC):"                       "$s5_c"  "$s5_t"  "${RESET}"
+
+                # VPN verdict: FULL / LIMITED / NONE.
+                if [ "$has_simd" -eq 1 ]; then wg_v="${GREEN}FULL${RESET}"; else wg_v="${RED}NONE${RESET}"; fi
+                if   [ "$has_aes" -eq 1 ] && [ "$has_pmull" -eq 1 ]; then ovpn_v="${GREEN}FULL${RESET}"
+                elif [ "$has_aes" -eq 1 ];                          then ovpn_v="${YELLOW}LIMITED${RESET}"
+                else                                                     ovpn_v="${RED}NONE${RESET}"
                 fi
+
+                printf "\n %b\n" "${CYAN}VPN Performance Assessment:${RESET}"
+                printf "   %-43s%b\n" "WireGuard / Tailscale:" "$wg_v"
+                printf "   %-43s%b\n" "OpenVPN:"               "$ovpn_v"
                 ;;
                 
             3)
@@ -649,7 +1196,7 @@ show_hardware_info() {
 
                 # --- 2. Logical Interfaces ---
                 printf " %b\n" "${CYAN}Network Interfaces (Logical/DSA):${RESET}"
-                ip -br link show 2>/dev/null | grep -E "eth|lan|wan|br-" | while read iface state rest; do
+                ip -br link show 2>/dev/null | grep -E "eth|lan|wan|br-" | grep -v "wlan" | while read iface state rest; do
                     base_iface=$(echo "$iface" | cut -d'@' -f1 | cut -d. -f1)
                     speed_raw=$(cat "/sys/class/net/$base_iface/speed" 2>/dev/null)
                     
@@ -779,6 +1326,7 @@ show_hardware_info() {
         printf "  [N] Next   [0] Main menu  "
         
         if [ "$page" -eq 1 ]; then
+            nav_choice=""
             read -t 1 -n 1 nav_choice
             refresh_counter=$((refresh_counter + 1))
             [ "$refresh_counter" -gt 1000 ] && refresh_counter=0
@@ -790,12 +1338,13 @@ show_hardware_info() {
         case "$nav_choice" in
             p|P|b|B) [ $page -gt 1 ] && page=$((page - 1)) && clear;;
             n|N) [ $page -lt $total_pages ] && page=$((page + 1)) && clear;;
-            1|2|3|4) 
+            1|2|3|4)
                 if [ "$page" -ne "$nav_choice" ]; then
                     page=$nav_choice
                     clear
                 fi
                 ;;
+            '*') reveal_ids=$((1 - reveal_ids)); clear ;;
             0) return ;;
         esac
     done
@@ -838,9 +1387,8 @@ Quick recommendation for most GL.iNet users:
 • Only enable if you specifically need a newer UI feature and understand the risks
 
 In this menu you can:
-1. Enable UI Updates (remove --no-check-update flag + restart AdGuardHome)
-2. Disable UI Updates (add --no-check-update flag + restart AdGuardHome)
-3. Return to main menu
+• Enable or disable UI Updates (adds/removes the --no-check-update flag).
+• Enable or disable update persistence, so AdGuardHome survives firmware updates.
 
 Note: Changing this setting restarts AdGuardHome automatically if already started. 
       Your filtering rules and stats are preserved.
@@ -862,9 +1410,9 @@ manage_agh_ui_updates() {
 
         printf " %b\n" "${CYAN}CURRENT STATUS${RESET}"
         if [ -z "$agh_pid" ]; then
-            printf "   Running: ❌\n"
+            printf "   Running: %b\n" "$_S_OFF"
         else
-            printf "   Running: ✅ (PID: %s)\n" "$agh_pid"
+            printf "   Running: %b (PID: %s)\n" "$_S_ON" "$agh_pid"
         fi
 
         if grep -q -- "--no-check-update" "$AGH_INIT"; then
@@ -892,81 +1440,50 @@ manage_agh_ui_updates() {
             printf "   Update Persistence: %bDISABLED%b\n\n" "${RED}" "${RESET}"
         fi
         
-        printf "1️⃣  Enable UI Updates\n"
-        printf "2️⃣  Disable UI Updates\n"
-        printf "3️⃣  Enable update persistence across firmware updates\n"
-        printf "4️⃣  Disable update persistence across firmware updates\n"
-        printf "0️⃣  Return to previous menu\n"
-        printf "❓ Help\n"
-        printf "\nChoose [1-4/0/?]: "
+        # Adaptive labels (Rule 4): offer only the valid transition for each state.
+        local ui_label ui_action persist_label
+        if grep -q -- "--no-check-update" "$AGH_INIT"; then
+            ui_label="Enable UI Updates"; ui_action="enable"
+        else
+            ui_label="Disable UI Updates"; ui_action="disable"
+        fi
+        if [ "$updates_persist" -eq 1 ]; then
+            persist_label="Disable update persistence across firmware updates"
+        else
+            persist_label="Enable update persistence across firmware updates"
+        fi
+
+        printf "%s  %s\n" "$N1" "$ui_label"
+        printf "%s  %s\n" "$N2" "$persist_label"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-2/0/?]: "
         read -r agh_choice
         printf "\n"
-        
+
         case $agh_choice in
             1)
-                if grep -q -- "--no-check-update" "$AGH_INIT"; then
+                agh_was_running=0; is_agh_running && agh_was_running=1
+                if [ "$ui_action" = "enable" ]; then
                     if [ "$updates_persist" -eq 0 ]; then
                         print_warning "UI updates are currently set to not persist across firmware updates.\n   Enabling UI updates may cause compatibility issues during firmware\n   updates due to legacy binaries being reinstalled. Consider enabling\n   update persistence to avoid this problem.\n"
                     else
-                        print_info "UI updates are currently set to persist across firmware updates.\n"
+                        print_info "UI updates are currently set to persist across firmware updates."
+                        printf "\n"
                     fi
-                    printf "Proceed with changes? [y/N]: "; read -r confirm ; printf "\n"
+                    printf "Proceed with changes? [y/N]: "; read -r confirm
                     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
-
                     sed -i 's/--no-check-update[[:space:]]*//g' "$AGH_INIT"
-                    print_success "UI updates enabled in AdGuardHome"
-                    
-                    if is_agh_running; then    
-                        $AGH_INIT restart >/dev/null 2>&1
-                        if [ $? -eq 0 ]; then
-                            print_success "AdGuardHome restarted successfully"
-                        else
-                            print_error "Failed to restart AdGuardHome"
-                        fi
-                    fi
+                    agh_apply_and_restart "$agh_was_running" "" "" "UI updates enabled."
                 else
-                    print_warning "UI updates are already enabled"
+                    printf "Disable UI updates? [y/N]: "; read -r confirm
+                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+                    sed -i '/procd_set_param command/ s/ \(-c\|--config\)/ --no-check-update \1/' "$AGH_INIT"
+                    agh_apply_and_restart "$agh_was_running" "" "" "UI updates disabled."
                 fi
                 press_any_key
                 ;;
             2)
-                printf "Disable UI updates? [y/N]: "; read -r confirm ; printf "\n"
-                [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
-                
-                if ! grep -q -- "--no-check-update" "$AGH_INIT"; then
-                    sed -i '/procd_set_param command/ s/ \(-c\|--config\)/ --no-check-update \1/' "$AGH_INIT"
-                    print_success "UI updates disabled in AdGuardHome"
-                    
-                    if is_agh_running; then    
-                        $AGH_INIT restart >/dev/null 2>&1
-                        if [ $? -eq 0 ]; then
-                            print_success "AdGuardHome restarted successfully"
-                        else
-                            print_error "Failed to restart AdGuardHome"
-                        fi
-                    fi
-                else
-                    print_warning "UI updates are already disabled"
-                fi
-                press_any_key
-                ;;
-            3)
-                if [ "$updates_persist" -eq 0 ]; then
-                    printf "Enable update persistence across firmware updates? [y/N]: "; read -r confirm ; printf "\n"
-                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
-                    
-                    [ ! -f "$up_conf" ] && touch "$up_conf"
-                   
-                    for entry in "/usr/bin/AdGuardHome" "/etc/init.d/adguardhome" "/etc/AdGuardHome/config.yaml"; do
-                        grep -qFx "$entry" "$up_conf" || echo "$entry" >> "$up_conf"
-                    done
-                    print_success "Update persistence enabled in $up_conf"
-                else
-                    print_warning "Update persistence is already enabled"
-                fi
-                press_any_key
-                ;;
-            4)
                 if [ "$updates_persist" -eq 1 ]; then
                     printf "Disable update persistence across firmware updates? [y/N]: "; read -r confirm ; printf "\n"
                     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
@@ -975,7 +1492,13 @@ manage_agh_ui_updates() {
                     sed -i "/\/etc\/AdGuardHome\/config.yaml/d" /etc/sysupgrade.conf
                     print_success "Update persistence disabled in $up_conf"
                 else
-                    print_warning "Update persistence is already disabled"
+                    printf "Enable update persistence across firmware updates? [y/N]: "; read -r confirm ; printf "\n"
+                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+                    [ ! -f "$up_conf" ] && touch "$up_conf"
+                    for entry in "/usr/bin/AdGuardHome" "/etc/init.d/adguardhome" "/etc/AdGuardHome/config.yaml"; do
+                        grep -qFx "$entry" "$up_conf" || echo "$entry" >> "$up_conf"
+                    done
+                    print_success "Update persistence enabled in $up_conf"
                 fi
                 press_any_key
                 ;;
@@ -1034,24 +1557,27 @@ manage_agh_storage() {
         AGH_WORKDIR=$(get_agh_workdir)
         if [ -z "$AGH_WORKDIR" ]; then
             print_error "Could not find AdGuardHome working directory"
-            printf "\n"
             press_any_key
             return
         fi
         
         printf " %b\n" "${CYAN}STORAGE STATUS${RESET}"
-        printf "   Working Directory: %b%s%b\n\n" "${GREEN}" "$AGH_WORKDIR" "${RESET}"
-        
+        printf "   Working Directory: %b%s%b\n" "${GREEN}" "$AGH_WORKDIR" "${RESET}"
+
+        sub_section_shown=0
          if [ -d "$AGH_WORKDIR/data" ]; then
-            printf  " %b\n" "${CYAN}$AGH_WORKDIR/data Directory:${RESET}"
+            sub_section_shown=1
+            printf "\n %b\n" "${CYAN}$AGH_WORKDIR/data Directory:${RESET}"
             df -Ph "$AGH_WORKDIR/data" 2>/dev/null | tail -1 | awk '{printf "   Total: %s | Used: %s | Free: %s\n", $2, $3, $4}'
         fi
-        
+
         if [ -d "$AGH_WORKDIR/data/filters" ]; then
+            sub_section_shown=1
             printf "\n %b\n" "${CYAN}$AGH_WORKDIR/data/filters Directory:${RESET}"
             df -Ph "$AGH_WORKDIR/data/filters" 2>/dev/null | tail -1 | awk '{printf "   Total: %s | Used: %s | Free: %s\n", $2, $3, $4}'
-        fi     
-        
+        fi
+
+        [ "$sub_section_shown" -eq 1 ] && printf "\n"
         limit_active=0
         if grep -q "$AGH_WORKDIR/data/filters" /proc/mounts; then
             limit_active=1
@@ -1062,10 +1588,10 @@ manage_agh_storage() {
             printf "   Filter Space Limit: %bINACTIVE%b\n" "${GREEN}" "${RESET}"
         fi
         
-        printf "\n1️⃣  Remove Filter Space Limitation\n"
-        printf "2️⃣  Re-enable Filter Space Limitation\n"
-        printf "0️⃣  Return to previous menu\n"
-        printf "❓ Help\n"
+        printf "\n%s  Remove Filter Space Limitation\n" "$N1"
+        printf "%s  Re-enable Filter Space Limitation\n" "$N2"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
         printf "\nChoose [1-2/0/?]: "
         read -r storage_choice
         printf "\n"
@@ -1095,11 +1621,12 @@ WARNEOF
                 
                 if ! swapon -s 2>/dev/null | grep -q zram; then
                     printf "\n"
-                    print_warning "WARNING: Zram swap is NOT enabled!\n"
+                    print_warning "WARNING: Zram swap is NOT enabled!"
+                    printf "\n"
                     print_info "It is strongly recommended to enable zram swap before adding aditional filter lists."
                 fi
                 
-                printf "\n%b" "${YELLOW}Remove the 10MB limit anyway? [y/N]: ${RESET}"
+                printf "%b" "${YELLOW}Remove the 10MB limit anyway? [y/N]: ${RESET}"
                 read -r confirm
                 printf "\n"
                 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
@@ -1306,18 +1833,19 @@ EOF
         while true; do
             clear
             print_centered_header "AdGuardHome Lists Manager"
-            printf " Sel.  %-12s %-50s %-20s\n" "Type" "Name" "Status"
+            printf " %-5s %-12s %-50s %-20s\n" "Sel." "Type" "Name" "Status"
             printf " ──────────────────────────────────────────────────────────────────────────────────────────\n"
             while IFS='|' read -r idx name type stat sel rec url; do
                 s_box="[ ]  "; [ "$sel" -eq 1 ] && s_box="[✓]  "
                 case "$stat" in 0) s_txt="Missing" ;; 1) s_txt="Installed (inactive)" ;; 2) s_txt="Installed (active)" ;; esac
                 label="$idx. $name"; [ "$rec" -eq 1 ] && label="$label ★"
                 [ "$rec" -eq 1 ] && label=$(printf "%-52s" "$label") || label=$(printf "%-50s" "$label")
-                printf " %-4s %-12s %-50s %-20s\n" "$s_box" "$type" "$label" "$s_txt"
+                printf " %-5s %-12s %-50s %-20s\n" "$s_box" "$type" "$label" "$s_txt"
             done < "$LISTS_DATA"
             printf " ──────────────────────────────────────────────────────────────────────────────────────────\n"
             printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel   [?] Help\n"
-            printf " Enter command: "
+            lists_count=$(wc -l < "$LISTS_DATA" 2>/dev/null | tr -dc '0-9')
+            printf "\n Choose [%s/A/N/C/0/?]: " "$(picker_range "$lists_count")"
             read -r input
 
             case "$input" in
@@ -1356,7 +1884,8 @@ EOF
                     BACKUP_FILE="${AGH_CONFIG}.backup.${stamp}"
                     cp "$AGH_CONFIG" "$BACKUP_FILE"
 
-                    $AGH_INIT stop >/dev/null 2>&1; sleep 1
+                    agh_was_running=0; is_agh_running && agh_was_running=1
+                    [ "$agh_was_running" -eq 1 ] && { $AGH_INIT stop >/dev/null 2>&1; sleep 1; }
 
                    	# 5. REMOVAL (Your logic, hardened for line order)
 					echo "$to_remove" | while IFS='|' read -r i n t s sel rec u; do
@@ -1426,25 +1955,9 @@ id: $ts"
 						fi
 					done
 
-                    # 8. RESTART & ERROR RECOVERY
-                    $AGH_INIT start >/dev/null 2>&1; sleep 2
-                     if ! is_agh_running; then
-                        printf "\n"
-						print_error "AdGuardHome failed to start! Reverting..."
-                        cp "$AGH_CONFIG" "${AGH_CONFIG}.error.${stamp}"
-                        cp "$BACKUP_FILE" "$AGH_CONFIG"
-                        $AGH_INIT start >/dev/null 2>&1; sleep 2
-                        if ! is_agh_running; then
-                            print_error "FATAL: Could not restore AGH even with backup!"
-                        else
-                            print_warning "Restoring last known good configuration."
-							print_success "AdGuardHome restarted successfully with restored config"
-                        fi
-                    else
-                        printf "\n"
-						print_success "Changes applied" 
-						print_success "Backup file created: $(basename $BACKUP_FILE)"
-						print_success "AdGuardHome restarted successfully with new configuration"
+                    # 8. APPLY: restart only if AGH was running (preserve run-state)
+                    if agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONFIG" "Changes applied."; then
+                        print_success "Backup file created: $(basename "$BACKUP_FILE")"
                     fi
                     press_any_key; rm -f "$LISTS_DATA"; break 1
                     ;;
@@ -1465,7 +1978,7 @@ show_agh_direct_help() {
     print_centered_header "Direct Access Help"
     cat << 'HELPEOF'
 
-1. TOGGLE DIRECT ACCESS: 
+1. DIRECT ACCESS:
    - ON: Access AGH at http://192.168.8.1:3000 bypassing GL.iNet UI.
    - OFF: Port 3000 redirects to Port 80 (Standard GL.iNet Login).
 
@@ -1492,58 +2005,50 @@ update_agh_credentials() {
     clear
     print_centered_header "Set Web UI Credentials"
     if [ "$PASS_STATUS" = "✅" ]; then
-        print_warning "A password is already set. Proceeding will overwrite it.\n"
+        print_warning "A password is already set. Proceeding will overwrite it."
+        printf "\n"
     else 
         print_warning "No password currently set. This will create a new username and password."
     fi
-    printf "Confirm to proceed? [y/N]: "
+    printf "Set Web UI credentials? [y/N]: "
     read -r confirm
     printf "\n"
     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && return
 
     # Dependency Check
     if ! command -v htpasswd >/dev/null 2>&1; then
-        print_info "Installing apache utils...\n"
-        check_opkg_updated
-        opkg install apache >/dev/null 2>&1
-        if ! command -v htpasswd >/dev/null 2>&1; then
-            print_error "Failed to install apache utils. Cannot proceed."
-            press_any_key
-            return
-        fi
+        install_package apache "apache utils" || { press_any_key; return; }
     fi
 
-    # Input capture
-    printf "Enter Username: "
-    read -r user_name
+    # Input capture — username (suggest root; blank offers retry/cancel)
+    while true; do
+        printf "Enter Username (e.g. root): "
+        read -r user_name
+        [ -n "$user_name" ] && break
+        printf "\n"
+        print_warning "Username cannot be blank."
+        printf "Try again? [Y/n]: "; read -r _u_retry; printf "\n"
+        case "$_u_retry" in n|N) print_info "Operation cancelled."; return ;; esac
+    done
+
+    # Password with confirmation; blank or mismatch offers retry/cancel
     while true; do
         user_pass=$(get_password "Enter Password: ")
-
-        # Check for exit command to allow user to cancel out of password entry
-        case "$user_pass" in
-            [Ee][Xx][Ii][Tt]) 
-                print_warning "Operation cancelled by user."
-                return 
-                ;;
-        esac
-
-        # 2. Check for empty password immediately after the first entry
         if [ -z "$user_pass" ]; then
-            print_error "Password cannot be empty."
+            printf "\n"
+            print_warning "Password cannot be blank."
+            printf "Try again? [Y/n]: "; read -r _p_retry; printf "\n"
+            case "$_p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
             continue
         fi
-
-        # 3. Replace the confirmation read block
         user_pass_conf=$(get_password "Confirm Password: ")
-
-        # 4. Final match check
         if [ "$user_pass" = "$user_pass_conf" ]; then
-            printf "\n"
             break
         fi
         printf "\n"
-        print_error "Passwords do not match. Try again or type \"exit\" to cancel."
-
+        print_warning "Passwords do not match."
+        printf "Try again? [Y/n]: "; read -r _p_retry; printf "\n"
+        case "$_p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
     done
 
     BCRYPT_HASH=$(htpasswd -n -B -b "$user_name" "$user_pass" | cut -d: -f2)
@@ -1555,23 +2060,17 @@ update_agh_credentials() {
     BACKUP_FILE="$AGH_CONF.backup.$TIMESTAMP"
     cp "$AGH_CONF" "$BACKUP_FILE"
 
-    # --- Stopping AGH before config changes ---
-    $AGH_INIT stop >/dev/null 2>&1; sleep 1
-
+    # Validate structure BEFORE touching the service (reads only)
     local ESC_HASH=$(echo "$BCRYPT_HASH" | sed 's/[&]/\\&/g')
-    
+    local mode=""
     if grep -q "users: \[\]" "$AGH_CONF"; then
-        # Case A: Empty list. Replace line with block.
-        sed -i "\|users: \[\]|c\users:\n  - name: $user_name\n    password: \"$ESC_HASH\"" "$AGH_CONF"
+        mode="empty"
     elif grep -q "^users:" "$AGH_CONF"; then
-        # Case B: Check if next two lines are - name and password
         line_num=$(grep -n "^users:" "$AGH_CONF" | cut -d: -f1)
         check_name=$(sed -n "$((line_num+1))p" "$AGH_CONF")
         check_pass=$(sed -n "$((line_num+2))p" "$AGH_CONF")
-
         if echo "$check_name" | grep -q " - name:" && echo "$check_pass" | grep -q "password:"; then
-            sed -i "$((line_num+1))s|- name: .*|- name: $user_name|" "$AGH_CONF"
-            sed -i "$((line_num+2))s|password: .*|password: \"$ESC_HASH\"|" "$AGH_CONF"
+            mode="block"
         else
             print_error "Unexpected YAML structure detected below 'users:' line."
             print_warning "Manual edit required to avoid corrupting config."
@@ -1582,17 +2081,21 @@ update_agh_credentials() {
         press_any_key; return
     fi
 
-    # --- RESTART & RECOVERY ---
-    $AGH_INIT start >/dev/null 2>&1; sleep 2
-    if ! is_agh_running; then
-        print_error "Service failed to start! Rolling back..."
-        cp "$BACKUP_FILE" "$AGH_CONF"
-        $AGH_INIT start >/dev/null 2>&1; sleep 2
-        press_any_key
+    # Commit: stop (only if running), edit, then restart-if-was-running
+    agh_was_running=0; is_agh_running && agh_was_running=1
+    [ "$agh_was_running" -eq 1 ] && { $AGH_INIT stop >/dev/null 2>&1; sleep 1; }
+
+    if [ "$mode" = "empty" ]; then
+        sed -i "\|users: \[\]|c\users:\n  - name: $user_name\n    password: \"$ESC_HASH\"" "$AGH_CONF"
     else
-        print_success "Credentials updated. Backup created: $(basename "$BACKUP_FILE")"
-        press_any_key
+        sed -i "$((line_num+1))s|- name: .*|- name: $user_name|" "$AGH_CONF"
+        sed -i "$((line_num+2))s|password: .*|password: \"$ESC_HASH\"|" "$AGH_CONF"
     fi
+
+    if agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONF" "Credentials updated."; then
+        print_success "Backup created: $(basename "$BACKUP_FILE")"
+    fi
+    press_any_key
 }
 
 manage_agh_direct_access() {
@@ -1601,20 +2104,22 @@ manage_agh_direct_access() {
         print_centered_header "AdGuardHome Direct Access"
         lan_ipaddr=$(get_lan_ip)
         AGH_CONF=$(get_agh_config)
-        DIRECT_STATUS="❌"
-        grep -q -- "--glinet" "$AGH_INIT" || DIRECT_STATUS="✅"
-        
-        PASS_STATUS="✅"
-        grep -q "users: \[\]" "$AGH_CONF" && PASS_STATUS="❌"
-        
+        DIRECT_STATUS="❌"; direct_disp="$_S_OFF"
+        grep -q -- "--glinet" "$AGH_INIT" || { DIRECT_STATUS="✅"; direct_disp="$_S_ON"; }
+
+        PASS_STATUS="✅"; pass_disp="$_S_ON"
+        grep -q "users: \[\]" "$AGH_CONF" && { PASS_STATUS="❌"; pass_disp="$_S_OFF"; }
+
         printf " ${CYAN}STATUS${RESET}\n"
-        printf "   Direct Web UI Access: %b" "$DIRECT_STATUS\n"
-        printf "   Web UI Username / Password Set: %b" "$PASS_STATUS\n\n"
-        printf "1️⃣  Toggle Direct Access (Standalone vs Integrated)\n"
-        printf "2️⃣  Add/Update Web UI Credentials (Username/Password)\n"
-        printf "3️⃣  Remove Web UI Password (Set to Open Access)\n"
-        printf "0️⃣  Return to previous menu\n"
-        printf "❓ Help\n"
+        printf "   Direct Web UI Access: %b\n" "$direct_disp"
+        printf "   Web UI Username / Password Set: %b\n\n" "$pass_disp"
+        local direct_label="Enable Direct Access (Switch to Standalone)"
+        [ "$DIRECT_STATUS" = "✅" ] && direct_label="Disable Direct Access (Switch to Integrated)"
+        printf "%s  %s\n" "$N1" "$direct_label"
+        printf "%s  Add/Update Web UI Credentials (Username/Password)\n" "$N2"
+        printf "%s  Remove Web UI Password (Set to Open Access)\n" "$N3"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
         
         printf "\nChoose [1-3/0/?]: "
         read -r direct_choice
@@ -1625,50 +2130,50 @@ manage_agh_direct_access() {
                 clear
                 if [ "$DIRECT_STATUS" = "❌" ]; then
                     print_centered_header "Enable AdGuardHome Direct Access"
-                    print_warning "AdGuardHome direct access bypasses GL.iNet Web UI security.\n"
-                    print_warning "If no password is set, and you bypass setting a password, the UI will be ${BOLD}UNSECURED.${RESET}\n"
-                    print_info "Once enabled, you can access AdGuardHome Web UI at ${BOLD}http://$lan_ipaddr:3000${RESET}\n"
-                    printf "Proceed with enabling? [y/N]: "
+                    print_warning "AdGuardHome direct access bypasses GL.iNet Web UI security."
+                    printf "\n"
+                    print_warning "If no password is set, and you bypass setting a password, the UI will be ${BOLD}UNSECURED.${RESET}"
+                    printf "\n"
+                    print_info "Once enabled, you can access AdGuardHome Web UI at ${BOLD}http://$lan_ipaddr:3000${RESET}"
+                    printf "Enable Direct Access? [y/N]: "
                 else
                     print_centered_header "Disable AdGuardHome Direct Access"
-                    print_warning "AdGuardHome direct Web UI access via http://$lan_ipaddr:3000 will be disabled.\n"
-                    print_warning "Any passwords set will remain but will be bypassed.\n"
-                    print_info "Once disabled, you can access the AdGuardHome Web UI at: ${BOLD}http://$lan_ipaddr/${RESET}\n"
-                    printf "Proceed with disabling? [y/N]: "
+                    print_warning "AdGuardHome direct Web UI access via http://$lan_ipaddr:3000 will be disabled."
+                    printf "\n"
+                    print_warning "Any passwords set will remain but will be bypassed."
+                    printf "\n"
+                    print_info "Once disabled, you can access the AdGuardHome Web UI at: ${BOLD}http://$lan_ipaddr/${RESET}"
+                    printf "Disable Direct Access? [y/N]: "
                 fi
                 read -r confirm
-                printf "\n"
                 [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
-                
+
                 cp "$AGH_INIT" "$AGH_INIT.backup.$TIMESTAMP"
-                
+                agh_was_running=0; is_agh_running && agh_was_running=1
+
                 if [ "$DIRECT_STATUS" = "✅" ]; then
                     # Turning Direct Access OFF (Integrated Mode)
                     sed -i 's/AdGuardHome /AdGuardHome --glinet /g' "$AGH_INIT"
-                    $AGH_INIT restart >/dev/null 2>&1
-                    print_success "Direct Access Disabled (Integrated Mode)"
+                    agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct Access disabled (Integrated Mode)."
                     press_any_key
                 else
                     # Turning Direct Access ON (Standalone Mode)
                     sed -i 's/ --glinet//g' "$AGH_INIT"
-                    print_success "Direct Access Enabled (Standalone Mode)"
-                    
                     if [ "$PASS_STATUS" = "❌" ]; then
                         printf "\n"
-                        print_warning "No username/password has been set for AdGuardHome.\n"
+                        print_warning "No username/password has been set for AdGuardHome."
                         printf "Would you like to set one now? [Y/n]: "
                         read -r set_pass
                         printf "\n"
                         if [ "$set_pass" != "n" ] && [ "$set_pass" != "N" ]; then
                             update_agh_credentials && continue
                         else
-                            $AGH_INIT restart >/dev/null 2>&1
-                            print_warning "AdGuardHome restarted with unsecured access."
+                            print_warning "AdGuardHome Web UI will be UNSECURED (no password)."
+                            agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct Access enabled (Standalone Mode)."
                             press_any_key
                         fi
                     else
-                        $AGH_INIT restart >/dev/null 2>&1
-                        print_success "AdGuardHome restarted successfully."
+                        agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct Access enabled (Standalone Mode)."
                         press_any_key
                     fi
                 fi
@@ -1684,18 +2189,18 @@ manage_agh_direct_access() {
                     press_any_key; continue
                 fi
                 if [ "$DIRECT_STATUS" = "✅" ]; then
-                    print_warning "Remove credentials and enable OPEN ACCESS (Unsecured) to AdGuardHome Web UI?"
+                    print_warning "This removes the Web UI credentials, leaving AdGuardHome OPEN (unsecured)."
                 else
-                    print_warning "Remove credentials to AdGuardHome Web UI?"
+                    print_warning "This removes the AdGuardHome Web UI credentials."
                 fi
-                printf "Confirm [y/N]: "
+                printf "Remove credentials? [y/N]: "
                 read -r confirm
-                printf "\n"
                 [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
 
                 BACKUP_FILE="$AGH_CONF.backup.$TIMESTAMP"
                 cp "$AGH_CONF" "$BACKUP_FILE"
-                $AGH_INIT stop >/dev/null 2>&1; sleep 1
+                agh_was_running=0; is_agh_running && agh_was_running=1
+                [ "$agh_was_running" -eq 1 ] && { $AGH_INIT stop >/dev/null 2>&1; sleep 1; }
 
                 # Find users: block and replace with users: []
                 line_num=$(grep -n "^users:" "$AGH_CONF" | cut -d: -f1)
@@ -1705,17 +2210,8 @@ manage_agh_direct_access() {
                 fi
                 sed -i "${line_num}s/users:.*/users: []/" "$AGH_CONF"
 
-                $AGH_INIT start >/dev/null 2>&1
-                sleep 2
-                if ! is_agh_running; then
-                    print_error "Service failed to start! Rolling back..."
-                    cp "$BACKUP_FILE" "$AGH_CONF"
-                    $AGH_INIT start >/dev/null 2>&1; sleep 2
-                    press_any_key
-                else
-                    print_success "Password removed. Service restarted."
-                    press_any_key
-                fi
+                agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONF" "Web UI password removed."
+                press_any_key
                 ;;
 
             0) return ;;
@@ -1734,24 +2230,30 @@ show_agh_help() {
     clear
     print_centered_header "AdGuardHome Hub - Help"
     cat << 'HELPEOF'
-1. SETUP & CONFIG: Manages UI entry points (Direct Access), binary
-   lifecycle (Updates), and storage thresholds (10MB Limit).
+SERVICE: Start, restart or stop the AdGuardHome daemon. Listed first because
+   it is the most-used control and answers the STATUS line above the menu.
 
-2. BACKUP SUITE: 
+ALLOW/BLOCKLISTS: Add or remove filter subscriptions (block and allow lists).
+
+SETUP & ACCESS: UI entry points (Direct Access), binary lifecycle (Updates),
+   and storage thresholds (10MB Limit).
+
+BACKUP SUITE:
    - SAVE: Generates timestamped sync points for Config and Binary.
    - RESTORE: Allows modular injection of previous system states.
    - MANAGE: Cleanup utility to purge redundant backup files.
 
-3. SERVICE & HEALTH:
-   - POWER: Toggles the daemon runtime (On/Off/Restart).
+LOGS & MAINTENANCE:
    - LOGS: Real-time 'logread' stream for diagnostic observation.
    - CACHE: Flushes filter data to resolve download/checksum errors.
 
-CL. FACTORY RESET: Reconstructs the environment using read-only
-    firmware defaults located in the /rom partition.
+FACTORY RESET: Reconstructs the environment using read-only firmware
+   defaults located in the /rom partition.
 
 NOTES:
-- RULE DISCREPANCY: 'Raw' counts include all text lines. The Web UI 
+- Edits apply when AdGuardHome restarts. If the service is stopped, changes
+  are saved and take effect the next time you start it.
+- RULE DISCREPANCY: 'Raw' counts include all text lines. The Web UI
   displays a lower 'Optimized' count after deduplication.
 - 10MB LIMIT: Crucial for routers with small flash storage. When
   active, it restricts filter space to prevent storage exhaustion.
@@ -1772,14 +2274,16 @@ create_agh_backup() {
         clear
         print_centered_header "AdGuardHome Backup Creation"
         printf " TIMESTAMP: $ts\n"
+        printf "\n #  Sel Component\n"
         printf " ────────────────────────────────────────────────────────────\n"
-        printf " 1. [ %s ] Configuration Settings (YAML)\n" "$b_cfg"
-        printf " 2. [ %s ] App Binary (AdGuardHome Executable)\n" "$b_bin"
-        printf " 3. [ %s ] Startup Script (init.d)\n\n" "$b_ini"
+        printf " 1. [%s] Configuration Settings (YAML)\n" "$b_cfg"
+        printf " 2. [%s] App Binary (AdGuardHome Executable)\n" "$b_bin"
+        printf " 3. [%s] Startup Script (init.d)\n" "$b_ini"
         printf " ────────────────────────────────────────────────────────────\n"
         printf " [#] Toggle Component   [S] Save Backup   [0] Cancel\n"
-        printf " Choose [1-3/S/0]: "
-        local s_choice=$(read_single_char | tr '[:upper:]' '[:lower:]')
+        printf "\n Choose [1-3/S/0]: "
+        read -r s_choice
+        s_choice=$(echo "$s_choice" | tr 'A-Z' 'a-z')
         
         case "$s_choice" in
             1) [ "$b_cfg" = "Y" ] && b_cfg="N" || b_cfg="Y" ;;
@@ -1787,13 +2291,13 @@ create_agh_backup() {
             3) [ "$b_ini" = "Y" ] && b_ini="N" || b_ini="Y" ;;
             s)
                 if [ "$b_cfg" = "N" ] && [ "$b_bin" = "N" ] && [ "$b_ini" = "N" ]; then
-                    printf "\n\n"
+                    printf "\n"
                     print_error "Nothing selected to save."
                     sleep 1
                     continue
                 fi
 
-                printf "\n\n"
+                printf "\n"
                 print_info "Creating Selected Backups..."
                 # Atomic Save Logic
                 [ "$b_cfg" = "Y" ] && [ -f "$AGH_CONFIG" ] && cp "$AGH_CONFIG" "$AGH_CONFIG.backup.$ts"
@@ -1818,9 +2322,8 @@ manage_agh_backups() {
 
         clear
         print_centered_header "Pick a Backup Date"
-        printf " ────────────────────────────────────────────────────────────\n"
-        printf " %-3s  %-18s  %-5s  %-5s  %-5s\n" "#" "Date / Time" "Conf" "Bin" "Init"
-        printf "\n"
+        printf " %-3s  %-18s  %s  %s   %s\n" "#" "Date / Time" "Conf" "Bin" "Init"
+        printf " ─────────────────────────────────────────\n"
 
         local i=1
         local map_file="/tmp/agh_bk_map"
@@ -1829,15 +2332,15 @@ manage_agh_backups() {
         for ts in $backups; do
             local p_date="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:8:2}:${ts:10:2}"
             local has_bin="[N]"; [ -f "/usr/bin/AdGuardHome.backup.$ts" ] && has_bin="[Y]"
-            local has_ini="[N]"; [ -f "/etc/init.d/adguardhome.backup.$ts" ] && has_ini="[Y]"
+            local has_ini="[N] "; [ -f "/etc/init.d/adguardhome.backup.$ts" ] && has_ini="[Y] "
 
-            printf " %-3s  %-18s  %-5s  %-5s  %-5s\n" "$i." "$p_date" "[Y]" "$has_bin" "$has_ini"
+            printf " %-3s  %-18s  %s  %s   %s\n" "$i." "$p_date" "[Y] " "$has_bin" "$has_ini"
             printf "%s|%s\n" "$i" "$ts" >> "$map_file"
             i=$((i+1))
         done
-        printf " ────────────────────────────────────────────────────────────\n"
+        printf " ────────────────────────────────────────────\n"
         printf " [#] To Restore   [0] Cancel\n"
-        printf " Choose [1-$((i-1))/0]: "
+        printf "\n Choose [%s/0]: " "$(picker_range $((i-1)))"
         read -r b_choice
         printf "\n"
         [ -z "$b_choice" ] || [ "$b_choice" = "0" ] && return
@@ -1847,42 +2350,55 @@ manage_agh_backups() {
             print_error "Invalid selection"; sleep 1; continue
         fi
 
-        local fix_cfg="Y"; local fix_bin="N"; local fix_ini="N"
+        # Only components with a backup for this timestamp are restorable. The
+        # timestamp comes from a config backup, so config always exists; binary
+        # and init are optional - show (and allow toggling) only what's present,
+        # numbered sequentially so there are no gaps.
+        local bin_avail=0; [ -f "/usr/bin/AdGuardHome.backup.$selected_ts" ] && bin_avail=1
+        local ini_avail=0; [ -f "/etc/init.d/adguardhome.backup.$selected_ts" ] && ini_avail=1
+        local fix_cfg="Y"
+        local fix_bin="Y"; [ "$bin_avail" -eq 0 ] && fix_bin="N"
+        local fix_ini="Y"; [ "$ini_avail" -eq 0 ] && fix_ini="N"
         while true; do
             clear
             print_centered_header "Select items to restore from: $selected_ts"
+            printf " #  Sel Component\n"
             printf " ────────────────────────────────────────────────────────────\n"
-            printf " 1. [ %s ] Configuration Settings\n" "$fix_cfg"
-            printf " 2. [ %s ] App Binary (AdGuardHome)\n" "$fix_bin"
-            printf " 3. [ %s ] Startup Script (init.d)\n\n" "$fix_ini"
+            local n=0 cfg_n=0 bin_n=0 ini_n=0
+            n=$((n+1)); cfg_n=$n; printf " %d. [%s] Configuration Settings\n" "$n" "$fix_cfg"
+            if [ "$bin_avail" -eq 1 ]; then n=$((n+1)); bin_n=$n; printf " %d. [%s] App Binary (AdGuardHome)\n" "$n" "$fix_bin"; fi
+            if [ "$ini_avail" -eq 1 ]; then n=$((n+1)); ini_n=$n; printf " %d. [%s] Startup Script (init.d)\n" "$n" "$fix_ini"; fi
             printf " ────────────────────────────────────────────────────────────\n"
             printf " [#] Toggle Restore   [C] Confirm   [0] Cancel\n"
-            printf " Choose [1-3/C/0]: "
-            local s_choice=$(read_single_char | tr '[:upper:]' '[:lower:]')
-            printf "\n"
-            case "$s_choice" in
-                1) [ "$fix_cfg" = "Y" ] && fix_cfg="N" || fix_cfg="Y" ;;
-                2) [ "$fix_bin" = "Y" ] && fix_bin="N" || fix_bin="Y" ;;
-                3) [ "$fix_ini" = "Y" ] && fix_ini="N" || fix_ini="Y" ;;
-                c) 
-                    if [ "$fix_cfg" = "N" ] && [ "$fix_bin" = "N" ] && [ "$fix_ini" = "N" ]; then
-                        printf "\n"
-                        print_error "Nothing selected to restore. Select an option or 0 to cancel."
-                        press_any_key
-                        continue
-                    fi
-                    
-                    printf "\nApplying Restore...\n"
-                    $AGH_INIT stop >/dev/null 2>&1; sleep 1
-                    [ "$fix_cfg" = "Y" ] && cp "/etc/AdGuardHome/config.yaml.backup.$selected_ts" "/etc/AdGuardHome/config.yaml"
-                    [ "$fix_bin" = "Y" ] && cp "/usr/bin/AdGuardHome.backup.$selected_ts" "/usr/bin/AdGuardHome"
-                    [ "$fix_ini" = "Y" ] && cp "/etc/init.d/adguardhome.backup.$selected_ts" "/etc/init.d/adguardhome"
-                    $AGH_INIT start >/dev/null 2>&1; sleep 2
+            printf "\n Choose [%s/C/0]: " "$(picker_range "$n")"
+            read -r s_choice
+            s_choice=$(echo "$s_choice" | tr 'A-Z' 'a-z')
+            if [ "$s_choice" = "0" ]; then
+                return
+            elif [ "$s_choice" = "c" ]; then
+                if [ "$fix_cfg" = "N" ] && [ "$fix_bin" = "N" ] && [ "$fix_ini" = "N" ]; then
                     printf "\n"
-                    print_success "Restore complete!"; press_any_key; return ;;
-                0) return ;;
-                *) print_error "Invalid option"; sleep 1 ;;
-            esac
+                    print_error "Nothing selected to restore. Select an option or 0 to cancel."
+                    press_any_key
+                    continue
+                fi
+                printf "\nApplying Restore...\n"
+                agh_was_running=0; is_agh_running && agh_was_running=1
+                [ "$agh_was_running" -eq 1 ] && { $AGH_INIT stop >/dev/null 2>&1; sleep 1; }
+                [ "$fix_cfg" = "Y" ] && cp "/etc/AdGuardHome/config.yaml.backup.$selected_ts" "/etc/AdGuardHome/config.yaml"
+                [ "$fix_bin" = "Y" ] && cp "/usr/bin/AdGuardHome.backup.$selected_ts" "/usr/bin/AdGuardHome"
+                [ "$fix_ini" = "Y" ] && cp "/etc/init.d/adguardhome.backup.$selected_ts" "/etc/init.d/adguardhome"
+                agh_apply_and_restart "$agh_was_running" "" "" "Restore complete."
+                press_any_key; return
+            elif [ "$s_choice" = "$cfg_n" ]; then
+                [ "$fix_cfg" = "Y" ] && fix_cfg="N" || fix_cfg="Y"
+            elif [ "$bin_avail" -eq 1 ] && [ "$s_choice" = "$bin_n" ]; then
+                [ "$fix_bin" = "Y" ] && fix_bin="N" || fix_bin="Y"
+            elif [ "$ini_avail" -eq 1 ] && [ "$s_choice" = "$ini_n" ]; then
+                [ "$fix_ini" = "Y" ] && fix_ini="N" || fix_ini="Y"
+            else
+                print_error "Invalid option"; sleep 1
+            fi
         done
     done
 }
@@ -1905,17 +2421,17 @@ delete_agh_backups() {
 
         clear
         print_centered_header "AdGuardHome Backup Cleanup"
-        printf " %-4s  %-4s  %-18s  %-5s  %-5s  %-5s  %-6s\n" "Sel" "Idx" "Date / Time" "Conf" "Bin" "Init" "Size"
-        printf " ──────────────────────────────────────────────────────────────\n"
+        printf " %-3s  %-4s  %-18s  %s  %s   %s  %s\n" "Sel" "Idx" "Date / Time" "Conf" "Bin" "Init" "Size"
+        printf " ───────────────────────────────────────────────────────\n"
 
         while IFS='|' read -r idx ts sel; do
             local p_date="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:8:2}:${ts:10:2}"
-            local s_box="[ ]"; [ "$sel" -eq 1 ] && s_box="[✓] "
-            
+            local s_box="[ ]"; [ "$sel" -eq 1 ] && s_box="[✓]"
+
             # Check presence of components
-            local c="[Y]"; [ ! -f "/etc/AdGuardHome/config.yaml.backup.$ts" ] && c="[N]"
+            local c="[Y] "; [ ! -f "/etc/AdGuardHome/config.yaml.backup.$ts" ] && c="[N] "
             local b="[Y]"; [ ! -f "/usr/bin/AdGuardHome.backup.$ts" ] && b="[N]"
-            local n="[Y]"; [ ! -f "/etc/init.d/adguardhome.backup.$ts" ] && n="[N]"
+            local n="[Y] "; [ ! -f "/etc/init.d/adguardhome.backup.$ts" ] && n="[N] "
 
             # Calculate total size for this timestamp
             local ts_bytes=0
@@ -1933,14 +2449,15 @@ delete_agh_backups() {
                 p_size="${ts_bytes}B"
             fi
 
-            printf " %-4s  %-4s  %-18s  %-5s  %-5s  %-5s  %-6s\n" "$s_box" "$idx." "$p_date" "$c" "$b" "$n" "$p_size"
+            printf " %s  %-4s  %-18s  %s  %s   %s  %-6s\n" "$s_box" "$idx." "$p_date" "$c" "$b" "$n" "$p_size"
         done < "$map_file"
 
         printf " ──────────────────────────────────────────────────────────────\n"
         printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel\n"
-        printf " Enter command: "
+        bk_count=$(wc -l < "$map_file" 2>/dev/null | tr -dc '0-9')
+        printf "\n Choose [%s/A/N/C/0]: " "$(picker_range "$bk_count")"
         read -r input
-        local cmd=$(echo "$input" | tr '[:upper:]' '[:lower:]')
+        local cmd=$(echo "$input" | tr 'A-Z' 'a-z')
 
         case "$cmd" in
             a) sed -i 's/|0$/|1/' "$map_file" ;;
@@ -1956,11 +2473,11 @@ delete_agh_backups() {
             c)
                 if ! grep -q "|1$" "$map_file"; then
                     printf "\n"
-                    print_error "No backups selected."; press_any_key; continue
+                    print_error "No backups selected."; sleep 2; continue
                 fi
                 printf "\n"
                 print_warning "WARNING: You are about to permanently delete selected backups."
-                printf "Confirm deletion? [y/N]: "; read -r confirm
+                printf "Delete selected backups? [y/N]: "; read -r confirm
                 case "$confirm" in
                     y|Y)
                     while IFS='|' read -r idx ts sel; do
@@ -1975,7 +2492,7 @@ delete_agh_backups() {
                     press_any_key;
                     rm -f "$map_file"
                     return ;;
-                    *) print_error "Deletion cancelled." ; press_any_key ; continue ;;
+                    *) print_error "Deletion cancelled." ; sleep 2 ; continue ;;
                 esac ;;
             0) rm -f "$map_file"; return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -1983,17 +2500,39 @@ delete_agh_backups() {
     done
 }
 
+show_agh_setup_help() {
+    clear
+    print_centered_header "AdGuardHome Setup & Access - Help"
+
+    cat << 'HELPEOF'
+What is this?
+─────────────
+Configuration for how AdGuardHome stores its filter data, how its Web UI is
+reached, and whether it is allowed to update its own UI. Each item opens its
+own screen with full details and its own help.
+
+Getting around (the same keys work on every screen):
+• Type the number shown beside an item and press Enter to open it.
+• [0] returns to the previous menu.
+• [?] shows the help for the screen you are on.
+HELPEOF
+
+    press_any_key
+}
+
 sub_setup_config() {
     while true; do
         clear
         print_centered_header "AdGuardHome Setup, Access & UI Updates"
-        printf "1️⃣  Filter Storage Space Limit\n"
-        printf "2️⃣  UI Direct Access\n"
-        printf "3️⃣  UI Updates\n"
-        printf "0️⃣  Back to Control Center\n"
-        printf "\nChoose [1-3/0]: "
+        printf "%s  Filter Storage Space Limit\n" "$N1"
+        printf "%s  UI Direct Access\n" "$N2"
+        printf "%s  UI Updates\n" "$N3"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-3/0/?]: "
         read -r s_opt
         case "$s_opt" in
+            \?|h|H|❓) show_agh_setup_help ;;
             1) manage_agh_storage ;;
             2) manage_agh_direct_access ;;
             3) manage_agh_ui_updates ;;
@@ -2003,23 +2542,45 @@ sub_setup_config() {
     done
 }
 
+show_agh_backup_help() {
+    clear
+    print_centered_header "AdGuardHome Backup & Recovery - Help"
+
+    cat << 'HELPEOF'
+What is this?
+─────────────
+Create, restore and manage backups of your AdGuardHome configuration, binary
+and startup script. Backups are timestamped, so you can keep several and roll
+back to any of them if a change goes wrong.
+
+Getting around:
+• Type the number shown beside an item and press Enter to open it.
+• [0] returns to the previous menu.
+• [?] shows this help.
+HELPEOF
+
+    press_any_key
+}
+
 sub_backup_recovery() {
     while true; do
         get_agh_stats 
         clear
         print_centered_header "AdGuardHome Backup & Recovery Suite"
         printf " ${CYAN}OVERVIEW${RESET}\n"
-        printf "   Latest: %s  ⌯  Total Files: %s\n\n" "${bk_date:-None}" "${bk_file_count:-0}"
+        printf "   Latest: %s  ·  Total Files: %s\n\n" "${bk_date:-None}" "${bk_file_count:-0}"
         printf " ${CYAN}STORAGE STATUS${RESET}\n"
-        printf "   Used: %s  ⌯  Free: %s\n" "${bk_total_u:-0B}" "${qlog_f:-N/A}"
+        printf "   Used: %s  ·  Free: %s\n" "${bk_total_u:-0B}" "${qlog_f:-N/A}"
         printf " ────────────────────────────────────────────────\n\n"
-        printf "1️⃣  Save a New Backup\n"
-        printf "2️⃣  Restore from Backup\n"
-        printf "3️⃣  Manage/Delete Backups\n"
-        printf "0️⃣  Back to Control Center\n"
-        printf "\nChoose [1-3/0]: "
+        printf "%s  Save a New Backup\n" "$N1"
+        printf "%s  Restore from Backup\n" "$N2"
+        printf "%s  Manage/Delete Backups\n" "$N3"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-3/0/?]: "
         read -r b_opt
         case "$b_opt" in
+            \?|h|H|❓) show_agh_backup_help ;;
             1) create_agh_backup ;;
             2) manage_agh_backups ;;
             3) delete_agh_backups ;;
@@ -2029,39 +2590,39 @@ sub_backup_recovery() {
     done
 }
 
+show_agh_service_help() {
+    clear
+    print_centered_header "AdGuardHome Logs & Maintenance - Help"
+
+    cat << 'HELPEOF'
+What is this?
+─────────────
+Watch AdGuardHome's live logs and clear its cached filter files. Use this
+screen for diagnostics or after changing filter lists. Starting, stopping and
+restarting the service is the first item on the Control Center.
+
+Getting around:
+• Type the number shown beside an item and press Enter to open it.
+• [0] returns to the previous menu.
+• [?] shows this help.
+HELPEOF
+
+    press_any_key
+}
+
 sub_service_health() {
     while true; do
         clear
-        print_centered_header "AdGuardHome Service, Logs & Cache Purge"
-        printf "1️⃣  Enable / Disable / Restart\n"
-        printf "2️⃣  Watch Live Logs\n"
-        printf "3️⃣  Clear Filter Cache\n"
-        printf "0️⃣  Back to Control Center\n"
-        printf "\nChoose [1-3/0]: "
+        print_centered_header "AdGuardHome Logs & Maintenance"
+        printf "%s  Watch Live Logs\n" "$N1"
+        printf "%s  Clear Filter Cache\n" "$N2"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-2/0/?]: "
         read -r h_opt
         case "$h_opt" in
-            1) 
-               if is_agh_running; then
-                   printf "\n"
-                   print_warning "Service is RUNNING. Do you want to [D]isable, [R]estart, or [0] Cancel?"
-                   printf "Choose [D/R/0]: "; read -r confirm
-                   if [ "$confirm" = "d" ] || [ "$confirm" = "D" ]; then
-                       uci set adguardhome.config.enabled='0' && uci set adguardhome.config.dns_enabled='0' && uci commit adguardhome
-                       $AGH_INIT stop >/dev/null 2>&1; sleep 1; printf "\n"; print_success "Service Disabled"
-                   elif [ "$confirm" = "r" ] || [ "$confirm" = "R" ]; then
-                       $AGH_INIT restart >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Restarted"
-                   fi
-               else
-                   printf "\n"
-                   print_warning "Service is STOPPED. Enable now?"
-                   printf "Confirm [y/N]: "; read -r confirm
-                   if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                       uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
-                       $AGH_INIT enable >/dev/null 2>&1; sleep 1; $AGH_INIT start >/dev/null 2>&1; sleep 2; printf "\n"; print_success "Service Enabled"
-                   fi
-               fi
-               press_any_key ;;
-            2) 
+            \?|h|H|❓) show_agh_service_help ;;
+            1)
                clear
                print_centered_header "AdGuardHome System Logs (Ctrl+C to exit)"
                sleep 1
@@ -2071,15 +2632,16 @@ sub_service_health() {
                trap - INT
                press_any_key
                ;;
-            3) 
+            2)
                printf "\n"
-               print_warning "Clear all cached filter files?"
-               printf "Confirm [y/N]: "; read -r confirm
+               print_warning "This clears all cached filter files; AdGuardHome re-downloads them on next start."
+               printf "Clear filter cache? [y/N]: "; read -r confirm
                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                    local wd=$(get_agh_workdir)
+                   agh_was_running=0; is_agh_running && agh_was_running=1
                    rm -rf "${wd:-/etc/AdGuardHome}/data/filters/"* 2>/dev/null
-                   $AGH_INIT restart >/dev/null 2>&1; printf "\n"; print_success "Filters Purged"
-                   cached_rules="" 
+                   agh_apply_and_restart "$agh_was_running" "" "" "Filters purged." "-"
+                   cached_rules=""
                fi
                press_any_key ;;
             0) break ;;
@@ -2098,7 +2660,7 @@ sub_confirm_factory_reset() {
 
     printf "\n"
     print_warning "WARNING: This will restore factory system files and defaults from /rom"
-    printf "Confirm restore? [y/N]: "; read -r confirm
+    printf "Restore factory defaults? [y/N]: "; read -r confirm
     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && { printf "\n"; print_info "Operation cancelled."; press_any_key; return; }
 
     # --- 1. Pre-Check State & Stop Phase ---
@@ -2141,13 +2703,14 @@ sub_confirm_factory_reset() {
             print_success "Full recovery successful! AdGuardHome auto-start re-enabled."
             printf "\n"
         else
-            printf "\n"
-            print_warning "AdGuardHome was disabled in UCI. Enable it now?"
-            printf "Confirm [y/N]: "; read -r confirm
+            print_warning "AdGuardHome was disabled in UCI."
+            printf "Enable AdGuardHome? [y/N]: "; read -r confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
                 $L_INIT enable >/dev/null 2>&1; sleep 1
-                print_success "AdGuardHome enabled in GL Web UI and UCI.\n"
+                printf "\n"
+                print_success "AdGuardHome enabled in GL Web UI and UCI."
+                printf "\n"
                 was_uci_enabled=1
             fi
         fi
@@ -2157,11 +2720,12 @@ sub_confirm_factory_reset() {
             print_info "Automatically restarting service..."
             $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service restored to running state."
         elif [ "$was_uci_enabled" -eq 1 ]; then
-            print_warning "AdGuardHome is enabled but not running. Start it now?"
-            printf "Confirm [y/N]: "; read -r confirm
+            print_warning "AdGuardHome is enabled but not running."
+            printf "Start the service? [y/N]: "; read -r confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 printf "\n"
-                print_info "Starting AdGuardHome...\n"
+                print_info "Starting AdGuardHome..."
+                printf "\n"
                 $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service started successfully."
             fi
         fi
@@ -2175,9 +2739,9 @@ sub_confirm_factory_reset() {
 
 get_agh_stats() {
     # 1. Basic Status Icons
-    run_icon="❌"; is_agh_running && run_icon="✅"
+    run_icon="$_S_OFF"; is_agh_running && run_icon="$_S_ON"
     local web_enabled=$(uci -q get adguardhome.config.enabled)
-    web_icon="❌"; [ "$web_enabled" = "1" ] && web_icon="✅"
+    web_icon="$_S_OFF"; [ "$web_enabled" = "1" ] && web_icon="$_S_ON"
     
     # 2. Setup Paths
     local AGH_CONFIG=$(get_agh_config)
@@ -2234,26 +2798,30 @@ agh_control_center() {
         get_agh_stats
         clear
         print_centered_header "AdGuardHome Control Center"
-        printf " ${CYAN}STATUS${RESET}\n   Run: %s  ⌯  GL WebUI: %s  ⌯  Version: v%s\n\n" "${run_icon:-❌}" "${web_icon:-❌}" "${v_num:-N/A}"
-        printf " ${CYAN}FILTERS${RESET}\n   Lists: %s  ⌯  Rules: %s\n\n" "${list_count:-0}" "${cached_rules:-0}"
-        printf " ${CYAN}STORAGE${RESET}\n   Filters: %s/%s  ⌯  Logs: %s/%s\n\n" "${filt_u:-0B}" "${filt_f:-N/A}" "${qlog_u:-0B}" "${qlog_f:-N/A}"
-        printf " ${CYAN}BACKUP${RESET}\n   Date: %s  ⌯  Size: %s  ⌯  Files: %s\n\n" "${bk_date:-None}" "${bk_total_u:-0B}" "${bk_file_count:-0}"
+        printf " ${CYAN}STATUS${RESET}\n   Run: %b  ·  GL WebUI: %b  ·  Version: v%s\n\n" "${run_icon:-$_S_OFF}" "${web_icon:-$_S_OFF}" "${v_num:-N/A}"
+        printf " ${CYAN}FILTERS${RESET}\n   Lists: %s  ·  Rules: %s\n\n" "${list_count:-0}" "${cached_rules:-0}"
+        printf " ${CYAN}STORAGE${RESET}\n   Filters: %s/%s  ·  Logs: %s/%s\n\n" "${filt_u:-0B}" "${filt_f:-N/A}" "${qlog_u:-0B}" "${qlog_f:-N/A}"
+        printf " ${CYAN}BACKUP${RESET}\n   Date: %s  ·  Size: %s  ·  Files: %s\n\n" "${bk_date:-None}" "${bk_total_u:-0B}" "${bk_file_count:-0}"
         printf " ────────────────────────────────────────────────\n\n"
-        printf "1️⃣  Manage Allow/Blocklists\n"
-        printf "2️⃣  Setup, Access & UI Updates\n"
-        printf "3️⃣  Backup & Recovery Suite\n"
-        printf "4️⃣  Service, Logs & Cache Purge\n"
-        printf "🆑 Reset to Factory Settings (Start Over)\n"
-        printf "0️⃣  Back to Main Menu\n"
-        printf "❓ Help\n"
-        printf "\nChoose [1-4/CL/0/?]: "
+        local svc_label="Start AdGuardHome"
+        is_agh_running && svc_label="Restart / Stop AdGuardHome"
+        printf "%s  %s\n" "$N1" "$svc_label"
+        printf "%s  Manage Allow/Blocklists\n" "$N2"
+        printf "%s  Setup, Access & UI Updates\n" "$N3"
+        printf "%s  Backup & Recovery Suite\n" "$N4"
+        printf "%s  Logs & Maintenance\n" "$N5"
+        printf "%s Reset to Factory Settings (Start Over)\n" "$NCL"
+        printf "%s  Main menu\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-5/CL/0/?]: "
         read -r choice
 
         case "$choice" in
-            1) manage_agh_lists ;;
-            2) sub_setup_config ;;
-            3) sub_backup_recovery ;;
-            4) sub_service_health ;;
+            1) agh_service_control ;;
+            2) manage_agh_lists ;;
+            3) sub_setup_config ;;
+            4) sub_backup_recovery ;;
+            5) sub_service_health ;;
             [cC][lL]) sub_confirm_factory_reset ;;
             0) break ;;
             \?|h|H|❓) show_agh_help ;;
@@ -2303,7 +2871,7 @@ Important notes:
 In this menu you can:
 1. Install & enable zram swap
 2. Disable it (stops and disables on boot)
-3. Toggle Persistence - survives firmware updates
+3. Enable/Disable Persistence - survives firmware updates
 4. Completely uninstall the package
 HELPEOF
     
@@ -2352,12 +2920,14 @@ manage_zram() {
                 printf "   Persistence: %bDISABLED%b\n\n" "${YELLOW}" "${RESET}"
         fi
         
-        printf "1️⃣  Install and Enable\n"
-        printf "2️⃣  Disable\n"
-        printf "3️⃣  Toggle Persistence\n"
-        printf "4️⃣  Uninstall Package\n"
-        printf "0️⃣  Return to previous menu\n"
-        printf "❓ Help\n"
+        local zram_persist_label="Enable Persistence"
+        [ "$zram_persisting" -eq 1 ] && zram_persist_label="Disable Persistence"
+        printf "%s  Install and Enable\n" "$N1"
+        printf "%s  Disable\n" "$N2"
+        printf "%s  %s\n" "$N3" "$zram_persist_label"
+        printf "%s  Uninstall Package\n" "$N4"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
         printf "\nChoose [1-4/0/?]: "
         read -r zram_choice
         printf "\n"
@@ -2365,24 +2935,15 @@ manage_zram() {
         case $zram_choice in
             1)
                 if ! opkg list-installed | grep -q "^zram-swap"; then
-                    print_warning "zram-swap not installed, installing...\n"
-                    check_opkg_updated
-                    opkg install zram-swap >/dev/null 2>&1
-                    if opkg list-installed | grep -q "^zram-swap"; then
-                        print_success "zram-swap package installed\n"
-                    else
-                        print_error "Failed to install zram-swap\n"
-                        press_any_key
-                        continue
-                    fi
+                    install_package zram-swap || { press_any_key; continue; }
                 fi
                 
                 if [ -f /etc/init.d/zram ]; then
-                    print_info "Enabling and starting zram swap\n"
+                    print_info "Enabling and starting zram swap"
                     /etc/init.d/zram enable >/dev/null 2>&1; sleep 1
                     /etc/init.d/zram start >/dev/null 2>&1; sleep 2
-                    print_success "Zram swap enabled and started\n"
-                    
+                    print_success "Zram swap enabled and started"
+
                     if swapon -s 2>/dev/null | grep -q zram; then
                         print_success "Zram swap is working correctly"
                     else
@@ -2434,7 +2995,6 @@ manage_zram() {
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
                         opkg remove --autoremove zram-swap >/dev/null 2>&1
-                        # Added cleanup to match Package Manager behavior
                         for p in /etc/init.d/zram /etc/config/system; do
                             sed -i "\|$p|d" "$up_conf" 2>/dev/null
                         done
@@ -2481,14 +3041,14 @@ The Setpoints Explained:
   toward 100% speed as it approaches and exceeds this value.
 • Warning: Primarily used for system logs and UI alerts. Usually set 
   equal to or slightly higher than the Fan-On setpoint.
-• UI Max: This script's custom "Unlock." It extends the slider range 
+• Max: This script's custom "Unlock." It extends the slider range
   in the web interface, allowing you to set thresholds up to 120°C.
 
 Thermal Hierarchy (Safety Rules):
 ─────────────────────────────────
 To prevent logic loops, the following rules are enforced:
-  Minimum ≤ Fan-On ≤ UI Max
-  Warning must be between Minimum and UI Max.
+  Minimum ≤ Fan-On ≤ Max
+  Warning must be between Minimum and Max.
 
 Dynamic vs. Manual Mode:
 • Dynamic: The system automatically adjusts RPM based on heat.
@@ -2701,26 +3261,26 @@ manage_fan_settings() {
         fi
         printf "   Temperature:       %b%s°C%b\033[K\n\n" "${WHITE}" "$c_temp_fmt" "${RESET}"
 
-        printf " %b\n" "${CYAN}DYNAMIC SETTINGS${RESET}"
+        printf " %b\n" "${CYAN}SYSTEM & WEB UI SETTINGS${RESET}"
         printf "   Minimum Setpoint:  %s°C\033[K\n" "${u_min:-UNKNOWN}"
         printf "   Fan-On Setpoint:   %s°C\033[K\n" "${u_cur:-UNKNOWN}"
         printf "   Warning Setpoint:  %s°C\033[K\n" "${u_wrn:-UNKNOWN}"
-        printf "   Max Setpoint (UI): %b%s°C%b\033[K\n\n" "${YELLOW}" "$ui_max" "${RESET}"
+        printf "   Max Setpoint:      %b%s°C%b\033[K\n\n" "${YELLOW}" "$ui_max" "${RESET}"
 
         if [ "$has_fan" = "false" ]; then
             print_warning "Fan settings are disabled on fanless hardware.\033[K"
-            printf "0️⃣  Return to previous menu\033[K\n"
+            printf "%s  Back\033[K\n" "$N0"
             printf "\nChoose [0/?]: \033[K"
         else
-            printf "1️⃣  Set Static Fan Speed (0-100%%)\033[K\n"
-            printf "2️⃣  Enable Dynamic Fan Control\033[K\n"
-            printf "3️⃣  Set Minimum Setpoint\033[K\n"
-            printf "4️⃣  Set Fan-On Setpoint\033[K\n"
-            printf "5️⃣  Set Warning Setpoint\033[K\n"
-            printf "6️⃣  Set UI Maximum Setpoint\033[K\n"
-            printf "7️⃣  Reset to Factory Defaults\033[K\n"
-            printf "0️⃣  Return to previous menu\033[K\n"
-            printf "❓ Help\033[K\n"
+            printf "%s  Set Static Fan Speed (0-100%%)\033[K\n" "$N1"
+            printf "%s  Enable Dynamic Fan Control\033[K\n" "$N2"
+            printf "%s  Set Minimum Setpoint\033[K\n" "$N3"
+            printf "%s  Set Fan-On Setpoint\033[K\n" "$N4"
+            printf "%s  Set Warning Setpoint\033[K\n" "$N5"
+            printf "%s  Set Maximum Setpoint\033[K\n" "$N6"
+            printf "%s  Reset to Factory Defaults\033[K\n" "$N7"
+            printf "%s  Back\033[K\n" "$N0"
+            printf "%s Help\033[K\n" "$NQ"
             printf "\nChoose [1-7/0/?]: \033[K"
         fi
                
@@ -2784,7 +3344,7 @@ manage_fan_settings() {
                         print_success "Fan-On setpoint updated"
                     else
                         printf "\n"
-                        print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
+                        print_error "Must be between Min ($u_min°C) and Max ($ui_max°C)"
                     fi
                     press_any_key; clear ;;
                 5)
@@ -2798,23 +3358,24 @@ manage_fan_settings() {
                         print_success "Warning setpoint updated"
                     else
                         printf "\n"
-                        print_error "Must be between Min ($u_min°C) and UI Max ($ui_max°C)"
+                        print_error "Must be between Min ($u_min°C) and Max ($ui_max°C)"
                     fi
                     press_any_key; clear ;;
                 6)
                     print_warning "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO YOUR DEVICE!"
-                    printf "Set new UI Maximum Setpoint (%s°C - 120°C): " "$u_cur"
+                    printf "Set new Maximum Setpoint (%s°C - 120°C): " "$u_cur"
                     read -r val
                     val=$(echo "$val" | tr -dc '0-9')
                     if [ -n "$val" ] && [ "$val" -ge "$u_cur" ] && [ "$val" -le 120 ]; then
                         if [ "$val" -lt $u_wrn ]; then
                             printf "\n"
-                            print_warning "New UI Max is below current Warning setpoint. Adjusting Warning to match new UI Max.\n"
+                            print_warning "New Max is below current Warning setpoint. Adjusting Warning to match new Max."
+                            printf "\n"
                             u_wrn="$val"
                         fi
                         sync_system_and_ui "$u_min" "$u_cur" "$u_wrn" "$val"
                         printf "\n"
-                        print_success "Max UI setpoint updated to ${val}°C."
+                        print_success "Max setpoint updated to ${val}°C."
                     else
                         printf "\n"
                         print_error "Must be between Fan-On ($u_cur°C) and 120°C"
@@ -2869,7 +3430,7 @@ Usage in this Menu:
 ───────────────────
 1. Set Download/Upload: Enter the max speed in Mbps (Megabits). 
    Entering '0' removes the limit for that direction.
-2. Toggle Persistence: Ensures your limits are reapplied automatically 
+2. Persistence: Ensures your limits are reapplied automatically
    after a reboot or a firmware sysupgrade.
 3. Reset to Defaults: Cleans all kernel tables, stops the background 
    service, and offers to uninstall the 'tc' power tools.
@@ -2894,9 +3455,7 @@ manage_guest_limiter() {
     mgl_dependency_check() {
         hash -r
         if ! command -v tc >/dev/null 2>&1; then
-            print_info "Required package 'tc-full' missing. Installing..."
-            check_opkg_updated 
-            opkg install tc-full >/dev/null 2>&1
+            install_package tc-full
             hash -r
         fi
     }
@@ -3063,16 +3622,22 @@ manage_guest_limiter() {
         printf "   HW Acceleration:    %b %b\n" "$hw_status" "$hw_message"
         printf "   Persistence:        %b\n" "$persist_status"
         printf "\n"
-        printf " 1️⃣  Set Download Limit (Mbps) - 0 to disable\n"
-        printf " 2️⃣  Set Upload Limit   (Mbps) - 0 to disable\n"
-        printf " 3️⃣  Toggle Guest Network to Web UI access\n"
-        printf " 4️⃣  Toggle HW Acceleration\n"
-        printf " 5️⃣  Toggle Persistence\n"
-        printf " 6️⃣  Reset to Defaults (Clean Uninstall)\n"
-        printf " 0️⃣  Main menu\n"
-        printf " ❓ Help\n\n"
-        
-        read -p " Choose [1-6/0/?]: " choice
+        local g_persist_label="Enable Persistence"
+        [ "$persist_status" = "${GREEN}ENABLED${RESET}" ] && g_persist_label="Disable Persistence"
+        local g_admin_label="Enable Guest Network to Web UI access"
+        [ "$admin_access" = "${GREEN}ENABLED${RESET}" ] && g_admin_label="Disable Guest Network to Web UI access"
+        local g_hw_label="Enable HW Acceleration"
+        case "$hw_status" in *ENABLED*) g_hw_label="Disable HW Acceleration" ;; esac
+        printf " %s  Set Download Limit (Mbps) - 0 to disable\n" "$N1"
+        printf " %s  Set Upload Limit   (Mbps) - 0 to disable\n" "$N2"
+        printf " %s  %s\n" "$N3" "$g_admin_label"
+        printf " %s  %s\n" "$N4" "$g_hw_label"
+        printf " %s  %s\n" "$N5" "$g_persist_label"
+        printf " %s  Reset to Defaults (Clean Uninstall)\n" "$N6"
+        printf " %s  Back\n" "$N0"
+        printf " %s Help\n" "$NQ"
+
+        printf "\n Choose [1-6/0/?]: "; read -r choice
 
         case "$choice" in
             1) 
@@ -3187,7 +3752,8 @@ manage_guest_limiter() {
                     continue
                 fi
                 printf "\n"
-                print_info "Restoring to factory settings...\n"
+                print_info "Restoring to factory settings..."
+                printf "\n"
                 
                 # 1. Stop the service 
                 if [ -f "/etc/init.d/guest_limiter" ]; then
@@ -3513,11 +4079,11 @@ manage_web_terminal() {
         printf "   ttyd Service:   %b\n" "$svc_status"
         printf "   Web UI Button:  %b\n\n" "$inj_status"
         
-        printf "1️⃣  Enable Web-UI Terminal\n"
-        printf "2️⃣  Disable Web-UI Terminal\n"
-        printf "3️⃣  Completely Uninstall\n"
-        printf "0️⃣  Return to previous menu\n"
-        printf "❓ Help\n"
+        printf "%s  Enable Web-UI Terminal\n" "$N1"
+        printf "%s  Disable Web-UI Terminal\n" "$N2"
+        printf "%s  Completely Uninstall\n" "$N3"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
         printf "\nChoose [1-3/0/?]: "
         read -r term_choice
         printf "\n"
@@ -3537,12 +4103,11 @@ manage_web_terminal() {
                     fi
                 else
                     if ! command -v ttyd >/dev/null 2>&1; then
-                        check_opkg_updated
-                        print_info "Installing ttyd...\n"
-                        opkg install ttyd >/dev/null 2>&1
+                        install_package ttyd
                     fi
 
-                    print_info "Configuring ttyd service...\n"
+                    print_info "Configuring ttyd service..."
+                    printf "\n"
 
                     # Detect HTTPS mode and prompt for connection mode
                     redirect_https=$(uci -q get uhttpd.main.redirect_https 2>/dev/null)
@@ -3560,16 +4125,20 @@ manage_web_terminal() {
                     # Generate cert if HTTPS chosen
                     if [ "$ttyd_proto" = "https" ]; then
                         if [ ! -f /etc/ttyd.crt ] || [ ! -f /etc/ttyd.key ]; then
-                            print_info "Generating self-signed certificate for ttyd...\n"
+                            print_info "Generating self-signed certificate for ttyd..."
+                            printf "\n"
                             openssl req -x509 -nodes -newkey rsa:2048 \
                                 -keyout /etc/ttyd.key \
                                 -out /etc/ttyd.crt \
                                 -days 3650 \
                                 -subj "/CN=gl-router" >/dev/null 2>&1
-                            print_success "Generated /etc/ttyd.crt\n"
-                            print_success "Generated /etc/ttyd.key\n"
+                            print_success "Generated /etc/ttyd.crt"
+                            printf "\n"
+                            print_success "Generated /etc/ttyd.key"
+                            printf "\n"
                         else
-                            print_info "SSL certificates already exist, reusing.\n"
+                            print_info "SSL certificates already exist, reusing."
+                            printf "\n"
                         fi
                     fi
 
@@ -3591,7 +4160,8 @@ UCIEOF
                         lan_ip=$(get_lan_ip)
                         print_warning "Before using the terminal, open a new tab and visit: ${CYAN}https://${lan_ip}:7681${RESET}"
                         print_warning "You must accept the certificate warning, then return to the Admin Panel."
-                        print_warning "The terminal will not load until this is done!\n"
+                        print_warning "The terminal will not load until this is done!"
+                        printf "\n"
                     else
                         cat << 'UCIEOF' > /etc/config/ttyd
 config ttyd
@@ -3611,7 +4181,8 @@ UCIEOF
                 fi
                
                 # UI Injection 
-                print_info "Patching Web-UI...\n"
+                print_info "Patching Web-UI..."
+                printf "\n"
                 TARGET_JS="${TARGET_GZ%.gz}"
                 cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
                 zcat "$TARGET_GZ" > "$TARGET_JS"
@@ -3735,29 +4306,35 @@ EOF
                 ;;
 
             2)
-                print_info "Disabling Web Terminal...\n"
+                print_info "Disabling Web Terminal..."
+                printf "\n"
                 
                 # Only attempt to stop/disable if the service script exists
                 
                 if [ -f "/etc/init.d/ttyd" ]; then
                     if pgrep ttyd >/dev/null; then
-                        print_info "Stopping ttyd service...\n"
+                        print_info "Stopping ttyd service..."
+                        printf "\n"
                         /etc/init.d/ttyd stop 2>/dev/null
                         /etc/init.d/ttyd disable 2>/dev/null
                         killall ttyd >/dev/null 2>&1
-                        print_success "Service stopped.\n"
+                        print_success "Service stopped."
+                        printf "\n"
                     else
-                        print_warning "ttyd service is not running.\n"
+                        print_warning "ttyd service is not running."
+                        printf "\n"
                     fi
                 else
-                    print_warning "ttyd service not found; skipping service stop.\n"
+                    print_warning "ttyd service not found; skipping service stop."
+                    printf "\n"
                 fi
 
                 # Restore UI to stock regardless of service status
                 if [ -f "/rom$TARGET_GZ" ]; then
                     cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
                     rm -rf /var/lib/nginx/*
-                    print_success "Web UI button removed and cache cleared.\n"
+                    print_success "Web UI button removed and cache cleared."
+                    printf "\n"
                     print_info "Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser."
                 else
                     print_error "ROM backup not found. Manual UI restoration required."
@@ -3766,26 +4343,33 @@ EOF
                 ;;
 
             3)
-                print_warning "Completely Uninstalling ttyd...\n"
+                print_warning "Completely Uninstalling ttyd..."
+                printf "\n"
                 
                 # Stop service before removal if it exists
                 if command -v ttyd >/dev/null 2>&1 || [ -f "/etc/init.d/ttyd" ]; then
                     if pgrep ttyd >/dev/null; then
-                        print_info "Stopping ttyd service...\n"
+                        print_info "Stopping ttyd service..."
+                        printf "\n"
                         /etc/init.d/ttyd stop 2>/dev/null
                         killall ttyd >/dev/null 2>&1
-                        print_success "Service stopped.\n"
+                        print_success "Service stopped."
+                        printf "\n"
                     else
-                        print_warning "ttyd service is not running.\n"
+                        print_warning "ttyd service is not running."
+                        printf "\n"
                     fi
                     opkg remove --autoremove ttyd >/dev/null 2>&1
                     rm -f /etc/config/ttyd
                     if [ -f /etc/ttyd.crt ] || [ -f /etc/ttyd.key ]; then
-                        print_info "Removing ttyd SSL certificates...\n"
+                        print_info "Removing ttyd SSL certificates..."
+                        printf "\n"
                         rm -f /etc/ttyd.crt /etc/ttyd.key
-                        print_success "SSL certificates removed.\n"
+                        print_success "SSL certificates removed."
+                        printf "\n"
                     fi
-                    print_success "ttyd package uninstalled.\n"
+                    print_success "ttyd package uninstalled."
+                    printf "\n"
                 fi
 
                 # Always ensure the UI is restored
@@ -3879,20 +4463,22 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
     while true; do
         clear
         print_centered_header "Package & Persistence Manager"
-        printf "      Install Persist  Package Name        Planned Action\n"
-        printf " ──────────────────────────────────────────────────────────────\n"
+        printf "       %-7s %-7s %-19s %s\n" "Install" "Persist" "Package Name" "Planned Action"
+        printf " ───────────────────────────────────────────────────────────\n"
 
         while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
-            local i_box=" [ ] "; [ "$i_t" -eq 1 ] && i_box=" [✓] "
-            local p_box=" [ ] "; [ "$p_t" -eq 1 ] && p_box=" [✓] "
+            local i_box="  [ ]  "; [ "$i_t" -eq 1 ] && i_box="  [✓]  "
+            local p_box="  [ ]  "; [ "$p_t" -eq 1 ] && p_box="  [✓]  "
 
-            printf " %-5s %s   %s %-1s %-19s %b%s%b\n" "$idx." "$i_box" "$p_box" "" "$name" "${CYAN}" "$action" "${RESET}"
+            printf " %-5s %s %s %-19s %b%s%b\n" "$idx." "$i_box" "$p_box" "$name" "${CYAN}" "$action" "${RESET}"
         done < "$map_file"
 
-        printf " ──────────────────────────────────────────────────────────────\n"
-        printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Back   [?] Help\n"
-        printf "\n Command: "
-        local cmd=$(read_single_char | tr '[:upper:]' '[:lower:]')
+        printf " ───────────────────────────────────────────────────────────\n"
+        printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel   [?] Help\n"
+        pkg_count=$(wc -l < "$map_file" 2>/dev/null | tr -dc '0-9')
+        printf "\n Choose [%s/A/N/C/0/?]: " "$(picker_range "$pkg_count")"
+        read -r cmd
+        cmd=$(echo "$cmd" | tr 'A-Z' 'a-z')
 
         case "$cmd" in
             a|A) 
@@ -3983,7 +4569,7 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                 done < "$map_file"
 
                 if [ -z "$to_add" ] && [ -z "$to_rem" ]; then
-                    print_error "No changes planned."; sleep 1; continue
+                    print_error "No changes planned."; sleep 2; continue
                 fi
 
                 clear
@@ -3993,7 +4579,8 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                 
                 printf "Proceed with changes? [y/N]: "; read -r confirm; printf "\n"
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    # CRITICAL FIX: Read all 9 columns here!
+                    install_fail=0
+                    # map_file columns: idx|name|i_t|p_t|action|type|paths|o_i|o_p
                     while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
                         [ "$action" == "No Change" ] && continue
                         
@@ -4018,9 +4605,7 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                                 if [ "$name" == "speedtest" ]; then
                                     install_ookla_speedtest
                                 else
-                                    [ "$opkg_updated" -eq 0 ] && check_opkg_updated
-                                    print_info "Installing $name...\n"
-                                    opkg install "$name" >/dev/null 2>&1
+                                    install_package "$name" || install_fail=$((install_fail + 1))
                                 fi
                             fi
 
@@ -4033,7 +4618,11 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                             fi
                         fi
                     done < "$map_file"
-                    print_success "System changes applied."
+                    if [ "$install_fail" -gt 0 ]; then
+                        print_warning "$install_fail package(s) failed to install; other changes applied."
+                    else
+                        print_success "System changes applied."
+                    fi
                     press_any_key
                     init_system_state
                     continue
@@ -4093,7 +4682,7 @@ Usage in this Menu:
 ───────────────────
 1. Add Key: Paste the entire line (starts with ssh-rsa, ssh-ed25519, etc.).
 2. Manage: View existing keys. Use [✓] to mark keys for deletion.
-3. Toggle Persistence: Adds /etc/dropbear/authorized_keys to the 
+3. Persistence: Adds /etc/dropbear/authorized_keys to the
    sysupgrade list so you don't lose access after a firmware update.
 
 Security Warning:
@@ -4125,11 +4714,13 @@ manage_ssh_keys() {
         printf "   Authorized Keys:  %d\n" "$key_count"
         printf "   Persistence:      %b\n\n" "$persistence"
 
-        printf "1️⃣  Add a New SSH Key\n"
-        printf "2️⃣  Manage / Delete Keys\n"
-        printf "3️⃣  Toggle Persistence\n"
-        printf "0️⃣  Return to previous menu\n"
-        printf "❓ Show Help\n"
+        local ssh_persist_label="Enable Persistence"
+        [ "$persistence" = "${GREEN}ENABLED${RESET}" ] && ssh_persist_label="Disable Persistence"
+        printf "%s  Add a New SSH Key\n" "$N1"
+        printf "%s  Manage / Delete Keys\n" "$N2"
+        printf "%s  %s\n" "$N3" "$ssh_persist_label"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
         
         printf "\nChoose [1-3/0/?]: "
         read -r ssh_choice
@@ -4138,6 +4729,7 @@ manage_ssh_keys() {
             1) # ADD KEY
                 printf "\n${CYAN}Paste your public key (starts with ssh-rsa, etc.):${RESET}\n"
                 read -r new_key
+                printf "\n"
                 if echo "$new_key" | grep -qE "^ssh-(rsa|ed25519|dss|ecdsa) "; then
                     # Extract base64 part for duplicate check
                     local key_base64=$(echo "$new_key" | awk '{print $2}')
@@ -4178,15 +4770,16 @@ manage_ssh_keys() {
                         clear
                         print_centered_header "SSH Authorized Keys Manager"
                         printf "\n"
-                        printf " %-5s %-4s %-12s %-30s\n" "Sel" "Idx" "Key Type" "Identity / Comment"
-                        printf " ──────────────────────────────────────────────────────────────\n"
+                        printf " %-5s %-4s %-12s %-40s\n" "Sel" "Idx" "Key Type" "Identity / Comment"
+                        printf " ────────────────────────────────────────────────────────────────\n"
                         while IFS='|' read -r idx type id sel; do
-                            s_box="[ ]"; [ "$sel" -eq 1 ] && s_box="[✓]"
-                            printf " %s %-1s %-4s %-12s %-40s\n" "$s_box" "" "$idx." "$type" "$id"
+                            s_box=" [ ] "; [ "$sel" -eq 1 ] && s_box=" [✓] "
+                            printf " %s %-4s %-12s %-40s\n" "$s_box" "$idx." "$type" "$id"
                         done < "$ssh_data"
-                        printf " ──────────────────────────────────────────────────────────────\n"
-                        printf " [A] All   [N] None   [#] Toggle   [D] Delete   [0] Back\n"
-                        printf " Command: "
+                        printf " ────────────────────────────────────────────────────────────────\n"
+                        printf " [A] All   [N] None   [#] Toggle   [D] Delete   [0] Cancel\n"
+                        key_count=$(wc -l < "$ssh_data" 2>/dev/null | tr -dc '0-9')
+                        printf "\n Choose [%s/A/N/D/0]: " "$(picker_range "$key_count")"
                         read -r cmd
 
                         case "$cmd" in
@@ -4198,7 +4791,7 @@ manage_ssh_keys() {
                             d|D)
                                 local to_del=$(awk -F'|' '$4==1' "$ssh_data")
                                 if [ -z "$to_del" ]; then
-                                    print_warning "No keys selected."; sleep 1; continue
+                                    print_warning "No keys selected."; sleep 2; continue
                                 fi
                                 
                                 clear
@@ -4246,19 +4839,427 @@ manage_ssh_keys() {
     done
 }
 
+show_system_tweaks_help() {
+    clear
+    print_centered_header "System Tweaks - Help"
+    cat << 'HELPEOF'
+System Tweaks – Quick Help
+
+Overview
+────────
+This menu groups configuration and management tools for common GL.iNet
+router customizations. Each option targets a specific subsystem.
+
+Options
+───────
+1. Device Fan Settings
+   Adjust fan speed thresholds, min/max RPM, and thermal warning temps.
+   Only available on hardware with controllable fans (e.g. Flint 3).
+
+2. Manage Zram Swap
+   Install and configure compressed RAM swap. Essential on low-RAM
+   devices running AdGuardHome + VPN simultaneously.
+
+3. Guest Network Bandwidth Limiter
+   Set global speed limits for the guest subnet and control whether
+   guest clients can reach the router's LAN IP.
+
+4. Web-UI Terminal Interface
+   Embed a draggable terminal (powered by ttyd) into the GL.iNet
+   Admin Panel as a ">_" icon in the navigation bar.
+
+5. Package and Persistence Manager
+   Install useful CLI tools (htop, tcpdump, etc.) and configure them
+   to survive firmware upgrades via the sysupgrade keep-list.
+
+6. SSH Key Management
+   Add, view, and delete authorized SSH keys. Enable or disable persistence so
+   your keys survive firmware upgrades.
+
+7. Toolkit Management
+   Install this script to /usr/sbin/glinet_utils so it can be run
+   from anywhere. Manage sysupgrade persistence and updates.
+HELPEOF
+    press_any_key
+}
+
+# -----------------------------
+# Toolkit Management
+# -----------------------------
+
+toolkit_is_installed() {
+    [ -f "$INSTALL_PATH" ]
+}
+
+toolkit_persistence_enabled() {
+    grep -qFx "$INSTALL_PATH" /etc/sysupgrade.conf 2>/dev/null
+}
+
+set_toolkit_persistence() {
+    local enable="$1"
+    local keep_conf="/etc/sysupgrade.conf"
+    if [ "$enable" -eq 1 ]; then
+        if ! grep -qFx "$INSTALL_PATH" "$keep_conf" 2>/dev/null; then
+            printf "%s\n" "$INSTALL_PATH" >> "$keep_conf"
+            print_success "Added to $keep_conf — will survive firmware upgrades."
+        else
+            print_info "Already persisted in $keep_conf — no change."
+        fi
+    else
+        if grep -qFx "$INSTALL_PATH" "$keep_conf" 2>/dev/null; then
+            sed -i "\|^${INSTALL_PATH}$|d" "$keep_conf" 2>/dev/null
+            print_success "Removed from $keep_conf — will not survive firmware upgrades."
+        else
+            print_info "Not in $keep_conf — no change."
+        fi
+    fi
+}
+
+show_toolkit_help() {
+    clear
+    print_centered_header "Toolkit Management - Help"
+    cat << 'HELPEOF'
+Toolkit Management – Quick Help
+
+Install to /usr/sbin/glinet_utils
+──────────────────────────────────
+Copies this script to /usr/sbin/glinet_utils (no .sh extension) so
+you can run it from any directory by typing just: glinet_utils
+
+Once installed, the self-updater always targets the installed copy,
+keeping a single up-to-date version on your router.
+
+Sysupgrade Persistence
+──────────────────────
+By default, files added to /usr/sbin via the overlay filesystem are
+lost when you perform a firmware upgrade (sysupgrade). Enabling
+persistence adds /usr/sbin/glinet_utils to /etc/sysupgrade.conf so
+the file is preserved across upgrades.
+
+After a firmware upgrade, the preserved copy will check GitHub for
+updates on its first run and self-update if a newer version exists.
+
+Check for Updates
+─────────────────
+Manually triggers the same update check that runs at startup.
+Compares your installed version against the latest on GitHub and
+offers to update in place if a newer version is available.
+
+Uninstall
+─────────
+Removes /usr/sbin/glinet_utils and its sysupgrade.conf entry.
+The script you are currently running is not affected.
+HELPEOF
+    press_any_key
+}
+
+check_install_prompt() {
+    [ "$SCRIPT_PATH" = "$INSTALL_PATH" ] && return
+    [ "$INSTALL_PROMPTED" -eq 1 ] && return
+
+    print_info "Installing to $INSTALL_PATH lets you run this program from anywhere as a system command."
+    printf "   Install as a system command? [Y/n]: "
+    read -r _ip_ans
+    printf "\n"
+    case "$_ip_ans" in
+        n|N)
+            sed -i 's/^INSTALL_PROMPTED=0$/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
+            print_info "Skipping. You can install later via System Tweaks > Toolkit Management."
+            ;;
+        *)
+            do_install_to_sbin "$@"
+            ;;
+    esac
+}
+
+do_install_to_sbin() {
+    print_action "Installing to $INSTALL_PATH..."
+    if ! cp "$SCRIPT_PATH" "$INSTALL_PATH" || ! chmod +x "$INSTALL_PATH"; then
+        print_error "Install failed. Check write permissions on /usr/sbin."
+        press_any_key
+        return 1
+    fi
+    print_success "Installed to $INSTALL_PATH"
+
+    if ! toolkit_persistence_enabled; then
+        printf "\n   Persist across firmware upgrades? [Y/n]: "
+        read -r _persist_ans
+        printf "\n"
+        case "$_persist_ans" in
+            n|N) print_warning "Not persisted — will be lost on next sysupgrade." ;;
+            *)   set_toolkit_persistence 1 ;;
+        esac
+    fi
+
+    printf "\n"
+    print_action "Switching to installed copy..."
+    sleep 2
+    exec "$INSTALL_PATH" "$@"
+}
+
+manage_display_settings() {
+    # Per-mode preview screen. Uses hardcoded escapes so each sample renders
+    # truthfully regardless of the currently active OUTPUT_MODE.
+    _display_settings_screen() {
+        local page="$1" detected="$2"
+        local _R="\033[0m" _G="\033[32m" _Y="\033[33m" _B="\033[38;5;153m" _C="\033[36m" _RD="\033[31m"
+        case "$page" in
+            1)
+                printf " %bPage 1 of 3 — Full mode%b (emoji symbols + color)\n\n" "${BOLD}${CYAN}" "$_R"
+                printf "   %bMessages%b\n" "$_C" "$_R"
+                printf "     %b✅ Operation completed successfully%b\n" "$_G" "$_R"
+                printf "     %b❌ Operation failed%b\n" "$_RD" "$_R"
+                printf "     %b⚠️  Something needs attention%b\n" "$_Y" "$_R"
+                printf "     %bℹ️  Informational message%b\n" "$_B" "$_R"
+                printf "     %b⚙️  Action in progress%b\n\n" "$_C" "$_R"
+                printf "   %bStatus%b\n" "$_C" "$_R"
+                printf "     %b✅ On / enabled / running%b      %b❌ Off / disabled / stopped%b\n\n" "$_G" "$_R" "$_RD" "$_R"
+                printf "   %bA menu looks like%b\n" "$_C" "$_R"
+                printf "     1️⃣  Show Hardware Information\n"
+                printf "     2️⃣  AdGuardHome Control Center\n"
+                printf "     3️⃣  System Tweaks\n"
+                printf "     0️⃣  Exit\n"
+                printf "     ❓ Help\n"
+                ;;
+            2)
+                printf " %bPage 2 of 3 — Compatible mode%b (Unicode symbols + color, PuTTY-safe)\n\n" "${BOLD}${CYAN}" "$_R"
+                printf "   %bMessages%b\n" "$_C" "$_R"
+                printf "     %b✓  Operation completed successfully%b\n" "$_G" "$_R"
+                printf "     %b✗  Operation failed%b\n" "$_RD" "$_R"
+                printf "     %b⚠  Something needs attention%b\n" "$_Y" "$_R"
+                printf "     %bℹ  Informational message%b\n" "$_B" "$_R"
+                printf "     %b⚙  Action in progress%b\n\n" "$_C" "$_R"
+                printf "   %bStatus%b\n" "$_C" "$_R"
+                printf "     %b✓ On / enabled / running%b      %b✗ Off / disabled / stopped%b\n\n" "$_G" "$_R" "$_RD" "$_R"
+                printf "   %bA menu looks like%b\n" "$_C" "$_R"
+                printf "     [1]  Show Hardware Information\n"
+                printf "     [2]  AdGuardHome Control Center\n"
+                printf "     [3]  System Tweaks\n"
+                printf "     [0]  Exit\n"
+                printf "     [?]  Help\n"
+                ;;
+            3)
+                printf " %bPage 3 of 3 — Auto%b (detect terminal on each launch)\n\n" "${BOLD}${CYAN}" "$_R"
+                printf "   Re-detects your terminal every time the toolkit\n"
+                printf "   starts and selects Full or Compatible automatically.\n\n"
+                printf "   Right now it would use:\n"
+                printf "     %b%s%b\n" "$_G" "$detected" "$_R"
+                ;;
+        esac
+    }
+
+    local _page=1 total=3
+    while true; do
+        clear
+        print_centered_header "Display Settings"
+        printf " ──────────────────────────────────────────────────────────────────────────────\n"
+
+        # Auto page needs to show what auto would currently resolve to.
+        local detected_desc
+        case "$OUTPUT_MODE" in
+            full)
+                case "$_TERM_PROFILE" in
+                    ttyd) detected_desc="ttyd (browser) → Full mode" ;;
+                    wt)   detected_desc="Windows Terminal → Full mode" ;;
+                    *)    detected_desc="macOS/Linux Terminal → Full mode" ;;
+                esac
+                ;;
+            *) detected_desc="Compatible terminal → Compatible mode" ;;
+        esac
+
+        _display_settings_screen "$_page" "$detected_desc"
+
+        # Footer / navigation (mirrors the Hardware Info pager)
+        printf "\n ──────────────────────────────────────────────────────────────────────────────\n"
+        printf " [P] Prev   "
+        local i=1
+        while [ "$i" -le "$total" ]; do
+            if [ "$i" -eq "$_page" ]; then
+                printf "%b[%d]%b " "${BOLD}" "$i" "${RESET}"
+            else
+                printf "%b[%d]%b " "${GREY}" "$i" "${RESET}"
+            fi
+            i=$((i + 1))
+        done
+        printf "  [N] Next   [C] Confirm   [0] Back  "
+
+        local nav_choice
+        nav_choice=$(read_single_char)
+        printf "\n"
+
+        case "$nav_choice" in
+            p|P|b|B) [ "$_page" -gt 1 ] && _page=$((_page - 1)) ;;
+            n|N)     [ "$_page" -lt "$total" ] && _page=$((_page + 1)) ;;
+            1|2|3)   _page="$nav_choice" ;;
+            c|C)
+                local new_pref
+                case "$_page" in
+                    1) new_pref="full"   ;;
+                    2) new_pref="compat" ;;
+                    3) new_pref="auto"   ;;
+                esac
+                local pref_label
+                case "$new_pref" in
+                    full)   pref_label="Full"       ;;
+                    compat) pref_label="Compatible" ;;
+                    auto)   pref_label="Auto"        ;;
+                    *)      pref_label="$new_pref"   ;;
+                esac
+                printf "\n"
+                print_info "Set display mode to $pref_label."
+                printf "   Save as default? [Y/n]: "
+                read -r ds_save
+                printf "\n"
+                case "$ds_save" in
+                    n|N)
+                        OUTPUT_PREF="$new_pref"
+                        detect_output_mode
+                        print_info "Applied for this session only (not saved)."
+                        ;;
+                    *)
+                        sed -i "s/^OUTPUT_PREF=\"[^\"]*\"/OUTPUT_PREF=\"$new_pref\"/" "$SCRIPT_PATH"
+                        OUTPUT_PREF="$new_pref"
+                        detect_output_mode
+                        print_success "Saved as default: $pref_label"
+                        ;;
+                esac
+                press_any_key
+                ;;
+            0) return ;;
+        esac
+    done
+}
+
+manage_toolkit() {
+    while true; do
+        clear
+        print_centered_header "Toolkit Management"
+
+        local installed_status persistence_status running_from install_label persist_label
+        if toolkit_is_installed; then
+            installed_status="${GREEN}INSTALLED${RESET}"
+            install_label="Uninstall"
+        else
+            installed_status="${RED}NOT INSTALLED${RESET}"
+            install_label="Install"
+        fi
+        if toolkit_persistence_enabled; then
+            persistence_status="${GREEN}ENABLED${RESET}"
+            persist_label="Disable Persistence"
+        else
+            persistence_status="${YELLOW}DISABLED${RESET}"
+            persist_label="Enable Persistence"
+        fi
+        if [ "$SCRIPT_PATH" = "$INSTALL_PATH" ]; then
+            running_from="${GREEN}$INSTALL_PATH${RESET}"
+        else
+            running_from="${YELLOW}$SCRIPT_PATH${RESET} (local)"
+        fi
+        local mode_display
+        case "$OUTPUT_MODE" in
+            full)   mode_display="${GREEN}Full${RESET}"        ;;
+            compat) mode_display="${YELLOW}Compatible${RESET}" ;;
+            *)      mode_display="$OUTPUT_MODE"                ;;
+        esac
+        if [ "$OUTPUT_PREF" = "auto" ]; then
+            case "$OUTPUT_MODE" in
+                full)
+                    case "$_TERM_PROFILE" in
+                        ttyd)  mode_display="$mode_display  [auto: ttyd]" ;;
+                        wt)    mode_display="$mode_display  [auto: Windows Terminal]" ;;
+                        *)     mode_display="$mode_display  [auto: macOS/Linux]" ;;
+                    esac
+                    ;;
+                *) mode_display="$mode_display  [auto]" ;;
+            esac
+        fi
+
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        printf "   Display mode: %b\n"   "$mode_display"
+        printf "   Terminal:     %b\n"   "${GREEN}${TERM:-unknown}${RESET}"
+        printf "   Installation: %b\n"   "$installed_status"
+        printf "   Persistence:  %b\n"   "$persistence_status"
+        printf "   Running from: %b\n\n" "$running_from"
+
+        printf "%s  %s\n" "$N1" "$install_label"
+        printf "%s  %s\n" "$N2" "$persist_label"
+        printf "%s  Display Settings\n"          "$N3"
+        printf "%s  Check for Updates\n"         "$N4"
+        printf "%s  Back\n"                      "$N0"
+        printf "%s Help\n"                       "$NQ"
+        printf "\nChoose [1-4/0/?]: "
+        read -r tk_choice
+        printf "\n"
+
+        case "$tk_choice" in
+            1)
+                if toolkit_is_installed; then
+                    # Uninstall path
+                    print_warning "This will remove $INSTALL_PATH from the system."
+                    if [ "$SCRIPT_PATH" = "$INSTALL_PATH" ]; then
+                        print_warning "You are currently running the installed copy."
+                        printf "   After removal, run the script directly from its local path.\n"
+                    fi
+                    printf "   Remove the toolkit? [y/N]: "; read -r c; printf "\n"
+                    case "$c" in
+                        y|Y)
+                            rm -f "$INSTALL_PATH"
+                            set_toolkit_persistence 0
+                            print_success "Uninstalled."
+                            press_any_key
+                            ;;
+                        *) print_info "No change."; press_any_key ;;
+                    esac
+                else
+                    # Install path
+                if [ "$SCRIPT_PATH" = "$INSTALL_PATH" ]; then
+                    print_info "Already running from the installed location."
+                    press_any_key
+                else
+                        do_install_to_sbin "$@"
+                    fi
+                fi
+                ;;
+            2)
+                if ! toolkit_is_installed; then
+                    print_error "Not installed — install first (option 1)."
+                    sleep 2; continue
+                fi
+                if toolkit_persistence_enabled; then
+                    printf "   Disable sysupgrade persistence? [y/N]: "; read -r c; printf "\n"
+                    case "$c" in y|Y) set_toolkit_persistence 0 ;; *) print_info "No change." ;; esac
+                else
+                    printf "   Enable sysupgrade persistence? [y/N]: "; read -r c; printf "\n"
+                    case "$c" in y|Y) set_toolkit_persistence 1 ;; *) print_info "No change." ;; esac
+                fi
+                press_any_key
+                ;;
+            3) manage_display_settings ;;
+            4)
+                check_self_update "$@"
+                press_any_key
+                ;;
+            \?|h|H|❓) show_toolkit_help ;;
+            0) return ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
 system_tweaks() {
     while true; do
         clear
         print_centered_header "System Tweaks"
-        printf "1️⃣  Device Fan Settings\n"
-        printf "2️⃣  Manage Zram Swap\n"
-        printf "3️⃣  Guest Network Bandwidth Limiter\n"
-        printf "4️⃣  Web-UI Terminal Interface\n"
-        printf "5️⃣  Package and Persistence Manager\n"
-        printf "6️⃣  SSH Key Management\n"
-        printf "0️⃣  Main menu\n"
-        printf "❓ Help\n"
-        printf "\nChoose [1-6/0/?]: "
+        printf "%s  Device Fan Settings\n" "$N1"
+        printf "%s  Manage Zram Swap\n" "$N2"
+        printf "%s  Guest Network Bandwidth Limiter\n" "$N3"
+        printf "%s  Web-UI Terminal Interface\n" "$N4"
+        printf "%s  Package and Persistence Manager\n" "$N5"
+        printf "%s  SSH Key Management\n" "$N6"
+        printf "%s  Toolkit Management\n" "$N7"
+        printf "%s  Main menu\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-7/0/?]: "
         read -r st_choice
         printf "\n"
         case $st_choice in
@@ -4268,6 +5269,7 @@ system_tweaks() {
             4) manage_web_terminal ;;
             5) manage_packages ;;
             6) manage_ssh_keys ;;
+            7) manage_toolkit ;;
             \?|h|H|❓) show_system_tweaks_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -4294,9 +5296,9 @@ is throttling due to heat or if your storage/RAM is underperforming.
 
 Benchmark Categories:
 ─────────────────────
-• CPU & Thermal: Options 1 and 2 test the processor. The Stress Test pushes 
-  all cores to 100% to test heat soak, while the OpenSSL benchmark measures 
-  mathematical throughput compared to a Beryl AX (Beryl 7) baseline.
+• CPU & Thermal: Options 1 and 2 test the processor. The Stress Test pushes
+  all cores to 100% to test heat soak, while the VPN & Crypto Benchmark ranks
+  this device against saved routers for WireGuard, OpenVPN and RSA throughput.
 • Storage & Memory: Options 3 and 4 measure I/O speeds. Use these to test 
   the performance of the internal NAND vs. attached USB 3.0 drives or to 
   check if RAM bandwidth is saturated.
@@ -4309,8 +5311,9 @@ Technical Details:
 ──────────────────
 • Stress Testing: The script attempts to use 'stress' primarily. If missing, 
   it installs 'stress-ng' and creates a symlink to maintain compatibility.
-• Baselines: CPU, Disk, and Memory tests provide a "% Δ Beryl 7" comparison, 
-  using the Beryl 7 as the performance 0.0% reference point.
+• Baselines: The VPN & Crypto Benchmark is a leaderboard - its "vs yours"
+  column compares saved devices to the one you are on. Disk and Memory tests
+  use a fixed Beryl 7 (0.0%) reference point.
 • Timing: Disk and Memory tests use /proc/uptime millisecond offsets for 
   precise Speed (MB/s) calculations rather than relying on 'dd' output.
 
@@ -4416,12 +5419,14 @@ manage_librespeed() {
             printf "   Service: %bNOT INSTALLED%b\n" "${RED}" "${RESET}"
         fi
         
-        printf "\n1️⃣  Install and Enable\n"
-        printf "2️⃣  Disable Service\n"
-        printf "3️⃣  Toggle Persistence\n"
-        printf "4️⃣  Uninstall Package\n"
-        printf "0️⃣  Main menu\n"
-        printf "❓ Help\n"
+        local ls_persist_label="Enable Persistence"
+        [ "$IS_INSTALLED" -eq 1 ] && [ "$persist_ok" -eq 1 ] && ls_persist_label="Disable Persistence"
+        printf "\n%s  Install and Enable\n" "$N1"
+        printf "%s  Disable Service\n" "$N2"
+        printf "%s  %s\n" "$N3" "$ls_persist_label"
+        printf "%s  Uninstall Package\n" "$N4"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
         printf "\nChoose [1-4/0/?]: "
         read -r ls_choice
         printf "\n"
@@ -4429,9 +5434,7 @@ manage_librespeed() {
         case $ls_choice in
             1)
                 if [ "$IS_INSTALLED" -eq 0 ]; then
-                    print_warning "Installing LibreSpeed...\n"
-                    check_opkg_updated
-                    opkg install librespeed-go >/dev/null 2>&1
+                    install_package librespeed-go "LibreSpeed" || { press_any_key; continue; }
                     grep -q "librespeed" /etc/passwd || echo "librespeed:x:500:500:librespeed:/var/run/librespeed-go:/bin/false" >> /etc/passwd
                     IS_INSTALLED=1
                 fi
@@ -4507,7 +5510,6 @@ manage_librespeed() {
 
 install_ookla_speedtest() {
     if ! command -v speedtest >/dev/null 2>&1 || ! speedtest --version 2>&1 | grep -qi "ookla"; then
-        print_warning "Ookla Speedtest not found, installing..."
         arch=$(uname -m)
         case "$arch" in
             aarch64) suffix="aarch64" ;;
@@ -4515,43 +5517,146 @@ install_ookla_speedtest() {
             armv8*)  suffix="aarch64" ;;
             mips*)   suffix="mips"    ;;
             x86_64)  suffix="x86_64"  ;;
-            *) print_error "Unsupported Arch: $arch"; continue ;;
+            *) print_error "Unsupported Arch: $arch"; press_any_key; return 1 ;;
         esac
-        ver=$(wget -qO- https://www.speedtest.net/apps/cli | grep -oE "ookla-speedtest-[0-9.]+-linux-$suffix.tgz" | head -n1)
-        [ -z "$ver" ] && ver="ookla-speedtest-1.2.0-linux-$suffix.tgz"
-        if [ -n "$ver" ]; then
+
+        _ookla_fetch() {
+            local ver url
+            ver=$(wget -qO- https://www.speedtest.net/apps/cli | grep -oE "ookla-speedtest-[0-9.]+-linux-$suffix.tgz" | head -n1)
+            [ -z "$ver" ] && ver="ookla-speedtest-1.2.0-linux-$suffix.tgz"
             url="https://install.speedtest.net/app/cli/$ver"
-            wget -qO- "$url" | tar xz -C /usr/bin speedtest 2>/dev/null
-            chmod +x /usr/bin/speedtest 2>/dev/null
+            wget -qO- "$url" | tar xz -C /usr/bin speedtest
+            chmod +x /usr/bin/speedtest
+        }
+
+        spin_run "Installing Ookla Speedtest" _ookla_fetch
+        rm -f "$SPIN_LOG" 2>/dev/null
+
+        if command -v speedtest >/dev/null 2>&1; then
             print_success "Installed: $(speedtest --version | head -n1)"
         else
-            print_error "Could not find download link for $suffix"
+            print_error "Failed to install Ookla Speedtest."
+            check_connectivity
             press_any_key
-            continue
-        fi
-        if ! command -v speedtest >/dev/null 2>&1; then
-            print_error "Failed to install Ookla Speedtest"
-            press_any_key
-            continue
+            return 1
         fi
     fi
+}
+
+# --- VPN & Crypto Benchmark helpers ---
+# Throughput data is OpenSSL's "1000s of bytes per second" (KB/s); rsa in ops/s.
+
+# Measure one EVP cipher at one block size into BENCH_RESULT (numeric, no
+# trailing 'k'). Sets a global rather than echoing because spin_run animates on
+# stdout - capturing it in $(...) would swallow the spinner. Name/case-agnostic
+# so it works across OpenSSL 1.1.x and 3.x; empty on failure -> caller uses 0.
+bench_measure() {   # cipher size -> BENCH_RESULT
+    spin_run "Measuring $1 @ ${2}B" openssl speed -evp "$1" -bytes "$2"
+    BENCH_RESULT=$(awk '/[0-9]k$/{v=$NF} END{sub(/k$/,"",v); print v}' "$SPIN_LOG")
+}
+
+# Render one cipher leaderboard table: rows sorted by throughput (1420 B)
+# descending, this device highlighted. Args: title small_col tput_col ceil_col
+# datafile my_id. Columns in datafile are 1=id 2=label 3=cpu 4..9=cipher sizes.
+bench_render_cipher() {
+    local title="$1" sc="$2" tc="$3" cc="$4" df="$5" id="$6" base
+    base=$(awk -F'|' -v id="$id" -v c="$tc" '$1==id{print $c; exit}' "$df")
+    printf '\n %b%s%b\n' "$CYAN" "$title" "$RESET"
+    printf '  %-10s %-7s %-10s  %-10s  %-10s %-8s  %-10s\n' "Device" "CPU" "64 B" "1420 B" "vs yours" "" "16 K"
+    printf ' %s\n' "───────────────────────────────────────────────────────────────────────────"
+    awk -F'|' -v c="$tc" '{print $c"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' \
+        -v id="$id" -v sc="$sc" -v tc="$tc" -v cc="$cc" -v base="$base" \
+        -v cur="${BOLD}${GREEN}" -v res="$RESET" '
+        function unit(k,  v,u){ v=k*8; u="Kb/s"; if(v>=10000){v/=1000;u="Mb/s"} if(v>=10000){v/=1000;u="Gb/s"}
+            if(v>=1000)return sprintf("%.0f %s",v,u); if(v>=100)return sprintf("%.1f %s",v,u);
+            if(v>=10)return sprintf("%.2f %s",v,u); return sprintf("%.3f %s",v,u) }
+        function bar(v,mx,  n,i,s){ if(mx<=0)return "          "; n=int(v/mx*10+0.5); if(n>10)n=10; if(n<0)n=0;
+            s=""; for(i=0;i<n;i++)s=s"█"; for(i=n;i<10;i++)s=s"░"; return s }
+        NR==1{mx=$tc}
+        { if($1==id)d="  ---   "; else if(base>0)d=sprintf("%+6.1f%%",($tc-base)/base*100); else d="";
+          mark=($1==id)?"> ":"  ";
+          line=sprintf("%s%-10.10s %-7.7s %-10s  %-10s  %-10s %-8s  %-10s",mark,$2,$3,unit($sc),unit($tc),bar($tc,mx),d,unit($cc));
+          if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
+}
+
+# Render the RSA connection-setup table (sorted by sign/s). Args: datafile my_id.
+bench_render_rsa() {
+    local df="$1" id="$2" base
+    base=$(awk -F'|' -v id="$id" '$1==id{print $10; exit}' "$df")
+    printf '\n %b%s%b\n' "$CYAN" "Connection setup · RSA-2048" "$RESET"
+    printf '  %-10s %-7s %-10s  %-10s %-8s  %-10s\n' "Device" "CPU" "sign/s" "vs yours" "" "verify/s"
+    printf ' %s\n' "───────────────────────────────────────────────────────────────"
+    awk -F'|' '{print $10"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' -v id="$id" -v base="$base" \
+        -v cur="${BOLD}${GREEN}" -v res="$RESET" '
+        function bar(v,mx,  n,i,s){ if(mx<=0)return "          "; n=int(v/mx*10+0.5); if(n>10)n=10; if(n<0)n=0;
+            s=""; for(i=0;i<n;i++)s=s"█"; for(i=n;i<10;i++)s=s"░"; return s }
+        NR==1{mx=$10}
+        { if($1==id)d="  ---   "; else if(base>0)d=sprintf("%+6.1f%%",($10-base)/base*100); else d="";
+          mark=($1==id)?"> ":"  ";
+          line=sprintf("%s%-10.10s %-7.7s %-10.1f  %-10s %-8s  %-10.1f",mark,$2,$3,$10,bar($10,mx),d,$11);
+          if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
+}
+
+# Render the Disk I/O leaderboard, sorted by Write (the cross-device-reliable
+# metric - Read may reflect a storage controller's own cache, see caller's
+# footnote). Args: datafile my_id. Columns: 1=id 2=label 3=cpu 4=write 5=read.
+bench_render_disk() {
+    local df="$1" id="$2" base
+    base=$(awk -F'|' -v id="$id" '$1==id{print $4; exit}' "$df")
+    printf '\n %b%s%b\n' "$CYAN" "Disk I/O (Sequential)" "$RESET"
+    printf '  %-10s %-7s %-10s  %-10s  %-10s %-8s\n' "Device" "CPU" "Write" "Read" "vs yours" ""
+    printf ' %s\n' "───────────────────────────────────────────────────────────────"
+    awk -F'|' '{print $4"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' \
+        -v id="$id" -v base="$base" -v cur="${BOLD}${GREEN}" -v res="$RESET" '
+        function unit(v,  u){ u="MB/s"; if(v>=10000){v/=1000;u="GB/s"}
+            if(v>=1000)return sprintf("%.0f %s",v,u); if(v>=100)return sprintf("%.1f %s",v,u);
+            if(v>=10)return sprintf("%.2f %s",v,u); return sprintf("%.3f %s",v,u) }
+        function bar(v,mx,  n,i,s){ if(mx<=0)return "          "; n=int(v/mx*10+0.5); if(n>10)n=10; if(n<0)n=0;
+            s=""; for(i=0;i<n;i++)s=s"█"; for(i=n;i<10;i++)s=s"░"; return s }
+        NR==1{mx=$4}
+        { if($1==id)d="  ---   "; else if(base>0)d=sprintf("%+6.1f%%",($4-base)/base*100); else d="";
+          mark=($1==id)?"> ":"  ";
+          line=sprintf("%s%-10.10s %-7.7s %-10s  %-10s  %-10s %-8s",mark,$2,$3,unit($4),unit($5),bar($4,mx),d);
+          if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
+}
+
+# Render the Memory I/O leaderboard (single Read/Write throughput metric).
+# Args: datafile my_id. Columns: 1=id 2=label 3=cpu 4=mem_mbs.
+bench_render_mem() {
+    local df="$1" id="$2" base
+    base=$(awk -F'|' -v id="$id" '$1==id{print $4; exit}' "$df")
+    printf '\n %b%s%b\n' "$CYAN" "Memory I/O (Read/Write)" "$RESET"
+    printf '  %-10s %-7s %-10s  %-10s %-8s\n' "Device" "CPU" "Speed" "vs yours" ""
+    printf ' %s\n' "───────────────────────────────────────────────────"
+    awk -F'|' '{print $4"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' \
+        -v id="$id" -v base="$base" -v cur="${BOLD}${GREEN}" -v res="$RESET" '
+        function unit(v,  u){ u="MB/s"; if(v>=10000){v/=1000;u="GB/s"}
+            if(v>=1000)return sprintf("%.0f %s",v,u); if(v>=100)return sprintf("%.1f %s",v,u);
+            if(v>=10)return sprintf("%.2f %s",v,u); return sprintf("%.3f %s",v,u) }
+        function bar(v,mx,  n,i,s){ if(mx<=0)return "          "; n=int(v/mx*10+0.5); if(n>10)n=10; if(n<0)n=0;
+            s=""; for(i=0;i<n;i++)s=s"█"; for(i=n;i<10;i++)s=s"░"; return s }
+        NR==1{mx=$4}
+        { if($1==id)d="  ---   "; else if(base>0)d=sprintf("%+6.1f%%",($4-base)/base*100); else d="";
+          mark=($1==id)?"> ":"  ";
+          line=sprintf("%s%-10.10s %-7.7s %-10s  %-10s %-8s",mark,$2,$3,unit($4),bar($4,mx),d);
+          if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
 }
 
 benchmark_system() {
     while true; do
         clear
         print_centered_header "System Benchmarks"
-        printf "1️⃣  CPU Thermal Stress Test\n"
-        printf "2️⃣  CPU Benchmark (OpenSSL)\n"
-        printf "3️⃣  Disk I/O Benchmark\n"
-        printf "4️⃣  Memory I/O Benchmark\n"
-        printf "5️⃣  DNS Latency Benchmark\n"
-        printf "6️⃣  Ookla Internet Speedtest\n"
-        printf "7️⃣  LibreSpeed Speed Test Server\n"
-        printf "8️⃣  iPerf3 Network Speed Test Server\n"
-        printf "9️⃣  OpenSpeedTest Server\n"
-        printf "0️⃣  Main menu\n"
-        printf "❓ Help\n"
+        printf "%s  CPU Thermal Stress Test\n" "$N1"
+        printf "%s  VPN & Crypto Benchmark\n" "$N2"
+        printf "%s  Disk I/O Benchmark\n" "$N3"
+        printf "%s  Memory I/O Benchmark\n" "$N4"
+        printf "%s  DNS Latency Benchmark\n" "$N5"
+        printf "%s  Ookla Internet Speedtest\n" "$N6"
+        printf "%s  LibreSpeed Speed Test Server\n" "$N7"
+        printf "%s  iPerf3 Network Speed Test Server\n" "$N8"
+        printf "%s  OpenSpeedTest Server\n" "$N9"
+        printf "%s  Main menu\n" "$N0"
+        printf "%s Help\n" "$NQ"
         printf "\nChoose [1-9/0/?]: "
         read -r bench_choice
         printf "\n"
@@ -4562,16 +5667,14 @@ benchmark_system() {
                 print_centered_header "CPU Thermal Stress Test"
                 
                 if ! command -v stress >/dev/null 2>&1; then
-                    print_warning "stress not found, installing..."
-                    check_opkg_updated
-                    opkg install stress >/dev/null 2>&1
+                    install_package stress
                     if ! command -v stress >/dev/null 2>&1; then
-                        opkg install stress-ng >/dev/null 2>&1
+                        install_package stress-ng
                         if ! command -v stress-ng >/dev/null 2>&1; then
-                            print_error "Failed to install stress"
+                            print_error "Could not install a CPU stress tool."
                             press_any_key
                             continue
-                        else 
+                        else
                             ln -s "$(which stress-ng)" /usr/bin/stress
                         fi
                     fi
@@ -4604,9 +5707,8 @@ benchmark_system() {
                 start_temp_str=$(get_temp)
                 start_fan_str=$(get_fan_speed)
                 
-                printf "\n%b\n" "${YELLOW}⏳ Running stress test on $cpu_cores cores for $duration seconds...${RESET}"
-                                
-                stress --cpu "$cpu_cores" --timeout "${duration}s"
+                printf "\n"
+                countdown_run "Stress testing $cpu_cores cores" "$duration" stress --cpu "$cpu_cores" --timeout "${duration}s"
 
                 raw_end=$(get_cpu_temp)
                 end_temp_str=$(get_temp)
@@ -4617,7 +5719,8 @@ benchmark_system() {
                 post_fan_str=$(get_fan_speed)
                 
                 printf "\n"
-                print_success "Stress test completed\n"
+                print_success "Stress test completed"
+                printf "\n"
                 if [ "$raw_start" != "unknown" ] && [ "$raw_end" != "unknown" ]; then
                     diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_end - $raw_start}")
                     diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_end - $raw_start) * 1.8}")
@@ -4634,109 +5737,116 @@ benchmark_system() {
                     fi
 
                     # --- TABLE RENDER ---
-                    printf "     %-16s %-22s %-16s %-15s\n" "PHASE" "TEMPERATURE" "Δ CHANGE" "FAN SPEED (Δ%)"
-                    printf "────────────────   ──────────────────   ──────────────────   ────────────────────\n"
-                    printf "%-18s %-30s %-12s %-12s\n" "Start" "$start_temp_str" "---" "$start_fan_str RPM"
-                    printf "%-18s %-22s %-8s %-13s %-4s %-12s\n" "End" "$end_temp_str" "$diff_c°C" "($diff_f°F)" "$end_fan_str RPM" "($fan_p%)"
-                    printf "%-18s %-22s %-8s %-13s %-4s %-12s\n" "End + 3s" "$post_temp_str" "$post_diff_c°C" "($post_diff_f°F)" "$post_fan_str RPM" "($fan_post_p%)"
+                    # Left-justified: exactly 3 fixed rows about ONE test run
+                    # (a status report, not an open-ended comparison list), so
+                    # this fails the "genuinely comparing many values" test -
+                    # same category as the leaderboards, not DNS Benchmark.
+                    # printf's %Ns counts UTF-8 BYTES, not characters, on this
+                    # platform (confirmed: ${#}/wc -m/wc -c/awk length() ALL
+                    # miscount multi-byte glyphs like ° identically - there is
+                    # no reliable char-counting tool here). ljust() sidesteps
+                    # this: it never measures a string containing a multi-byte
+                    # char - the caller supplies the true length, computed from
+                    # ASCII-only numeric substrings + a known-constant offset
+                    # for the fixed °C/°F skeleton around them.
+                    ljust() {
+                        local width="$1" s="$2" true_len="$3" pad="" i=0
+                        while [ "$i" -lt "$((width - true_len))" ]; do pad="${pad} "; i=$((i + 1)); done
+                        printf '%s%s' "$s" "$pad"
+                    }
+
+                    c_start=$(awk "BEGIN {printf \"%.2f\", $raw_start}")
+                    f_start=$(awk "BEGIN {printf \"%.2f\", ($raw_start * 1.8) + 32}")
+                    c_end=$(awk "BEGIN {printf \"%.2f\", $raw_end}")
+                    f_end=$(awk "BEGIN {printf \"%.2f\", ($raw_end * 1.8) + 32}")
+                    c_post=$(awk "BEGIN {printf \"%.2f\", $raw_post}")
+                    f_post=$(awk "BEGIN {printf \"%.2f\", ($raw_post * 1.8) + 32}")
+                    # "°C (°F)" skeleton = 7 real characters around the two ASCII numbers
+                    temp_len_start=$((${#c_start} + ${#f_start} + 7))
+                    temp_len_end=$((${#c_end} + ${#f_end} + 7))
+                    temp_len_post=$((${#c_post} + ${#f_post} + 7))
+
+                    delta_end="${diff_c}°C (${diff_f}°F)"
+                    delta_post="${post_diff_c}°C (${post_diff_f}°F)"
+                    delta_len_end=$((${#diff_c} + ${#diff_f} + 7))
+                    delta_len_post=$((${#post_diff_c} + ${#post_diff_f} + 7))
+
+                    fan_start="${start_fan_str} RPM"
+                    fan_end="${end_fan_str} RPM (${fan_p}%)"
+                    fan_post="${post_fan_str} RPM (${fan_post_p}%)"
+
+                    printf "%-10s %s %s %s\n" "PHASE" "$(ljust 22 "TEMPERATURE" 11)" "$(ljust 18 "Δ CHANGE" 8)" "$(ljust 18 "FAN SPEED (Δ%)" 14)"
+                    printf "%s\n" "───────────────────────────────────────────────────────────────────────"
+                    printf "%-10s %s %s %-18s\n" "Start" "$(ljust 22 "$start_temp_str" "$temp_len_start")" "       ---        " "$fan_start"
+                    printf "%-10s %s %s %-18s\n" "End" "$(ljust 22 "$end_temp_str" "$temp_len_end")" "$(ljust 18 "$delta_end" "$delta_len_end")" "$fan_end"
+                    printf "%-10s %s %s %-18s\n" "End + 3s" "$(ljust 22 "$post_temp_str" "$temp_len_post")" "$(ljust 18 "$delta_post" "$delta_len_post")" "$fan_post"
                 fi         
                 press_any_key
                 ;;
             2)
                 clear
-                print_centered_header "OpenSSL CPU Benchmark"
+                print_centered_header "VPN & Crypto Benchmark"
 
                 if ! command -v openssl >/dev/null 2>&1; then
                     print_error "OpenSSL not found"
                     press_any_key
                     continue
                 fi
-                
-                # --- MT7987a - Beryl 7 Baselines (k bytes/s) ---
-                BASE_AES="93653 269054 508791 660796 718897 721709"
-                BASE_SHA="70723 214609 497956 740733 866776 876396"
-                
-                # RSA Baselines (sign/s and verify/s)
-                BASE_RSA_S=180.9; BASE_RSA_V=6765.6
-                BASE_RSA_MS=715.8; BASE_RSA_MV=26528.0
 
-                print_info "Running OpenSSL speed benchmark. This will take a minute...\n"
-                
-                # --- Function to Print Aligned Delta Row ---
-                # Usage: print_delta "type_string" "baseline_string" "raw_output_file"
-                print_delta() {
-                    local type=$1; local baseline=$2; local datafile=$3
-                    printf "${YELLOW}%-16s${RESET}" "% Δ Beryl 7:"
-                    # Use awk to handle case-insensitivity and matching
-                    awk -v t="$type" -v base="$baseline" -v r="$RED" -v g="$GREEN" -v res="$RESET" '
-                    # Convert first column to lowercase to match our "type" variable
-                    tolower($1) == tolower(t) {
-                        split(base, b_arr);
-                        for(i=1; i<=6; i++) {
-                            cur = $(i+1); gsub(/k/, "", cur);
-                            # If OpenSSL output is 0.00, avoid division by zero
-                            if (b_arr[i] > 0) {
-                                diff = ((cur - b_arr[i]) / b_arr[i]) * 100;
-                                printf "%s%10.1f%%%s  ", (diff >= 0 ? g : r), diff, res
-                            }
-                        }
-                    }' "$datafile"
-                    echo ""
-                }
+                # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
+                # device by appending one line in the same column order:
+                # id|label|cpu|aes64|aes1420|aes16k|cha64|cha1420|cha16k|rsa_sign|rsa_verify
+                bench_ref='mt3600be|Beryl 7|MT7987a|267728|621208|721917|126357|258082|323188|182.9|6850.8
+be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5'
 
-                # --- AES Section ---
-                printf "%b\n" "${CYAN}Single-threaded AES-256-GCM:${RESET}"
-                openssl speed -elapsed -evp aes-256-gcm 2>&1 | tee /tmp/ssl_res | tail -n 3
-                print_delta "aes-256-gcm" "$BASE_AES" "/tmp/ssl_res"
+                my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
+                [ -z "$my_id" ] && my_id="thisdevice"
+                my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
+                my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
+                [ -z "$my_label" ] && my_label="$my_id"
+                [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
 
-                # --- SHA Section ---
-                printf "\n%b\n" "${CYAN}Single-threaded SHA256:${RESET}"
-                openssl speed -elapsed sha256 2>&1 | tee /tmp/ssl_res | tail -n 3
-                print_delta "sha256" "$BASE_SHA" "/tmp/ssl_res"
-
-                # --- RSA Section (Helper for RSA logic) ---
-                process_rsa() {
-                    local label=$1; local cmd=$2; local b_sign=$3; local b_verify=$4
-                    printf "\n%b\n" "${CYAN}$label:${RESET}"
-                    $cmd > /tmp/ssl_res 2>/dev/null
-                    grep -E '^ {10}|^rsa' /tmp/ssl_res
-                    
-                    # Parse sign/s (col 6) and verify/s (col 7)
-                    read cur_s cur_v <<EOF
-            $(grep "^rsa 2048" /tmp/ssl_res | awk '{print $6, $7}')
-EOF
-                    # Calculate Deltas inside awk to avoid bc dependency
-                    awk -v cs="$cur_s" -v bs="$b_sign" -v cv="$cur_v" -v bv="$b_verify" \
-                        -v r="$RED" -v g="$GREEN" -v res="$RESET" -v y="$YELLOW" 'BEGIN {
-                        ds = ((cs - bs) / bs) * 100; dv = ((cv - bv) / bv) * 100;
-                        printf "%s%% Δ Beryl 7:  %s%+.1f%% (Sign)%s  /  %s%+.1f%% (Verify)%s\n", 
-                            y, (ds>=0?g:r), ds, res, (dv>=0?g:r), dv, res
-                    }'
-                }
-
-                process_rsa "RSA 2048-bit signing" "openssl speed -elapsed rsa2048" "$BASE_RSA_S" "$BASE_RSA_V"
-
-                cores=$(grep -c ^processor /proc/cpuinfo)
-                if [ "$cores" -gt 1 ]; then
-                    process_rsa "RSA 2048-bit (Multi-core - $cores cores)" "openssl speed -elapsed -multi $cores rsa2048" "$BASE_RSA_MS" "$BASE_RSA_MV"
-                fi
-
-                rm -f /tmp/ssl_res
+                print_info "Measuring this device - stop VPN, SQM and heavy traffic for accurate, comparable numbers."
                 printf "\n"
-                print_success "Benchmark completed"
+
+                bench_measure aes-256-gcm 64;          a64=$BENCH_RESULT
+                bench_measure aes-256-gcm 1420;        a1420=$BENCH_RESULT
+                bench_measure aes-256-gcm 16384;       a16k=$BENCH_RESULT
+                bench_measure chacha20-poly1305 64;    c64=$BENCH_RESULT
+                bench_measure chacha20-poly1305 1420;  c1420=$BENCH_RESULT
+                bench_measure chacha20-poly1305 16384; c16k=$BENCH_RESULT
+                spin_run "Measuring RSA-2048 (connection setup)" openssl speed rsa2048
+                rs=$(awk '/^rsa 2048 bits/{print $6; exit}' "$SPIN_LOG")
+                rv=$(awk '/^rsa 2048 bits/{print $7; exit}' "$SPIN_LOG")
+                rm -f "$SPIN_LOG" 2>/dev/null
+
+                bench_data="/tmp/.glnet-bench.$$"
+                {
+                    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" \
+                        "${a64:-0}" "${a1420:-0}" "${a16k:-0}" "${c64:-0}" "${c1420:-0}" "${c16k:-0}" "${rs:-0}" "${rv:-0}"
+                    printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=11 && $1!=id'
+                } > "$bench_data"
+
+                clear
+                print_centered_header "VPN & Crypto Benchmark"
+                bench_render_cipher "WireGuard · ChaCha20-Poly1305" 7 8 9 "$bench_data" "$my_id"
+                bench_render_cipher "OpenVPN / IPsec · AES-256-GCM" 4 5 6 "$bench_data" "$my_id"
+                bench_render_rsa "$bench_data" "$my_id"
+                printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
+                printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
+                printf '\n %bNote: each device uses its own OpenSSL build. WireGuard runs kernel ChaCha20, so that%b\n' "$GREY" "$RESET"
+                printf ' %bcolumn is a proxy; OpenVPN/IPsec uses OpenSSL directly.%b\n' "$GREY" "$RESET"
+                rm -f "$bench_data"
+                printf "\n"
+                print_success "Benchmark complete"
                 press_any_key
                 ;;
             3)
                 clear
                 print_centered_header "Disk I/O Benchmark"
-                
-                # --- Beryl 7 (MT7981) Baselines (MB/s) ---
-                BASE_W=119.05
-                BASE_R=10.62
 
                 available_kb=$(df -Pk . | awk 'NR==2 {print $4}')
-                
-                # Check for space (Using your established test_size logic)
+
                 if [ "$available_kb" -ge 1024000 ]; then test_size=1000; test_name="1GB"
                 elif [ "$available_kb" -ge 512000 ]; then test_size=500; test_name="500MB"
                 elif [ "$available_kb" -ge 256000 ]; then test_size=250; test_name="250MB"
@@ -4744,54 +5854,52 @@ EOF
                 elif [ "$available_kb" -ge 64000 ]; then test_size=64; test_name="64MB"
                 elif [ "$available_kb" -ge 32000 ]; then test_size=32; test_name="32MB"
                 else test_size=16; test_name="16MB"; fi
-                
-                printf "Test size: %b%s%b\n" "${GREEN}" "$test_name" "${RESET}"
-                
-                # Helper for ms timing
+
+                printf "Test size: %b%s%b\n\n" "${GREEN}" "$test_name" "${RESET}"
+
                 get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
 
-                # --- Write Test ---
-                printf "\n%b\n" "${YELLOW}⏳ Running write test ($test_name)...${RESET}"
                 sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-                
                 w_start=$(get_ms)
-                dd if=/dev/zero of=./testfile bs=1M count=$test_size conv=fsync 2>&1 | tail -n 1
+                spin_run "Running write test ($test_name)" dd if=/dev/zero of=./testfile bs=1M count=$test_size conv=fsync
                 w_end=$(get_ms)
-                
-                # --- Read Test ---
-                printf "%b\n" "${YELLOW}⏳ Running read test ($test_name)...${RESET}"
+
                 sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-                
                 r_start=$(get_ms)
-                dd if=./testfile of=/dev/null bs=1M 2>&1 | tail -n 1
+                spin_run "Running read test ($test_name)" dd if=./testfile of=/dev/null bs=1M
                 r_end=$(get_ms)
-                
-                # --- UI Reporting (The SSL Style) ---
-                printf "\n%b%s Results:%b\n\n" "${CYAN}" "$test_name" "${RESET}"
-                printf "     %-14s  %-15s  %-16s\n" "TYPE" "SPEED" "% Δ BERYL 7"
-                printf "──────────────   ──────────────   ────────────────────\n"
-                
-                # Use awk to process both results for precision and delta alignment
-                awk -v ws="$w_start" -v we="$w_end" -v rs="$r_start" -v re="$r_end" \
-                    -v sz="$test_size" -v bw="$BASE_W" -v br="$BASE_R" \
-                    -v r="$RED" -v g="$GREEN" -v y="$YELLOW" -v res="$RESET" '
-                BEGIN {
-                    # Write Math
-                    w_ms = we - ws; if(w_ms <= 0) w_ms = 1;
-                    w_spd = (sz * 1000) / w_ms;
-                    w_diff = ((w_spd - bw) / bw) * 100;
-
-                    # Read Math
-                    r_ms = re - rs; if(r_ms <= 0) r_ms = 1;
-                    r_spd = (sz * 1000) / r_ms;
-                    r_diff = ((r_spd - br) / br) * 100;
-
-                    # Output Rows
-                    printf "Write (Sync)     %-16s %s%+.1f%%%s (%s MB/s)\n", sprintf("%.2f MB/s", w_spd), (w_diff>=0?g:r), w_diff, res, bw;
-                    printf "Read (Cached)    %-16s %s%+.1f%%%s (%s MB/s)\n", sprintf("%.2f MB/s", r_spd), (r_diff>=0?g:r), r_diff, res, br;
-                }'
-
                 rm -f ./testfile
+
+                w_ms=$((w_end - w_start)); [ "$w_ms" -le 0 ] && w_ms=1
+                r_ms=$((r_end - r_start)); [ "$r_ms" -le 0 ] && r_ms=1
+                write_speed=$(awk -v sz="$test_size" -v ms="$w_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
+                read_speed=$(awk -v sz="$test_size" -v ms="$r_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
+
+                # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
+                # device by appending one line: id|label|cpu|write_mbs|read_mbs
+                bench_ref='mt3600be|Beryl 7|MT7987a|124.70|11.00
+be3600|Slate 7|IPQ5332|75.72|51.50'
+
+                my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
+                [ -z "$my_id" ] && my_id="thisdevice"
+                my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
+                my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
+                [ -z "$my_label" ] && my_label="$my_id"
+                [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
+
+                bench_data="/tmp/.glnet-bench.$$"
+                {
+                    printf '%s|%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" "$write_speed" "$read_speed"
+                    printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=5 && $1!=id'
+                } > "$bench_data"
+
+                bench_render_disk "$bench_data" "$my_id"
+                printf "\n %bWrite is the reliable cross-device metric. Read may reflect the storage%b\n" "$GREY" "$RESET"
+                printf " %bcontroller's own onboard cache (notably on eMMC), which OS cache-drop can't%b\n" "$GREY" "$RESET"
+                printf " %breach - treat Read as indicative, not absolute. Test size scales with free%b\n" "$GREY" "$RESET"
+                printf " %bdisk space, so it can differ between devices.%b\n" "$GREY" "$RESET"
+                rm -f "$bench_data"
+
                 printf "\n"
                 print_success "Disk benchmark completed"
                 press_any_key
@@ -4799,10 +5907,6 @@ EOF
             4)
                 clear
                 print_centered_header "Memory I/O Benchmark"
-                
-                # --- Beryl 7 (MT7981) Memory Baseline (MB/s) ---
-                # Based on internal DDR bandwidth tests
-                BASE_MEM=4351.61
 
                 if [ -f /proc/meminfo ]; then
                     total_mem=$(awk '/MemTotal/ {
@@ -4812,7 +5916,7 @@ EOF
                         print rounded
                     }' /proc/meminfo)
                 fi
-                
+
                 total_mem=${total_mem:-512} # Default to 512MB if we can't read it
 
                 # Determine test size (100k blocks of 1M = 100GB of throughput)
@@ -4820,35 +5924,41 @@ EOF
                 if [ "$total_mem" -ge 960 ]; then test_size=100000; test_name="100GB"
                 elif [ "$total_mem" -ge 460 ]; then test_size=50000; test_name="50GB"
                 else test_size=25000; test_name="25GB"; fi
-                
+
                 printf "System RAM: %b%s MB%b\n" "${GREEN}" "$total_mem" "${RESET}"
-                printf "Test throughput: %b%s%b\n" "${GREEN}" "$test_name" "${RESET}"
-                
-                # Helper for ms timing
+                printf "Test throughput: %b%s%b\n\n" "${GREEN}" "$test_name" "${RESET}"
+
                 get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
 
-                printf "\n%b\n" "${YELLOW}⏳ Measuring Memory Controller Throughput...${RESET}"
-                
                 m_start=$(get_ms)
-                # We use a large block size (1M) to maximize throughput
-                dd if=/dev/zero of=/dev/null bs=1M count=$test_size 2>&1 | tail -n 1
+                spin_run "Measuring memory controller throughput" dd if=/dev/zero of=/dev/null bs=1M count=$test_size
                 m_end=$(get_ms)
-                
-                # --- UI Reporting (The Unified Style) ---
-                printf "\n%bMemory Performance Results:%b\n\n" "${CYAN}" "${RESET}"
-                printf "     %-14s  %-15s  %-16s\n" "TYPE" "SPEED" "% Δ BERYL 7"
-                printf "──────────────   ──────────────   ────────────────────\n"
-                
-                awk -v ms_s="$m_start" -v ms_e="$m_end" -v sz="$test_size" -v base="$BASE_MEM" \
-                    -v r="$RED" -v g="$GREEN" -v res="$RESET" '
-                BEGIN {
-                    total_ms = ms_e - ms_s; if(total_ms <= 0) total_ms = 1;
-                    speed = (sz * 1000) / total_ms;
-                    diff = ((speed - base) / base) * 100;
 
-                    printf "Read / Write     %-16s %s%+.1f%%%s (%s MB/s)\n", 
-                        sprintf("%.2f MB/s", speed), (diff>=0?g:r), diff, res, base;
-                }'
+                m_ms=$((m_end - m_start)); [ "$m_ms" -le 0 ] && m_ms=1
+                mem_speed=$(awk -v sz="$test_size" -v ms="$m_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
+
+                # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
+                # device by appending one line: id|label|cpu|mem_mbs
+                bench_ref='mt3600be|Beryl 7|MT7987a|4361.12
+be3600|Slate 7|IPQ5332|3006.13'
+
+                my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
+                [ -z "$my_id" ] && my_id="thisdevice"
+                my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
+                my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
+                [ -z "$my_label" ] && my_label="$my_id"
+                [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
+
+                bench_data="/tmp/.glnet-bench.$$"
+                {
+                    printf '%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" "$mem_speed"
+                    printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=4 && $1!=id'
+                } > "$bench_data"
+
+                bench_render_mem "$bench_data" "$my_id"
+                printf "\n %bMeasures raw memcpy-style throughput via dd, not a full memory-latency%b\n" "$GREY" "$RESET"
+                printf " %bbenchmark; test size scales with device RAM to avoid cache saturation.%b\n" "$GREY" "$RESET"
+                rm -f "$bench_data"
 
                 printf "\n"
                 print_success "Memory benchmark completed"
@@ -4858,7 +5968,8 @@ EOF
                 clear
                 print_centered_header "DNS Benchmark"
 
-                print_info "Starting Comprehensive DNS Benchmark...\n"
+                print_info "Starting Comprehensive DNS Benchmark..."
+                printf "\n"
                 
                 # Pre-check: Can we resolve anything at all?
                 if ! nslookup google.com >/dev/null 2>&1; then
@@ -4871,15 +5982,16 @@ EOF
                 is_proxied=0
                 if nslookup "detect${RANDOM}.com" 1.2.3.4 >/dev/null 2>&1; then
                     is_proxied=1
-                    print_warning "DNS Interception Active: Traffic is being redirected locally.\n"
+                    print_warning "DNS Interception Active: Traffic is being redirected locally."
+                    printf "\n"
                 fi
                 
                 # Servers to test
                 SERVERS="127.0.0.1 1.1.1.1 8.8.8.8 9.9.9.9"
                 SAMPLES=20  # Number of tests per server
                 
-                printf "     %-19s %-8s %-10s %-8s\n" "DNS Server" "Min" "Avg" "Max"
-                printf "─────────────────────  ───────  ───────  ───────────\n"
+                printf " %-22s %8s %8s %8s\n" "DNS Server" "Min" "Avg" "Max"
+                printf " ────────────────────────────────────────────────────\n"
 
                 for server in $SERVERS; do
                     case $server in
@@ -4922,7 +6034,7 @@ EOF
                         COLOR=$GREEN
                     fi
                         
-                    printf "%-22s %b%-8s %-8s %-8s%b ms\n" "$label" "$COLOR" "$min" "$avg" "$max" "$RESET"
+                    printf " %-22s %b%8s %8s %8s%b ms\n" "$label" "$COLOR" "$min" "$avg" "$max" "$RESET"
                 done
                 
                 printf "\n"
@@ -4935,12 +6047,12 @@ EOF
                 install_ookla_speedtest
                 
                 printf "\n%b\n" "${YELLOW}⏳ Running Ookla Speedtest...${RESET}"
-                printf "──────────────────────────────────────────────────────────────────────\n"
+                printf "──────────────────────────────────────────────────────────────────────────────────────────\n"
 
                 speedtest -a --accept-license --accept-gdpr 2>/dev/null
                 
-                printf "\n──────────────────────────────────────────────────────────────────────\n"
-                print_success "Ookla Speedtest completed"         
+                printf "\n──────────────────────────────────────────────────────────────────────────────────────────\n"
+                print_success "Ookla Speedtest completed"
                 press_any_key
                 ;;
             7)  manage_librespeed ;;
@@ -4950,9 +6062,7 @@ EOF
                 print_centered_header "iperf3 Network Speed Test Server"
                 
                 if ! command -v iperf3 >/dev/null 2>&1; then
-                    print_warning "iperf3 not found. Installing...\n"
-                    check_opkg_updated
-                    opkg install iperf3 >/dev/null 2>&1
+                    install_package iperf3
                 fi
                 
                 printf "%b\n\n" "${YELLOW}⏳ Starting iperf3 Server on port 5201...${RESET}"
@@ -4980,21 +6090,43 @@ EOF
 # -----------------------------
 # UCI Configuration Viewer
 # -----------------------------
+show_uci_help() {
+    clear
+    print_centered_header "System Configuration Viewer - Help"
+
+    cat << 'HELPEOF'
+What is this?
+─────────────
+A READ-ONLY viewer for the router's UCI configuration. Choosing a category
+prints its current settings so you can inspect them — nothing is changed,
+saved or committed from this screen.
+
+Getting around:
+• Type the number shown beside a category and press Enter to view it.
+• [0] returns to the Main menu.
+• [?] shows this help.
+HELPEOF
+
+    press_any_key
+}
+
 view_uci_config() {
     while true; do
         clear
         print_centered_header "System Configuration Viewer"
-        printf "1️⃣  Wireless Networks\n"
-        printf "2️⃣  Network Configuration\n"
-        printf "3️⃣  VPN Configuration\n"
-        printf "4️⃣  System Settings\n"
-        printf "5️⃣  Cloud Services\n"
-        printf "0️⃣  Main menu\n"
-        printf "\nChoose [1-5/0]: "
+        printf "%s  Wireless Networks\n" "$N1"
+        printf "%s  Network Configuration\n" "$N2"
+        printf "%s  VPN Configuration\n" "$N3"
+        printf "%s  System Settings\n" "$N4"
+        printf "%s  Cloud Services\n" "$N5"
+        printf "%s  Main menu\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-5/0/?]: "
         read -r config_choice
         printf "\n"
         
         case $config_choice in
+            \?|h|H|❓) show_uci_help ;;
             1)
                 clear
                 print_centered_header "Wireless Networks"
@@ -5265,7 +6397,6 @@ view_uci_config() {
                     printf "  (No mptun0 interface or no IP assigned)\n"
                 fi
                 
-                printf "\n"
                 press_any_key
                 ;;
             0)
@@ -5286,12 +6417,14 @@ install_openspeedtest() {
 
     # Check if we need to download (file missing OR invalid header)
     if [ ! -f "$script_name" ] || ! grep -q "$expected_header" "$script_name"; then
-        print_info "Downloading latest OpenSpeedTest installer..."
-        
-        if wget -q -O "$script_name" "$script_url" && [ -s "$script_name" ]; then
+        _ost_fetch() { wget -q -O "$script_name" "$script_url" && [ -s "$script_name" ]; }
+
+        if spin_run "Downloading OpenSpeedTest installer" _ost_fetch; then
+            rm -f "$SPIN_LOG" 2>/dev/null
             chmod +x "$script_name"
             print_success "Download successful."
         else
+            rm -f "$SPIN_LOG" 2>/dev/null
             print_error "Failed to download installer. Please check your connection."
             rm -f "$script_name"
             press_any_key
@@ -5300,7 +6433,8 @@ install_openspeedtest() {
     fi
 
     # Execute the script
-    print_info "Launching installer...\n"
+    print_info "Launching installer..."
+    printf "\n"
     sleep 2
     
     # Check for execution bit just in case
@@ -5319,10 +6453,11 @@ install_openspeedtest() {
 }
 
 # -----------------------------
-# Check for updates on start
+# Startup
 # -----------------------------
-command -v clear >/dev/null 2>&1 && clear
-printf "%b\n" "$SPLASH"
+# Splash + terminal detection already ran at load time (see detect_output_mode).
+check_install_prompt "$@"
+printf "\n"
 check_self_update "$@"
 
 # -----------------------------
@@ -5342,7 +6477,7 @@ if [ ! -f "$AGH_INIT" ]; then
         if [ ! -f "$AGH_INIT" ]; then
             AGH_DISABLED=1
             printf "\n"
-            print_warning "Recovery failed or cancelled. AdGuardHome features will be disabled.\n"
+            print_warning "Recovery failed or cancelled. AdGuardHome features will be disabled."
             press_any_key
         fi
     fi
@@ -5352,29 +6487,55 @@ fi
 # -----------------------------
 # Main Menu
 # -----------------------------
+show_main_help() {
+    clear
+    print_centered_header "GL.iNet Toolkit - Main Menu Help"
+
+    cat << 'HELPEOF'
+What is this?
+─────────────
+The top-level menu of the GL.iNet router toolkit. Each entry opens a dedicated
+area of the toolkit:
+
+• Hardware Information      – read-only system, CPU, memory and thermal details
+• AdGuardHome Control Center – DNS filtering, backups and service control
+• System Tweaks             – hardware, network, package and toolkit settings
+• System Benchmarks         – CPU, memory, disk and network speed tests
+• System Configuration      – read-only view of the router's UCI config
+
+Getting around (the same keys work on every screen):
+• Type the number shown beside an item and press Enter to open it.
+• [0] leaves the current screen — here it exits the toolkit; on inner screens
+  it goes Back, or returns to the Main menu.
+• [?] shows the help for whichever screen you are on.
+HELPEOF
+
+    press_any_key
+}
+
 show_menu() {
     while true; do
         clear
         printf "%b\n" "$SPLASH"
         printf "%b\n" "${CYAN}Please select an option:${RESET}\n"
-        printf "1️⃣  Show Hardware Information\n"
-        printf "2️⃣  AdGuardHome Control Center\n"
-        printf "3️⃣  System Tweaks\n"
-        printf "4️⃣  System Benchmarks\n"
-        printf "5️⃣  View System Configuration (UCI)\n"
-        printf "6️⃣  Check for Update\n"
-        printf "0️⃣  Exit\n"
-        printf "\nChoose [1-6/0]: "
+        printf "%s  Show Hardware Information\n" "$N1"
+        printf "%s  AdGuardHome Control Center\n" "$N2"
+        printf "%s  System Tweaks\n" "$N3"
+        printf "%s  System Benchmarks\n" "$N4"
+        printf "%s  View System Configuration (UCI)\n" "$N5"
+        printf "%s  Exit\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-5/0/?]: "
         read opt
         
         case $opt in
+            \?|h|H|❓) show_main_help ;;
             1) show_hardware_info ;;
             2) [ $AGH_DISABLED != 1 ] && agh_control_center || { print_error "AGH not found. Feature disabled."; sleep 2; } ;;
             3) system_tweaks ;;
             4) benchmark_system ;;
             5) view_uci_config ;;
-            6) check_self_update "$@"; press_any_key ;;
-            0) clear; printf "\n"; print_success "Thanks for using GL.iNet Toolkit!\n"; exit 0 ;;
+            0) clear; printf "\n"; print_success "Thanks for using GL.iNet Toolkit!"; printf "\n"; exit 0 ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done

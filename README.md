@@ -1,7 +1,7 @@
 # GL.iNet Utilities Script for OpenWrt Routers
 
 ```
-   _____ _          _ _   _      _   
+   _____ _          _ _    _      _   
   / ____| |        (_) \\ | |    | |  
  | |  __| |  ______ _|  \\| | ___| |_ 
  | | |_ | | |______| | . \` |/ _ \\ __|
@@ -19,7 +19,7 @@
 ## Features
 
 - 🖥️ **Deep Hardware Insights**
-  - **Real-time Monitoring:** Total visibility into CPU load, RAM utilization, storage, uptime, temperatures, and fan speeds.
+  - **Real-time Monitoring:** Total visibility into CPU load/frequency, a full RAM breakdown (free/used/available/cache), storage, uptime, temperatures, and fan speeds — with one-key masking of MAC/serial/device IDs for safe screen-sharing.
   - **Network Topology:** Paged navigation for network interfaces and wireless radio details (Link speeds, MIMO, Channel bandwidth).
   - **VPN Crypto Audit:** Instantly verify if your hardware acceleration (AES-CE, NEON) is active at the kernel level for optimized OpenVPN and WireGuard performance.
 - 🛠️ **AdGuardHome Control Center**
@@ -27,13 +27,14 @@
   - **Industrial Self-Healing:** Fail-safe logic that pulls pristine binaries or init scripts from /rom if your current installation becomes corrupted.
   - **Surgical Backups:** Precision tracking of configurations, binaries, and scripts with automated timestamping and integrity checks that persist through firmware upgrades.
 - ⚙️ **System Tweaks**
-  - **Zram Tuning:** Essential for low-RAM devices (e.g., Beryl 7/MT3600). Easily install and tune compressed RAM swap to reduce OOM (Out-of-Memory) crashes.
+  - **Zram Tuning:** Essential for low-RAM devices (e.g., Beryl 7/MT3600BE). Easily install and tune compressed RAM swap to reduce OOM (Out-of-Memory) crashes.
   - **Guest Network Limiter:** Global speed control for the entire guest subnet and the ability to toggle guest access to the router’s local IP.
   - **Advanced Fan Control:** Granular management of Min/Max thresholds, "Fan-on" triggers, and thermal warnings with direct UI integration.
   - **Web-UI Terminal:** Embeds a fully functional Linux terminal directly into the GL.iNet Admin Panel. Adds a `>_` icon to the navigation bar that opens a draggable, resizable, minimizable terminal modal powered by ttyd. Supports both HTTP and HTTPS modes.
   - **DevOps Tools:** Automated SSH Key installer and a Package Manager to persist essential CLI tools across sysupgrades.
+  - **Toolkit Management:** Install the toolkit as a system command — copies it to `/usr/sbin/glinet_utils` so you can launch it from any directory by just typing `glinet_utils`, with optional `sysupgrade.conf` persistence so it (and its self-updates) survive firmware upgrades.
 - 📊 **Performance Benchmarks**
-  - **Hardware Stress Testing:** Real-world testing of CPU cycles, OpenSSL throughput, raw Disk/Memory I/O, and DNS latency compared to a Beryl G7 baseline.
+  - **Cross-Device Leaderboards:** A VPN & Crypto benchmark (WireGuard/ChaCha20, OpenVPN/AES-GCM, and RSA handshake), plus CPU thermal stress and raw Disk/Memory I/O — each ranked against saved reference routers instead of a single baseline — alongside DNS latency.
   - **Network Probing:** Integrated support for Ookla Speedtest, LibreSpeed, and OpenSpeedTest server environments.
 - 📋 **Secure UCI Viewer:** Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
 - 🔄 **Native Self-Updater:** Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
@@ -63,6 +64,8 @@ wget -O glinet_utils.sh https://raw.githubusercontent.com/phantasm22/GL-iNet_uti
 ./glinet_utils.sh
 ```
 
+> 💡 Once it's running, open **System Tweaks → Toolkit Management** to install it as a system command — it copies to `/usr/sbin/glinet_utils` so you can launch it from any directory by just typing `glinet_utils`, and can persist across firmware upgrades.
+
 ---
 
 ## 📸 Screenshots / Usage
@@ -78,8 +81,8 @@ Main Menu
 3️⃣  System Tweaks
 4️⃣  System Benchmarks
 5️⃣  View System Configuration (UCI)
-6️⃣  Check for Update
 0️⃣  Exit
+❓ Help
 
 
 ```
@@ -87,12 +90,13 @@ Main Menu
 AdGuardHome Control Center
 
 ```
-1️⃣  Manage Allow/Blocklists
-2️⃣  Setup, Access & UI Updates
-3️⃣  Backup & Recovery Suite
-4️⃣  Service, Logs & Cache Purge
+1️⃣  Start AdGuardHome            (Restart / Stop when already running)
+2️⃣  Manage Allow/Blocklists
+3️⃣  Setup, Access & UI Updates
+4️⃣  Backup & Recovery Suite
+5️⃣  Logs & Maintenance
 🆑 Reset to Factory Settings (Start Over)
-0️⃣  Back to Main Menu
+0️⃣  Main menu
 ❓ Help
 ```
 
@@ -105,6 +109,7 @@ System Tweaks
 4️⃣  Web-UI Terminal Interface
 5️⃣  Package and Persistence Manager
 6️⃣  SSH Key Management
+7️⃣  Toolkit Management
 0️⃣  Main menu
 ❓ Help
 ```
@@ -113,7 +118,7 @@ System Benchmarks
 
 ```
 1️⃣  CPU Thermal Stress Test
-2️⃣  CPU Benchmark (OpenSSL)
+2️⃣  VPN & Crypto Benchmark
 3️⃣  Disk I/O Benchmark
 4️⃣  Memory I/O Benchmark
 5️⃣  DNS Latency Benchmark
@@ -136,6 +141,7 @@ System Configuration Viewer
 4️⃣  System Settings
 5️⃣  Cloud Services
 0️⃣  Main menu
+❓ Help
 ```
 
 
@@ -156,7 +162,7 @@ Most sections include built-in help text and confirmation prompts for safety.
 
 ## ⚙️ Updating the Script
 
-The toolkit includes a built-in update checker (option 6 or automatic on start).
+The toolkit includes a built-in update checker (automatic on start, or via System Tweaks → Toolkit Management).
 
 To force an update manually:
 
@@ -185,6 +191,10 @@ rm -f /etc/config/ttyd /etc/ttyd.crt /etc/ttyd.key
 
 # Zram / stress tools
 opkg remove zram-swap stress
+
+# System-command install (or remove it via System Tweaks → Toolkit Management)
+rm -f /usr/sbin/glinet_utils
+sed -i '\|/usr/sbin/glinet_utils|d' /etc/sysupgrade.conf
 ```
 
 ---

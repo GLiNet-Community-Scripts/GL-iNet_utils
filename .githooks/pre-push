@@ -1,0 +1,44 @@
+#!/bin/sh
+# pre-push hook: refuse to push a change to glinet_utils.sh unless its
+# "# Version:" line was bumped. The self-updater compares that value, so a
+# code change without a version bump means no installed copy ever updates.
+#
+# Enable once per clone:   git config core.hooksPath .githooks
+# Intentional override:    git push --no-verify
+
+is_zero() { case "$1" in *[!0]*) return 1 ;; *) return 0 ;; esac; }
+
+status=0
+while read -r local_ref local_sha remote_ref remote_sha; do
+    is_zero "$local_sha"  && continue                       # deleting a ref
+    is_zero "$remote_sha" && continue                       # new ref on remote -> nothing to compare against
+    git cat-file -e "$remote_sha" 2>/dev/null || continue   # remote commit not present locally -> can't compare
+    git diff --quiet "$remote_sha" "$local_sha" -- glinet_utils.sh 2>/dev/null && continue  # script unchanged -> ok
+    old=$(git show "$remote_sha:glinet_utils.sh" 2>/dev/null | grep -m1 '^# Version:')
+    new=$(git show "$local_sha:glinet_utils.sh"  2>/dev/null | grep -m1 '^# Version:')
+    if [ "$old" = "$new" ]; then
+        {
+            echo "──────────────────────────────────────────────────────────────────────"
+            echo " PUSH BLOCKED — glinet_utils.sh changed but '# Version:' was not bumped."
+            echo "   still: ${new:-<none>}"
+            echo "   Bump the '# Version:' line (YYYY-MM-DD[_HH:MM]) and re-push."
+            echo "   Intentional override:  git push --no-verify"
+            echo "──────────────────────────────────────────────────────────────────────"
+        } >&2
+        status=1
+    else
+        # version WAS bumped -> require a matching CHANGELOG.md entry
+        new_ver=$(printf '%s\n' "$new" | awk '{print $3}')
+        if ! git show "$local_sha:CHANGELOG.md" 2>/dev/null | grep -qE "^## ${new_ver}([[:space:]]|$)"; then
+            {
+                echo "──────────────────────────────────────────────────────────────────────"
+                echo " PUSH BLOCKED — CHANGELOG.md has no '## ${new_ver}' entry."
+                echo "   Add a '## ${new_ver}' section describing the changes, then re-push."
+                echo "   Intentional override:  git push --no-verify"
+                echo "──────────────────────────────────────────────────────────────────────"
+            } >&2
+            status=1
+        fi
+    fi
+done
+exit $status

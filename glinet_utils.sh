@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-09
+# Version: 2026-07-10
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -245,6 +245,7 @@ case "$0" in
 esac
 [ -z "$SCRIPT_PATH" ] && SCRIPT_PATH="$(pwd)/$0"
 INSTALL_PROMPTED=0    # Set to 1 after user responds to install prompt; reset by each new version
+STARTUP_NOTICE=0      # Set by the install-skip so the update-check spinner runs 2s longer (readable)
 INSTALL_PATH="/usr/sbin/glinet_utils"
 OUTPUT_PREF="auto"    # "auto"|"full"|"compat" — saved in script; "auto" = detect each run
 OUTPUT_MODE="full"    # Runtime: "full"|"compat"; set by detect_output_mode
@@ -443,6 +444,7 @@ terminal_setup() {
 terminal_restore() {
     [ -n "$_TERM_RESTORED" ] && return              # idempotent - run once
     _TERM_RESTORED=1
+    stty sane 2>/dev/null </dev/tty                 # restore line discipline: single-char reads (or a Ctrl-C mid-read) can leave the tty raw
     printf '\033[?25h'                              # ensure cursor visible
     printf '\033]110\007\033]111\007'              # reset fg/bg to profile defaults
     [ -n "$_TERM_ORIG_SIZE" ] && printf '\033[8;%st' "$_TERM_ORIG_SIZE"
@@ -477,6 +479,7 @@ case "$0" in
         mv -f "$0" "$ORIGINAL" && chmod +x "$ORIGINAL"
         printf "%s Update applied. Restarting...\n" "$_S_OK"
         sleep 3
+        stty sane 2>/dev/null </dev/tty
         exec "$ORIGINAL" "$@"
         ;;
 esac
@@ -559,142 +562,200 @@ get_password() {
 # -----------------------------
 # Changelog viewer
 # -----------------------------
-# show_changelog MODE [LOCAL_VERSION]
-#   MODE=update -> entries newer than LOCAL_VERSION, oldest-first; the final page
-#                  ends on the "Update now?" prompt and sets
-#                  CHANGELOG_UPDATE_ANSWER (consumed by check_self_update).
-#   MODE=menu   -> the full history, newest-first; the final page ends on "Back".
-# Sequential scroller: forward paging, with the prompt/back on the final page.
-# Page height comes from `stty size`, or a safe 22-line default when stty can't
-# report one (e.g. firmware without coreutils-stty). Returns 1 if the changelog
-# can't be fetched or has nothing to show, so the caller can fall back.
+# show_changelog [ARGS...]
+#   Fetches CHANGELOG.md and renders it newest-first in the house pager. When the
+#   running version is behind the newest entry, a grey "your version" rule marks
+#   the boundary between new-to-you entries (above) and already-installed ones
+#   (below), and a [U] Update key appears in the footer -> apply_update, which
+#   re-downloads and restarts. One render path for both the startup prompt and
+#   the Toolkit Management menu; $CL_EXIT_LABEL sets the [0] label ("Skip" from
+#   startup, "Back" from the menu). Page height comes from `stty size`, or a
+#   safe 22-line default when stty can't report one. ARGS forward to apply_update
+#   for the exec-on-restart. Returns 1 if the changelog can't be fetched.
 show_changelog() {
-    local _cl_mode="$1" _cl_local="$2"
     local _cl_file="/tmp/.gl-changelog.$$" _cl_rn="/tmp/.gl-cl-render.$$"
-    local _cl_total _cl_rows _cl_plines _cl_pages _cl_title
-    local _cl_start _cl_end _cl_page _cl_key _cl_skip
-    CHANGELOG_UPDATE_ANSWER="N"
+    local _local _latest _behind _exitlbl
+    local _total _rows _plines _pages _start _end _page _key _i _starts _nstart
+
+    _local="$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r')"
+    [ -z "$_local" ] && _local="0000-00-00"
+    _exitlbl="${CL_EXIT_LABEL:-Back}"
 
     if ! wget -q -O "$_cl_file" "$CHANGELOG_URL" 2>/dev/null || [ ! -s "$_cl_file" ]; then
         rm -f "$_cl_file"
         return 1
     fi
 
-    # Each entry is a "## <version>" header plus the lines beneath it. Emit whole
-    # entries (never reordering the lines within one) in this mode's order.
-    awk -v local="$_cl_local" -v mode="$_cl_mode" '
-        /^## / { n++; hdr[n]=$0; ver[n]=$2; body[n]=""; next }
-        n     { body[n] = body[n] $0 "\n" }
-        END {
-            if (mode == "menu")
-                for (i=1; i<=n; i++)  { print hdr[i]; printf "%s", body[i] }
-            else
-                for (i=n; i>=1; i--)
-                    if ((ver[i] "") > (local "")) { print hdr[i]; printf "%s", body[i] }
-        }' "$_cl_file" > "$_cl_rn"
+    # Newest "## <version>" header is the latest release.
+    _latest="$(grep -m1 '^## ' "$_cl_file" | awk '{print $2}')"
+    if [ -n "$_latest" ] && [ "$_latest" \> "$_local" ]; then _behind=1; else _behind=0; fi
+
+    # Render newest-first (drop the intro before the first header). When behind,
+    # emit a grey boundary rule just before the first entry that is <= your
+    # version, so everything above the rule is new to you.
+    awk -v local="$_local" -v behind="$_behind" -v g="$GREY" -v r="$RESET" '
+        /^## / {
+            seen = 1
+            if (behind && !marked && ($2 "") <= (local "")) {
+                printf " %s─────────────────────  your version: %s  ─────────────────────%s\n\n", g, local, r
+                marked = 1
+            }
+            print; next
+        }
+        seen { print }
+    ' "$_cl_file" > "$_cl_rn"
     rm -f "$_cl_file"
 
-    _cl_total=$(wc -l < "$_cl_rn" 2>/dev/null)
-    case "$_cl_total" in ''|*[!0-9]*) _cl_total=0 ;; esac
-    if [ "$_cl_total" -eq 0 ]; then
+    _total=$(wc -l < "$_cl_rn" 2>/dev/null)
+    case "$_total" in ''|*[!0-9]*) _total=0 ;; esac
+    if [ "$_total" -eq 0 ]; then
         rm -f "$_cl_rn"
         return 1
     fi
 
     # Changelog lines per screen: real height minus chrome, else a safe default.
-    _cl_rows=$(stty size 2>/dev/null | awk '{print $1}')
-    case "$_cl_rows" in
-        ''|*[!0-9]*) _cl_plines=22 ;;
-        *) _cl_plines=$((_cl_rows - 8)); [ "$_cl_plines" -lt 12 ] && _cl_plines=12 ;;
+    _rows=$(stty size 2>/dev/null | awk '{print $1}')
+    case "$_rows" in
+        ''|*[!0-9]*) _plines=22 ;;
+        *) _plines=$((_rows - 8)); [ "$_plines" -lt 12 ] && _plines=12 ;;
     esac
-    _cl_pages=$(( (_cl_total + _cl_plines - 1) / _cl_plines ))
-    [ "$_cl_mode" = "menu" ] && _cl_title="Change Log" || _cl_title="What's New"
 
-    _cl_start=1
-    _cl_skip=0
-    while [ "$_cl_start" -le "$_cl_total" ]; do
-        _cl_end=$((_cl_start + _cl_plines - 1))
+    # Page-start line numbers, snapped so a page never breaks mid-bullet: fill up
+    # to _plines lines, then back the cut up to the nearest header/bullet/rule so a
+    # wrapped bullet's continuation lines stay with it. Hard-cuts only if a single
+    # unit is taller than one page.
+    _starts=$(awk -v plines="$_plines" '
+        { safe[NR] = ($0 ~ /^## / || $0 ~ /^- / || index($0, "your version:")) ? 1 : 0 }
+        END {
+            total = NR; s = 1; printf "%d", s
+            while (s + plines <= total) {
+                cut = s + plines
+                while (cut > s + 1 && !safe[cut]) cut--
+                if (cut <= s + 1) cut = s + plines
+                printf " %d", cut
+                s = cut
+            }
+        }' "$_cl_rn")
+    [ -z "$_starts" ] && _starts=1                  # defensive: never wedge navigation on empty awk output
+    _pages=$(echo "$_starts" | awk '{print NF}')
+    case "$_pages" in ''|*[!0-9]*|0) _pages=1 ;; esac
+
+    _page=1
+    while :; do
+        _start=$(echo "$_starts" | cut -d' ' -f"$_page")
+        _nstart=$(echo "$_starts" | cut -d' ' -f"$((_page + 1))")
+        if [ -n "$_nstart" ]; then _end=$((_nstart - 1)); else _end=$_total; fi
         clear
-        print_centered_header "$_cl_title"
+        print_centered_header "Change Log"
         printf "\n"
-        sed -n "${_cl_start},${_cl_end}p" "$_cl_rn"
+        sed -n "${_start},${_end}p" "$_cl_rn"
         printf " ──────────────────────────────────────────────────────────────────────────────\n"
-        [ "$_cl_end" -ge "$_cl_total" ] && break
-        _cl_page=$(( (_cl_start - 1) / _cl_plines + 1 ))
-        if [ "$_cl_mode" = "update" ]; then
-            printf " Page %d of %d   [N] More   [0] Skip to update  " "$_cl_page" "$_cl_pages"
+
+        # House pager footer: [P] Previous  <chips|Page X/Y>  [N] Next  [U]?  [0] label.
+        # Numbered chips up to 9 pages (read_single_char can't take a two-digit
+        # jump); a "Page X of Y" counter beyond that.
+        printf " [P] Previous   "
+        if [ "$_pages" -le 9 ]; then
+            _i=1
+            while [ "$_i" -le "$_pages" ]; do
+                if [ "$_i" -eq "$_page" ]; then printf "%b[%d]%b " "$BOLD" "$_i" "$RESET"
+                else printf "%b[%d]%b " "$GREY" "$_i" "$RESET"; fi
+                _i=$((_i + 1))
+            done
         else
-            printf " Page %d of %d   [N] More   [0] Back  " "$_cl_page" "$_cl_pages"
+            printf "%bPage %d of %d%b   " "$BOLD" "$_page" "$_pages" "$RESET"
         fi
-        _cl_key=$(read_single_char)
+        printf "  [N] Next   "
+        [ "$_behind" -eq 1 ] && printf "[U] Update   "
+        printf "[0] %s  " "$_exitlbl"
+
+        _key=$(read_single_char)
         printf "\n"
-        case "$_cl_key" in
-            0) _cl_skip=1; break ;;
-            *) _cl_start=$((_cl_end + 1)) ;;
+        case "$_key" in
+            p|P) [ "$_page" -gt 1 ]        && _page=$((_page - 1)) ;;
+            n|N) [ "$_page" -lt "$_pages" ] && _page=$((_page + 1)) ;;
+            u|U) if [ "$_behind" -eq 1 ]; then
+                     apply_update "$@"   # execs on success; returns here only on failure
+                     press_any_key
+                 fi ;;
+            0)   break ;;
+            [1-9]) if [ "$_pages" -le 9 ] && [ "$_key" -le "$_pages" ]; then
+                       _page="$_key"
+                   fi ;;
+            *)   : ;;
         esac
     done
-
-    if [ "$_cl_mode" = "update" ]; then
-        printf "\n A new version is available. Update now? [y/N]: "
-        read -r CHANGELOG_UPDATE_ANSWER
-        printf "\n"
-    elif [ "$_cl_skip" -eq 0 ]; then
-        printf " Press any key to return  "
-        read_single_char >/dev/null
-        printf "\n"
-    fi
 
     rm -f "$_cl_rn"
     return 0
 }
 
+# apply_update [ARGS...] : download the latest script, swap it in, and restart.
+# Used by the changelog viewer's [U]. Execs on success (never returns); returns
+# 1 on a download/write failure so the viewer can recover and let you retry.
+apply_update() {
+    if ! spin_run "Downloading update" wget -q -O "$TMP_NEW_SCRIPT" "$SCRIPT_URL"; then
+        rm -f "$SPIN_LOG" 2>/dev/null
+        print_warning "Download failed (network or GitHub issue)."
+        return 1
+    fi
+    rm -f "$SPIN_LOG" 2>/dev/null
+    print_action "Updating..."
+    if ! cp "$TMP_NEW_SCRIPT" "$SCRIPT_PATH.new" || ! chmod +x "$SCRIPT_PATH.new"; then
+        print_warning "Could not write ${SCRIPT_PATH}.new (permissions?)."
+        rm -f "$TMP_NEW_SCRIPT" 2>/dev/null
+        return 1
+    fi
+    print_success "Upgrade complete. Restarting..."
+    stty sane 2>/dev/null </dev/tty   # reset line discipline (a raw-mode keypress triggered us) so the restarted copy can read input
+    exec "$SCRIPT_PATH.new" "$@"
+}
+
 # -----------------------------
-# Self-update function
+# Self-update check (startup)
 # -----------------------------
+# Runs once at launch: fetches the remote version, records UPDATE_STATUS and
+# REMOTE_VERSION for the Toolkit Management STATUS block, and — only when a newer
+# release exists — offers to open the changelog viewer (where [U] applies it).
+# Silent when already current, so startup stays quiet unless there's news.
 check_self_update() {
+    local ans _rc
     LOCAL_VERSION="$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r')"
     [ -z "$LOCAL_VERSION" ] && LOCAL_VERSION="0000-00-00"
 
-    if ! spin_run "Checking for updates" wget -q -O "$TMP_NEW_SCRIPT" "$SCRIPT_URL"; then
+    # Fetch the remote copy to read its version. When a first-run install-skip
+    # notice is on screen (STARTUP_NOTICE), let the spinner run 2s longer so the
+    # message reads as productive activity instead of a dead pause. The sh -c
+    # wrapper preserves wget's real exit code across the padding sleep.
+    if [ "$STARTUP_NOTICE" = 1 ]; then
+        spin_run "Checking for updates" sh -c 'wget -q -O "$1" "$2"; rc=$?; sleep 2; exit $rc' sh "$TMP_NEW_SCRIPT" "$SCRIPT_URL"
+    else
+        spin_run "Checking for updates" wget -q -O "$TMP_NEW_SCRIPT" "$SCRIPT_URL"
+    fi
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
         rm -f "$SPIN_LOG" 2>/dev/null
-        print_warning "Unable to check for updates (network or GitHub issue)."
+        UPDATE_STATUS="unknown"
         return 1
     fi
     rm -f "$SPIN_LOG" 2>/dev/null
 
     REMOTE_VERSION="$(grep -m1 '^# Version:' "$TMP_NEW_SCRIPT" | awk '{print $3}' | tr -d '\r')"
     [ -z "$REMOTE_VERSION" ] && REMOTE_VERSION="0000-00-00"
-
-    printf "   Current version: %s\n" "$LOCAL_VERSION"
-    printf "   Latest version:  %s\n" "$REMOTE_VERSION"
+    rm -f "$TMP_NEW_SCRIPT" >/dev/null 2>&1
 
     if [ "$REMOTE_VERSION" \> "$LOCAL_VERSION" ]; then
-        # Show what's changed (entries newer than the local version) first, then
-        # decide. show_changelog collects the y/N; fall back to a plain prompt if
-        # the changelog can't be fetched.
-        if show_changelog update "$LOCAL_VERSION"; then
-            ans="$CHANGELOG_UPDATE_ANSWER"
-        else
-            printf "\nA new version is available. Update now? [y/N]: "
-            read -r ans
-            printf "\n"
-        fi
+        UPDATE_STATUS="available"
+        printf "\nA new version is available. View Change Log & Update? [Y/n]: "
+        read -r ans
+        printf "\n"
         case "$ans" in
-            y|Y)
-                print_action "Updating..."
-                cp "$TMP_NEW_SCRIPT" "$SCRIPT_PATH.new" && chmod +x "$SCRIPT_PATH.new"
-                print_success "Upgrade complete. Restarting..."
-                exec "$SCRIPT_PATH.new" "$@"
-                ;;
-            *)
-                print_info "Skipping update. Continuing with current version."
-                ;;
+            n|N) print_info "Skipping the change log and update — available in the Toolkit Management menu."; sleep 2 ;;
+            *)   CL_EXIT_LABEL="Skip"; show_changelog "$@"; CL_EXIT_LABEL="" ;;
         esac
     else
-        print_success "Already running the latest version."
+        UPDATE_STATUS="current"
     fi
-
-    rm -f "$TMP_NEW_SCRIPT" >/dev/null 2>&1
 }
 
 # -----------------------------
@@ -5102,11 +5163,12 @@ the file is preserved across upgrades.
 After a firmware upgrade, the preserved copy will check GitHub for
 updates on its first run and self-update if a newer version exists.
 
-Check for Updates
-─────────────────
-Manually triggers the same update check that runs at startup.
-Compares your installed version against the latest on GitHub and
-offers to update in place if a newer version is available.
+View Change Log & Update
+────────────────────────
+Browse the full change log, newest first. When you are behind, a
+line marks your installed version (everything above it is new to
+you) and [U] updates in place and restarts. The heading reads
+"View Change Log" when you are already up to date.
 
 Uninstall
 ─────────
@@ -5128,6 +5190,7 @@ check_install_prompt() {
         n|N)
             sed -i 's/^INSTALL_PROMPTED=0$/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
             print_info "Skipping. You can install later via System Tweaks > Toolkit Management."
+            STARTUP_NOTICE=1
             ;;
         *)
             do_install_to_sbin "$@"
@@ -5344,21 +5407,31 @@ manage_toolkit() {
             esac
         fi
 
+        local update_display update_label local_ver
+        local_ver="$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r')"
+        [ -z "$local_ver" ] && local_ver="unknown"
+        case "${UPDATE_STATUS:-unknown}" in
+            available) update_display="${YELLOW}${REMOTE_VERSION} available${RESET}"; update_label="View Change Log & Update" ;;
+            current)   update_display="${GREEN}Up to date${RESET}";                   update_label="View Change Log" ;;
+            *)         update_display="${GREY}Unknown (offline)${RESET}";              update_label="View Change Log" ;;
+        esac
+
         printf " %b\n" "${CYAN}STATUS${RESET}"
         printf "   Display mode: %b\n"   "$mode_display"
         printf "   Terminal:     %b\n"   "${GREEN}${TERM:-unknown}${RESET}"
         printf "   Installation: %b\n"   "$installed_status"
         printf "   Persistence:  %b\n"   "$persistence_status"
-        printf "   Running from: %b\n\n" "$running_from"
+        printf "   Running from: %b\n"   "$running_from"
+        printf "   Version:      %b\n"   "${GREEN}${local_ver}${RESET}"
+        printf "   Update:       %b\n\n" "$update_display"
 
         printf "%s  %s\n" "$N1" "$install_label"
         printf "%s  %s\n" "$N2" "$persist_label"
         printf "%s  Display Settings\n"          "$N3"
-        printf "%s  Check for Updates\n"         "$N4"
-        printf "%s  Display Change Log\n"        "$N5"
+        printf "%s  %s\n"                        "$N4" "$update_label"
         printf "%s  Back\n"                      "$N0"
         printf "%s Help\n"                       "$NQ"
-        printf "\nChoose [1-5/0/?]: "
+        printf "\nChoose [1-4/0/?]: "
         read -r tk_choice
         printf "\n"
 
@@ -5407,14 +5480,12 @@ manage_toolkit() {
                 ;;
             3) manage_display_settings ;;
             4)
-                check_self_update "$@"
-                press_any_key
-                ;;
-            5)
-                if ! show_changelog menu ""; then
+                CL_EXIT_LABEL="Back"
+                if ! show_changelog "$@"; then
                     print_warning "Unable to fetch the change log (network or GitHub issue)."
                     press_any_key
                 fi
+                CL_EXIT_LABEL=""
                 ;;
             \?|h|H|❓) show_toolkit_help ;;
             0) return ;;

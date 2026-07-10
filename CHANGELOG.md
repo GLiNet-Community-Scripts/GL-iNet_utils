@@ -4,6 +4,15 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-10
+- Change Log & Updates are now one screen: browse the full history in the house
+  pager and update in place with `[U]` — the separate "Check for Updates" item
+  is gone.
+- Toolkit Management STATUS now shows your running version and whether an update
+  is available.
+- The changelog viewer marks where your installed version sits, so everything
+  above the line is what's new to you.
+
 ## 2026-07-09
 - Benchmark leaderboards expanded — added Flint 2, Beryl AX, Brume 3, Flint 3,
   and Beryl (original) as reference devices.

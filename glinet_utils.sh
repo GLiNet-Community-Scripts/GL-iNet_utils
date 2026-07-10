@@ -2,7 +2,17 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-04
+# Version: 2026-07-09
+#
+# ── Versioning (bump the line above before every push to GitHub) ─────────────
+# The self-updater compares this value as a plain string (test's \> operator),
+# so incrementing it is exactly what tells installed copies a newer release
+# exists. Forget to bump it and nobody gets the update.
+# Format: YYYY-MM-DD  (e.g. 2026-07-04). For multiple releases on the same day as
+# the previous version, append _HH:MM in 24-hour time (e.g. 2026-07-04_14:30)
+# so each still sorts as newer. It MUST stay lexically sortable — a later
+# date/time has to string-compare greater than an earlier one.
+# ────────────────────────────────────────────────────────────────────────────
 #
 # This script provides system utilities for GL.iNet routers including:
 # - Hardware information display with pagination
@@ -226,6 +236,7 @@ AGH_DISABLED=0  # 0 = Available, 1 = Missing/Uninstalled
 SPIN_LOG="/tmp/.glnet-op.$$"   # scratch log captured from spin_run output
 opkg_updated=0
 SCRIPT_URL="https://raw.githubusercontent.com/phantasm22/GL-iNet_utils/refs/heads/main/glinet_utils.sh"
+CHANGELOG_URL="${SCRIPT_URL%glinet_utils.sh}CHANGELOG.md"
 TMP_NEW_SCRIPT="/tmp/glinet_utils_new.sh"
 case "$0" in
     /*)  SCRIPT_PATH="$0" ;;
@@ -255,20 +266,20 @@ _TERM_PROFILE="mac"   # Runtime: "mac"|"wt"|"ttyd"; set by detect_output_mode (f
 #       advance=2 → wt   (keycaps ✗, 1sp after ambig+VS symbols)
 #
 # The probe REQUIRES a real stty (ESC[6n raw read); busybox does not ship one.
-# ensure_stty installs coreutils-stty silently on first run. If it cannot be
-# installed (no network), the profile falls back to wt — the safest spacing.
+# ensure_stty installs coreutils-stty silently on first run. If a real
+# (coreutils) stty can't be obtained, output falls back to Compatible mode.
 #
 # NO_COLOR strips ANSI colors but does not change mode or symbols.
 # Two display modes: Full and Compatible.
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Ensure a real `stty` is available for the cursor-advance probe. busybox does
-# NOT ship stty, so on first run we install coreutils-stty silently (no prompt)
-# with a small spinner. Returns 0 if stty is usable afterwards, 1 if it could
-# not be installed (e.g. no network) — the caller then falls back to the
-# Windows Terminal profile, the safest default for spacing.
+# Ensure a real (coreutils) `stty` is available for the cursor-advance probe.
+# busybox's own stty applet can't drive the probe reliably, so we require the
+# coreutils build and install it silently (no prompt) with a small spinner on
+# first run. Returns 0 if a coreutils stty is present afterwards, 1 otherwise —
+# the caller then falls back to Compatible mode.
 ensure_stty() {
-    command -v stty >/dev/null 2>&1 && return 0
+    stty --version 2>&1 | grep -qi coreutils && return 0
 
     local log="/tmp/.stty-install.$$" pid spin='-\|/' c
     ( opkg update && opkg install coreutils-stty ) >"$log" 2>&1 &
@@ -282,7 +293,7 @@ ensure_stty() {
     wait "$pid"
     printf '\r\033[K' >/dev/tty                # erase the spinner line
     rm -f "$log"
-    command -v stty >/dev/null 2>&1
+    stty --version 2>&1 | grep -qi coreutils
 }
 
 # Cursor advance probe: prints sym at col 1, queries cursor via ESC[6n,
@@ -329,9 +340,9 @@ detect_output_mode() {
     fi
 
     # ── Step 3: Probe terminal sub-profile (full mode only) ──────────────────
-    # The probe needs a real stty (busybox lacks it). ensure_stty installs
-    # coreutils-stty on first run; if that fails (no network) we fall back to
-    # the Windows Terminal profile, the safest choice for spacing.
+    # The probe needs a real (coreutils) stty; busybox's applet can't drive it.
+    # ensure_stty installs coreutils-stty on first run; if one can't be obtained
+    # we fall back to Compatible mode (one consistent set), not a mixed profile.
     _TERM_PROFILE="mac"
     if [ "$OUTPUT_MODE" = "full" ]; then
         if ensure_stty; then
@@ -343,7 +354,7 @@ detect_output_mode() {
                 [ "$_ambig" = "2" ] && _TERM_PROFILE="wt"
             fi
         else
-            _TERM_PROFILE="wt"                  # no stty → safe fallback
+            OUTPUT_MODE="compat"               # can't probe without a real stty -> use the consistent Compatible set
         fi
     fi
 
@@ -396,12 +407,59 @@ detect_output_mode() {
         NQ="[?] "; NCL="[CL]"
     fi
 }
+
+# ── Terminal setup / restore ─────────────────────────────────────────────────
+# Best-effort, for the session only: widen the window to a usable size and set a
+# dark theme, then put everything back on exit. Terminals that don't support a
+# given sequence just ignore it (PuTTY ignores the OSC colors; non-xterm ignore
+# the resize), so this is safe everywhere.
+TERM_MIN_COLS=110
+TERM_MIN_ROWS=30
+_TERM_ORIG_SIZE=""    # "rows;cols" saved at setup; empty = nothing to restore
+_TERM_RESTORED=""
+
+terminal_setup() {
+    local _sz _r _c _nr _nc
+    [ "${GL_NO_TERM_SETUP+x}" ] && return          # power-user opt-out
+    [ -t 1 ] || return                              # only on a real terminal
+    [ -n "$TMUX" ] && return                         # not inside tmux
+    case "${TERM:-}" in screen*|tmux*) return ;; esac
+
+    printf '\033]11;#000000\007\033]10;#ffffff\007'  # best-effort dark theme (OSC 11/10)
+
+    # Grow only (never shrink). Needs a real stty to read the size so we can
+    # restore it on exit; skip just the resize if stty isn't available.
+    command -v stty >/dev/null 2>&1 || return
+    _sz=$(stty size 2>/dev/null </dev/tty); _r=${_sz% *}; _c=${_sz#* }
+    case "$_r" in ''|*[!0-9]*) return ;; esac
+    case "$_c" in ''|*[!0-9]*) return ;; esac
+    _TERM_ORIG_SIZE="${_r};${_c}"
+    _nr=$_r; _nc=$_c
+    [ "$_c" -lt "$TERM_MIN_COLS" ] && _nc=$TERM_MIN_COLS
+    [ "$_r" -lt "$TERM_MIN_ROWS" ] && _nr=$TERM_MIN_ROWS
+    { [ "$_nr" != "$_r" ] || [ "$_nc" != "$_c" ]; } && printf '\033[8;%s;%st' "$_nr" "$_nc"
+}
+
+terminal_restore() {
+    [ -n "$_TERM_RESTORED" ] && return              # idempotent - run once
+    _TERM_RESTORED=1
+    printf '\033[?25h'                              # ensure cursor visible
+    printf '\033]110\007\033]111\007'              # reset fg/bg to profile defaults
+    [ -n "$_TERM_ORIG_SIZE" ] && printf '\033[8;%st' "$_TERM_ORIG_SIZE"
+}
+
 # Show the splash first, then detect the terminal. On first run this installs
 # coreutils-stty, so the "Setting up terminal support..." spinner appears under
 # the splash (before the menu) rather than on a blank screen.
 command -v clear >/dev/null 2>&1 && clear
 printf "%b\n" "$SPLASH"
 detect_output_mode
+
+# Widen + dark-theme the terminal for this session; restore it all on exit.
+terminal_setup
+trap 'terminal_restore' EXIT
+trap 'terminal_restore; exit 130' INT
+trap 'terminal_restore; exit 143' TERM
 
 # -----------------------------
 # Cleanup any previous updates
@@ -410,6 +468,12 @@ case "$0" in
     *.new)
         ORIGINAL="${0%.new}"
         printf "%s Applying update...\n" "$_S_ACT"
+        # Carry the saved display preference into the new copy — an update swaps
+        # the whole script, which would otherwise reset OUTPUT_PREF to default.
+        old_pref=$(sed -n 's/^OUTPUT_PREF="\([^"]*\)".*/\1/p' "$ORIGINAL" 2>/dev/null)
+        case "$old_pref" in
+            full|compat) sed -i "s/^OUTPUT_PREF=\"[^\"]*\"/OUTPUT_PREF=\"$old_pref\"/" "$0" ;;
+        esac
         mv -f "$0" "$ORIGINAL" && chmod +x "$ORIGINAL"
         printf "%s Update applied. Restarting...\n" "$_S_OK"
         sleep 3
@@ -493,6 +557,98 @@ get_password() {
 }
 
 # -----------------------------
+# Changelog viewer
+# -----------------------------
+# show_changelog MODE [LOCAL_VERSION]
+#   MODE=update -> entries newer than LOCAL_VERSION, oldest-first; the final page
+#                  ends on the "Update now?" prompt and sets
+#                  CHANGELOG_UPDATE_ANSWER (consumed by check_self_update).
+#   MODE=menu   -> the full history, newest-first; the final page ends on "Back".
+# Sequential scroller: forward paging, with the prompt/back on the final page.
+# Page height comes from `stty size`, or a safe 22-line default when stty can't
+# report one (e.g. firmware without coreutils-stty). Returns 1 if the changelog
+# can't be fetched or has nothing to show, so the caller can fall back.
+show_changelog() {
+    local _cl_mode="$1" _cl_local="$2"
+    local _cl_file="/tmp/.gl-changelog.$$" _cl_rn="/tmp/.gl-cl-render.$$"
+    local _cl_total _cl_rows _cl_plines _cl_pages _cl_title
+    local _cl_start _cl_end _cl_page _cl_key _cl_skip
+    CHANGELOG_UPDATE_ANSWER="N"
+
+    if ! wget -q -O "$_cl_file" "$CHANGELOG_URL" 2>/dev/null || [ ! -s "$_cl_file" ]; then
+        rm -f "$_cl_file"
+        return 1
+    fi
+
+    # Each entry is a "## <version>" header plus the lines beneath it. Emit whole
+    # entries (never reordering the lines within one) in this mode's order.
+    awk -v local="$_cl_local" -v mode="$_cl_mode" '
+        /^## / { n++; hdr[n]=$0; ver[n]=$2; body[n]=""; next }
+        n     { body[n] = body[n] $0 "\n" }
+        END {
+            if (mode == "menu")
+                for (i=1; i<=n; i++)  { print hdr[i]; printf "%s", body[i] }
+            else
+                for (i=n; i>=1; i--)
+                    if ((ver[i] "") > (local "")) { print hdr[i]; printf "%s", body[i] }
+        }' "$_cl_file" > "$_cl_rn"
+    rm -f "$_cl_file"
+
+    _cl_total=$(wc -l < "$_cl_rn" 2>/dev/null)
+    case "$_cl_total" in ''|*[!0-9]*) _cl_total=0 ;; esac
+    if [ "$_cl_total" -eq 0 ]; then
+        rm -f "$_cl_rn"
+        return 1
+    fi
+
+    # Changelog lines per screen: real height minus chrome, else a safe default.
+    _cl_rows=$(stty size 2>/dev/null | awk '{print $1}')
+    case "$_cl_rows" in
+        ''|*[!0-9]*) _cl_plines=22 ;;
+        *) _cl_plines=$((_cl_rows - 8)); [ "$_cl_plines" -lt 12 ] && _cl_plines=12 ;;
+    esac
+    _cl_pages=$(( (_cl_total + _cl_plines - 1) / _cl_plines ))
+    [ "$_cl_mode" = "menu" ] && _cl_title="Change Log" || _cl_title="What's New"
+
+    _cl_start=1
+    _cl_skip=0
+    while [ "$_cl_start" -le "$_cl_total" ]; do
+        _cl_end=$((_cl_start + _cl_plines - 1))
+        clear
+        print_centered_header "$_cl_title"
+        printf "\n"
+        sed -n "${_cl_start},${_cl_end}p" "$_cl_rn"
+        printf " ──────────────────────────────────────────────────────────────────────────────\n"
+        [ "$_cl_end" -ge "$_cl_total" ] && break
+        _cl_page=$(( (_cl_start - 1) / _cl_plines + 1 ))
+        if [ "$_cl_mode" = "update" ]; then
+            printf " Page %d of %d   [N] More   [0] Skip to update  " "$_cl_page" "$_cl_pages"
+        else
+            printf " Page %d of %d   [N] More   [0] Back  " "$_cl_page" "$_cl_pages"
+        fi
+        _cl_key=$(read_single_char)
+        printf "\n"
+        case "$_cl_key" in
+            0) _cl_skip=1; break ;;
+            *) _cl_start=$((_cl_end + 1)) ;;
+        esac
+    done
+
+    if [ "$_cl_mode" = "update" ]; then
+        printf "\n A new version is available. Update now? [y/N]: "
+        read -r CHANGELOG_UPDATE_ANSWER
+        printf "\n"
+    elif [ "$_cl_skip" -eq 0 ]; then
+        printf " Press any key to return  "
+        read_single_char >/dev/null
+        printf "\n"
+    fi
+
+    rm -f "$_cl_rn"
+    return 0
+}
+
+# -----------------------------
 # Self-update function
 # -----------------------------
 check_self_update() {
@@ -513,9 +669,16 @@ check_self_update() {
     printf "   Latest version:  %s\n" "$REMOTE_VERSION"
 
     if [ "$REMOTE_VERSION" \> "$LOCAL_VERSION" ]; then
-        printf "\nA new version is available. Update now? [y/N]: "
-        read -r ans
-        printf "\n"
+        # Show what's changed (entries newer than the local version) first, then
+        # decide. show_changelog collects the y/N; fall back to a plain prompt if
+        # the changelog can't be fetched.
+        if show_changelog update "$LOCAL_VERSION"; then
+            ans="$CHANGELOG_UPDATE_ANSWER"
+        else
+            printf "\nA new version is available. Update now? [y/N]: "
+            read -r ans
+            printf "\n"
+        fi
         case "$ans" in
             y|Y)
                 print_action "Updating..."
@@ -5054,6 +5217,13 @@ manage_display_settings() {
         print_centered_header "Display Settings"
         printf " ──────────────────────────────────────────────────────────────────────────────\n"
 
+        local pref_display
+        case "$OUTPUT_PREF" in
+            full)   pref_display="${GREEN}Full${RESET}"                  ;;
+            compat) pref_display="${YELLOW}Compatible${RESET}"           ;;
+            *)      pref_display="${CYAN}Auto (detect each run)${RESET}" ;;
+        esac
+        printf "   Saved default: %b\n\n" "$pref_display"
         # Auto page needs to show what auto would currently resolve to.
         local detected_desc
         case "$OUTPUT_MODE" in
@@ -5185,9 +5355,10 @@ manage_toolkit() {
         printf "%s  %s\n" "$N2" "$persist_label"
         printf "%s  Display Settings\n"          "$N3"
         printf "%s  Check for Updates\n"         "$N4"
+        printf "%s  Display Change Log\n"        "$N5"
         printf "%s  Back\n"                      "$N0"
         printf "%s Help\n"                       "$NQ"
-        printf "\nChoose [1-4/0/?]: "
+        printf "\nChoose [1-5/0/?]: "
         read -r tk_choice
         printf "\n"
 
@@ -5238,6 +5409,12 @@ manage_toolkit() {
             4)
                 check_self_update "$@"
                 press_any_key
+                ;;
+            5)
+                if ! show_changelog menu ""; then
+                    print_warning "Unable to fetch the change log (network or GitHub issue)."
+                    press_any_key
+                fi
                 ;;
             \?|h|H|❓) show_toolkit_help ;;
             0) return ;;
@@ -5797,7 +5974,12 @@ benchmark_system() {
                 # device by appending one line in the same column order:
                 # id|label|cpu|aes64|aes1420|aes16k|cha64|cha1420|cha16k|rsa_sign|rsa_verify
                 bench_ref='mt3600be|Beryl 7|MT7987a|267728|621208|721917|126357|258082|323188|182.9|6850.8
-be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5'
+be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5
+mt6000|Flint 2|MT7986a|35969|403625|784938|128188|285938|336125|186.4|6906.5
+mt3000|Beryl AX|MT7981|174738|403199|465470|84051|166484|209360|118.7|4446.3
+mt5000|Brume 3|MT7987a|268078|621323|723411|126278|257233|323477|181.8|6816.4
+be9300|Flint 3|IPQ5332|186703|533571|639020|84930|216067|250916|139.7|5180.6
+mt1300|Beryl|MT7621|5522|5944|5759|21915|27148|27613|10.4|397.6'
 
                 my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
                 [ -z "$my_id" ] && my_id="thisdevice"
@@ -5827,19 +6009,49 @@ be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5'
                     printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=11 && $1!=id'
                 } > "$bench_data"
 
-                clear
-                print_centered_header "VPN & Crypto Benchmark"
-                bench_render_cipher "WireGuard · ChaCha20-Poly1305" 7 8 9 "$bench_data" "$my_id"
-                bench_render_cipher "OpenVPN / IPsec · AES-256-GCM" 4 5 6 "$bench_data" "$my_id"
-                bench_render_rsa "$bench_data" "$my_id"
-                printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
-                printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
-                printf '\n %bNote: each device uses its own OpenSSL build. WireGuard runs kernel ChaCha20, so that%b\n' "$GREY" "$RESET"
-                printf ' %bcolumn is a proxy; OpenVPN/IPsec uses OpenSSL directly.%b\n' "$GREY" "$RESET"
+                bench_page=1
+                while true; do
+                    clear
+                    print_centered_header "VPN & Crypto Benchmark"
+                    case "$bench_page" in
+                        1)
+                            bench_render_cipher "WireGuard · ChaCha20-Poly1305" 7 8 9 "$bench_data" "$my_id"
+                            printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
+                            printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
+                            printf '\n %bNote: each device uses its own OpenSSL build. WireGuard runs kernel ChaCha20, so that%b\n' "$GREY" "$RESET"
+                            printf ' %bcolumn is a proxy; OpenVPN/IPsec uses OpenSSL directly.%b\n' "$GREY" "$RESET"
+                            ;;
+                        2)
+                            bench_render_cipher "OpenVPN / IPsec · AES-256-GCM" 4 5 6 "$bench_data" "$my_id"
+                            printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
+                            printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
+                            ;;
+                        3)
+                            bench_render_rsa "$bench_data" "$my_id"
+                            ;;
+                    esac
+                    printf " ──────────────────────────────────────────────────────────────────────────────\n"
+                    printf " [P] Previous   "
+                    bpi=1
+                    while [ $bpi -le 3 ]; do
+                        if [ $bpi -eq $bench_page ]; then
+                            printf "%b[%d]%b " "${BOLD}" "$bpi" "${RESET}"
+                        else
+                            printf "%b[%d]%b " "${GREY}" "$bpi" "${RESET}"
+                        fi
+                        bpi=$((bpi + 1))
+                    done
+                    printf "  [N] Next   [0] Back  "
+                    bp=$(read_single_char)
+                    printf '\n'
+                    case "$bp" in
+                        p|P|b|B) [ "$bench_page" -gt 1 ] && bench_page=$((bench_page - 1)) ;;
+                        n|N) [ "$bench_page" -lt 3 ] && bench_page=$((bench_page + 1)) ;;
+                        1|2|3) bench_page="$bp" ;;
+                        0) break ;;
+                    esac
+                done
                 rm -f "$bench_data"
-                printf "\n"
-                print_success "Benchmark complete"
-                press_any_key
                 ;;
             3)
                 clear
@@ -5878,7 +6090,12 @@ be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5'
                 # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
                 # device by appending one line: id|label|cpu|write_mbs|read_mbs
                 bench_ref='mt3600be|Beryl 7|MT7987a|124.70|11.00
-be3600|Slate 7|IPQ5332|75.72|51.50'
+be3600|Slate 7|IPQ5332|75.72|51.50
+mt6000|Flint 2|MT7986a|52.72|154.00
+mt3000|Beryl AX|MT7981|82.78|16.21
+mt5000|Brume 3|MT7987a|38.93|42.32
+be9300|Flint 3|IPQ5332|13.72|81.70
+mt1300|Beryl|MT7621|0.24|12.54'
 
                 my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
                 [ -z "$my_id" ] && my_id="thisdevice"
@@ -5923,7 +6140,7 @@ be3600|Slate 7|IPQ5332|75.72|51.50'
                 # We want a large enough test to bypass L1/L2 cache saturation
                 if [ "$total_mem" -ge 960 ]; then test_size=100000; test_name="100GB"
                 elif [ "$total_mem" -ge 460 ]; then test_size=50000; test_name="50GB"
-                else test_size=25000; test_name="25GB"; fi
+                else test_size=4000; test_name="4GB"; fi
 
                 printf "System RAM: %b%s MB%b\n" "${GREEN}" "$total_mem" "${RESET}"
                 printf "Test throughput: %b%s%b\n\n" "${GREEN}" "$test_name" "${RESET}"
@@ -5940,7 +6157,12 @@ be3600|Slate 7|IPQ5332|75.72|51.50'
                 # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
                 # device by appending one line: id|label|cpu|mem_mbs
                 bench_ref='mt3600be|Beryl 7|MT7987a|4361.12
-be3600|Slate 7|IPQ5332|3006.13'
+be3600|Slate 7|IPQ5332|3006.13
+mt6000|Flint 2|MT7986a|5401.50
+mt3000|Beryl AX|MT7981|2983.29
+mt5000|Brume 3|MT7987a|4492.36
+be9300|Flint 3|IPQ5332|4277.16
+mt1300|Beryl|MT7621|179.39'
 
                 my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
                 [ -z "$my_id" ] && my_id="thisdevice"

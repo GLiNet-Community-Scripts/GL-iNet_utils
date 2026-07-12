@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-10
+# Version: 2026-07-12
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -487,6 +487,15 @@ esac
 # -----------------------------
 # Utility Functions
 # -----------------------------
+# Count set bits in a hex mask ("0x7" -> 3). Empty/invalid -> 0. Used to turn an
+# antenna chainmask into a spatial-stream count.
+popcount_hex() {
+    case "$1" in ''|0x|0X) printf '0'; return ;; esac
+    _pc_n=$(( $1 )); _pc_c=0
+    while [ "$_pc_n" -gt 0 ]; do _pc_c=$(( _pc_c + (_pc_n & 1) )); _pc_n=$(( _pc_n >> 1 )); done
+    printf '%s' "$_pc_c"
+}
+
 press_any_key() {
     printf "\nPress any key to continue... "
     read -rsn1
@@ -1511,12 +1520,21 @@ show_hardware_info() {
                         current_chan=$(uci -q get wireless.${radio}.channel)
                     fi
 
-                    # 4. MIMO Logic
-                    mimo="2x2"
-                    case "$htmode" in
-                        *HE80*|*HE160*|*VHT80*|*VHT160*|*EHT160*|*EHT320*) mimo="4x4" ;;
-                        *HE40*|*HE20*|*VHT40*|*VHT20*|*EHT80*) mimo="2x2" ;;
-                    esac
+                    # 4. MIMO from the driver's *configured* antenna chainmask
+                    #    (popcount of TX/RX): 0x3=2x2, 0x7=3x3, 0xf=4x4. This is
+                    #    the operating config, not the chip's max ("Available").
+                    #    N/A when the driver can't report it.
+                    mimo="N/A"
+                    if [ -n "$iface" ] && command -v iw >/dev/null 2>&1; then
+                        phy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null)
+                        if [ -n "$phy" ]; then
+                            ant=$(iw phy "$phy" info 2>/dev/null | grep -i 'Configured Antennas')
+                            tx=$(printf '%s' "$ant" | sed -n 's/.*TX \(0x[0-9a-fA-F]*\).*/\1/p')
+                            rx=$(printf '%s' "$ant" | sed -n 's/.*RX \(0x[0-9a-fA-F]*\).*/\1/p')
+                            txn=$(popcount_hex "$tx"); rxn=$(popcount_hex "$rx")
+                            [ "$txn" -gt 0 ] && [ "$rxn" -gt 0 ] && mimo="${txn}x${rxn}"
+                        fi
+                    fi
 
                     # 5. Band Display
                     case "$band" in

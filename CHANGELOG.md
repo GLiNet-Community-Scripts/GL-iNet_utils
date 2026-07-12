@@ -4,6 +4,11 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-12
+- Hardware Info reports Wi-Fi MIMO from the driver's configured antenna
+  chainmask (correct 2x2 / 3x3 / 4x4 per band) instead of inferring it from the
+  channel width, which mislabeled radios that run more than two spatial streams.
+
 ## 2026-07-10
 - Change Log & Updates are now one screen: browse the full history in the house
   pager and update in place with `[U]` — the separate "Check for Updates" item

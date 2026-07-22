@@ -4,6 +4,22 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-21
+- New: VPN Tools menu with an MTU Optimizer — detects your active WireGuard and
+  OpenVPN tunnels and recommends the right MTU (underlay link MTU minus the
+  protocol overhead), so VPN traffic stops fragmenting. Apply with one keypress,
+  set manually, clear the override, or run an optional active probe.
+- The MTU is written to the router's own VPN configuration, so it shows up in
+  the GL web UI under that tunnel's Options and survives a reboot.
+- On routers with more than one tunnel, Optimize and Reset can act on every
+  tunnel at once ([A] All), each with its own correct value.
+- Reset MTU removes the override outright. On older firmware the web UI can set
+  an MTU but not clear it again, so this is the only way to get a tunnel back to
+  the router's own default.
+- Fixed: View UCI → VPN Configuration now recognizes GL's WireGuard/OpenVPN
+  servers and clients instead of only stock-OpenWrt configs, so it no longer
+  reads "No active VPN configurations found" on server-only routers.
+
 ## 2026-07-12
 - Hardware Info reports Wi-Fi MIMO from the driver's configured antenna
   chainmask (correct 2x2 / 3x3 / 4x4 per band) instead of inferring it from the

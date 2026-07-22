@@ -36,6 +36,9 @@
 - 📊 **Performance Benchmarks**
   - **Cross-Device Leaderboards:** A VPN & Crypto benchmark (WireGuard/ChaCha20, OpenVPN/AES-GCM, and RSA handshake), plus CPU thermal stress and raw Disk/Memory I/O — each ranked against saved reference routers instead of a single baseline — alongside DNS latency.
   - **Network Probing:** Integrated support for Ookla Speedtest, LibreSpeed, and OpenSpeedTest server environments.
+- 🔐 **VPN Tools**
+  - **MTU Optimizer:** Finds your active WireGuard and OpenVPN tunnels — client or server — and recommends the right MTU (the underlay link MTU minus that protocol's exact overhead), so tunnelled traffic stops fragmenting and silently losing throughput. Apply it with one keypress, set a value by hand, run an optional active probe, or reset to the router's default. On routers with more than one tunnel, Optimize and Reset can act on all of them at once, each with its own correct value.
+  - **Written where the router expects it:** the MTU goes into GL.iNet's own VPN configuration rather than a generic network setting, so it appears in the Admin Panel under that tunnel's Options and survives a reboot. On older firmware, where the web UI can set an MTU but not clear it again, Reset is the only way back to the default.
 - 📋 **Secure UCI Viewer:** Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
 - 🔄 **Native Self-Updater:** Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 **GPL-3.0 Licensed:** Free, open, and community-driven.
@@ -80,7 +83,8 @@ Main Menu
 2️⃣  AdGuardHome Control Center
 3️⃣  System Tweaks
 4️⃣  System Benchmarks
-5️⃣  View System Configuration (UCI)
+5️⃣  VPN Tools
+6️⃣  View System Configuration (UCI)
 0️⃣  Exit
 ❓ Help
 
@@ -130,6 +134,29 @@ System Benchmarks
 ❓ Help
 
 
+```
+
+VPN Tools
+
+```
+1️⃣  VPN MTU Optimizer
+0️⃣  Main menu
+```
+
+VPN MTU Optimizer
+
+```
+WireGuard Server: wgserver
+   Current MTU:  1391   (override)
+   Underlay:     eth2 (MTU 1500)
+   Overhead:     -60 (WireGuard / IPv4)
+   Recommended:  1440   (can raise)
+
+1️⃣  Optimize a tunnel (apply recommended)
+2️⃣  Set MTU manually
+3️⃣  Verify with an active probe
+4️⃣  Reset MTU (remove override)
+0️⃣  Back
 ```
 
 System Configuration Viewer

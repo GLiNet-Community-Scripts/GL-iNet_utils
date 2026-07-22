@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-12
+# Version: 2026-07-21
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -48,9 +48,24 @@
 #   [?] Help      multi-select: [A] All  [N] None  [#] Toggle
 #   pager: [P] Prev  [N] Next         [X] is never used.
 #
+# Naming (locked)
+#   Functions and shell variables are plain snake_case - NEVER a leading
+#   underscore. Scope function variables with `local` (declare every one); do
+#   not use a _prefix as ad-hoc collision avoidance, that is what `local` is
+#   for. Reserved exceptions, do not "clean up":
+#     - _S_OK/_S_WARN/... , _TERM_PROFILE, _TERM_ORIG_SIZE, _TERM_RESTORED:
+#       deliberate script-global symbol/state vars (uppercase, cross-function).
+#     - variables inside the EMBEDDED JAVASCRIPT injected into the ttyd web UI
+#       (manage_web_terminal): the _prefix there avoids colliding with the host
+#       page's own globals. That is JS, not shell - leave it alone.
+#   Before any bulk rename: check the function for embedded awk/JS/sed bodies,
+#   and never reverse-rename single letters (\bn\b matches the n in "\n").
+#
 # [0] label by depth
 #   root -> Exit ;  depth-1 child -> Main menu ;  depth-2+ -> Back ;
 #   pending/discard screen -> Cancel  (tie-break: does [0] discard pending state?)
+#   free-text entry -> advertise cancel inline ("(1280-1500, 0 to cancel)"); a
+#   deliberate backout (0 or empty) returns quietly - never an error.
 #
 # Prompt & flow rules
 # 1. Disclose-then-ask, in exactly two parts: a disclosure and a terse prompt.
@@ -98,6 +113,19 @@
 #    once at the natural decision point, never re-ask once satisfied, always
 #    offer a visible reversal. Forced/repeated confirmation is reserved for
 #    destructive or irreversible actions.
+#    A named menu action IS the decision - selecting it commits. Do NOT gate a
+#    safe, reversible action behind [y/N]; confirm ONLY when the action is
+#    destructive/irreversible (discards state the user set), or has side effects
+#    the label doesn't convey (installs a package, mutates live state) - there
+#    the disclosure earns the prompt. Don't confirm when the outcome is the
+#    ideal/expected state with a visible reversal, or when the user already
+#    typed the exact value (typing it IS the commit). Worked example - VPN MTU
+#    Optimizer: Optimize and Set-manually do not ask; Reset ([y/N], it discards
+#    the user's value) and the active probe ([y/N], it installs iputils and
+#    briefly raises the live MTU) do.
+#    A selector must never carry an action verb: "[A] All Tunnels" under an
+#    "Optimize which tunnel?" header, never "[A] Optimize All Tunnels" - a verb
+#    reads as a commit and turns any following prompt into a redundant re-ask.
 # 9. Dwell mechanism. Match how a screen waits to its information value. User-
 #    paced ("Press any key") for anything the user must READ - help, reports,
 #    status/lists, and action results whose detail won't survive the return to a
@@ -318,6 +346,7 @@ probe_advance() {
 }
 
 detect_output_mode() {
+    local ambig wide
 
     # ── Step 1: Determine base mode ──────────────────────────────────────────
     if [ "$OUTPUT_PREF" = "compat" ]; then
@@ -347,12 +376,12 @@ detect_output_mode() {
     _TERM_PROFILE="mac"
     if [ "$OUTPUT_MODE" = "full" ]; then
         if ensure_stty; then
-            _wide=$(probe_advance '✅')
-            if [ "$_wide" = "1" ]; then
+            wide=$(probe_advance '✅')
+            if [ "$wide" = "1" ]; then
                 _TERM_PROFILE="ttyd"            # xterm.js: all emoji adv=1
             else
-                _ambig=$(probe_advance '⚠️')
-                [ "$_ambig" = "2" ] && _TERM_PROFILE="wt"
+                ambig=$(probe_advance '⚠️')
+                [ "$ambig" = "2" ] && _TERM_PROFILE="wt"
             fi
         else
             OUTPUT_MODE="compat"               # can't probe without a real stty -> use the consistent Compatible set
@@ -375,7 +404,7 @@ detect_output_mode() {
                 _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ ";  _S_TIME="⏳ "
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
-                NQ="❓"; NCL="🆑"
+                NQ="❓"; NCL="🆑"; NA="🅰️"
                 ;;
             wt)
                 # Windows Terminal: ambig+VS adv=2 — 1sp sufficient
@@ -383,7 +412,7 @@ detect_output_mode() {
                 _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ ";  _S_TIME="⏳ "
                 N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
                 N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
-                NQ="[?] "; NCL="[CL]"
+                NQ="[?] "; NCL="[CL]"; NA="[A]"
                 ;;
             *)
                 # macOS Terminal + Linux terminals (default)
@@ -391,7 +420,7 @@ detect_output_mode() {
                 _S_WARN="⚠️  ";  _S_INFO="ℹ️  ";  _S_ACT="⚙️  ";  _S_TIME="⏳ "
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
-                NQ="❓"; NCL="🆑"
+                NQ="❓"; NCL="🆑"; NA="🅰️"
                 ;;
         esac
 
@@ -405,7 +434,7 @@ detect_output_mode() {
         _S_TIME="[…] "   # all single-width & PuTTY-safe; [√]/[×] mirror on/off √/× and full-mode ✅/❌, [❋]≈gear, […]=wait
         N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
         N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
-        NQ="[?] "; NCL="[CL]"
+        NQ="[?] "; NCL="[CL]"; NA="[A]"
     fi
 }
 
@@ -420,7 +449,7 @@ _TERM_ORIG_SIZE=""    # "rows;cols" saved at setup; empty = nothing to restore
 _TERM_RESTORED=""
 
 terminal_setup() {
-    local _sz _r _c _nr _nc
+    local sz r c nr nc
     [ "${GL_NO_TERM_SETUP+x}" ] && return          # power-user opt-out
     [ -t 1 ] || return                              # only on a real terminal
     [ -n "$TMUX" ] && return                         # not inside tmux
@@ -431,14 +460,14 @@ terminal_setup() {
     # Grow only (never shrink). Needs a real stty to read the size so we can
     # restore it on exit; skip just the resize if stty isn't available.
     command -v stty >/dev/null 2>&1 || return
-    _sz=$(stty size 2>/dev/null </dev/tty); _r=${_sz% *}; _c=${_sz#* }
-    case "$_r" in ''|*[!0-9]*) return ;; esac
-    case "$_c" in ''|*[!0-9]*) return ;; esac
-    _TERM_ORIG_SIZE="${_r};${_c}"
-    _nr=$_r; _nc=$_c
-    [ "$_c" -lt "$TERM_MIN_COLS" ] && _nc=$TERM_MIN_COLS
-    [ "$_r" -lt "$TERM_MIN_ROWS" ] && _nr=$TERM_MIN_ROWS
-    { [ "$_nr" != "$_r" ] || [ "$_nc" != "$_c" ]; } && printf '\033[8;%s;%st' "$_nr" "$_nc"
+    sz=$(stty size 2>/dev/null </dev/tty); r=${sz% *}; c=${sz#* }
+    case "$r" in ''|*[!0-9]*) return ;; esac
+    case "$c" in ''|*[!0-9]*) return ;; esac
+    _TERM_ORIG_SIZE="${r};${c}"
+    nr=$r; nc=$c
+    [ "$c" -lt "$TERM_MIN_COLS" ] && nc=$TERM_MIN_COLS
+    [ "$r" -lt "$TERM_MIN_ROWS" ] && nr=$TERM_MIN_ROWS
+    { [ "$nr" != "$r" ] || [ "$nc" != "$c" ]; } && printf '\033[8;%s;%st' "$nr" "$nc"
 }
 
 terminal_restore() {
@@ -490,10 +519,11 @@ esac
 # Count set bits in a hex mask ("0x7" -> 3). Empty/invalid -> 0. Used to turn an
 # antenna chainmask into a spatial-stream count.
 popcount_hex() {
+    local pc_n pc_c
     case "$1" in ''|0x|0X) printf '0'; return ;; esac
-    _pc_n=$(( $1 )); _pc_c=0
-    while [ "$_pc_n" -gt 0 ]; do _pc_c=$(( _pc_c + (_pc_n & 1) )); _pc_n=$(( _pc_n >> 1 )); done
-    printf '%s' "$_pc_c"
+    pc_n=$(( $1 )); pc_c=0
+    while [ "$pc_n" -gt 0 ]; do pc_c=$(( pc_c + (pc_n & 1) )); pc_n=$(( pc_n >> 1 )); done
+    printf '%s' "$pc_c"
 }
 
 press_any_key() {
@@ -582,27 +612,27 @@ get_password() {
 #   safe 22-line default when stty can't report one. ARGS forward to apply_update
 #   for the exec-on-restart. Returns 1 if the changelog can't be fetched.
 show_changelog() {
-    local _cl_file="/tmp/.gl-changelog.$$" _cl_rn="/tmp/.gl-cl-render.$$"
-    local _local _latest _behind _exitlbl
-    local _total _rows _plines _pages _start _end _page _key _i _starts _nstart
+    local cl_file="/tmp/.gl-changelog.$$" cl_rn="/tmp/.gl-cl-render.$$"
+    local local_ver latest behind exitlbl
+    local total rows plines pages start end page key i starts nstart
 
-    _local="$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r')"
-    [ -z "$_local" ] && _local="0000-00-00"
-    _exitlbl="${CL_EXIT_LABEL:-Back}"
+    local_ver="$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r')"
+    [ -z "$local_ver" ] && local_ver="0000-00-00"
+    exitlbl="${CL_EXIT_LABEL:-Back}"
 
-    if ! wget -q -O "$_cl_file" "$CHANGELOG_URL" 2>/dev/null || [ ! -s "$_cl_file" ]; then
-        rm -f "$_cl_file"
+    if ! wget -q -O "$cl_file" "$CHANGELOG_URL" 2>/dev/null || [ ! -s "$cl_file" ]; then
+        rm -f "$cl_file"
         return 1
     fi
 
     # Newest "## <version>" header is the latest release.
-    _latest="$(grep -m1 '^## ' "$_cl_file" | awk '{print $2}')"
-    if [ -n "$_latest" ] && [ "$_latest" \> "$_local" ]; then _behind=1; else _behind=0; fi
+    latest="$(grep -m1 '^## ' "$cl_file" | awk '{print $2}')"
+    if [ -n "$latest" ] && [ "$latest" \> "$local_ver" ]; then behind=1; else behind=0; fi
 
     # Render newest-first (drop the intro before the first header). When behind,
     # emit a grey boundary rule just before the first entry that is <= your
     # version, so everything above the rule is new to you.
-    awk -v local="$_local" -v behind="$_behind" -v g="$GREY" -v r="$RESET" '
+    awk -v local="$local_ver" -v behind="$behind" -v g="$GREY" -v r="$RESET" '
         /^## / {
             seen = 1
             if (behind && !marked && ($2 "") <= (local "")) {
@@ -612,28 +642,28 @@ show_changelog() {
             print; next
         }
         seen { print }
-    ' "$_cl_file" > "$_cl_rn"
-    rm -f "$_cl_file"
+    ' "$cl_file" > "$cl_rn"
+    rm -f "$cl_file"
 
-    _total=$(wc -l < "$_cl_rn" 2>/dev/null)
-    case "$_total" in ''|*[!0-9]*) _total=0 ;; esac
-    if [ "$_total" -eq 0 ]; then
-        rm -f "$_cl_rn"
+    total=$(wc -l < "$cl_rn" 2>/dev/null)
+    case "$total" in ''|*[!0-9]*) total=0 ;; esac
+    if [ "$total" -eq 0 ]; then
+        rm -f "$cl_rn"
         return 1
     fi
 
     # Changelog lines per screen: real height minus chrome, else a safe default.
-    _rows=$(stty size 2>/dev/null | awk '{print $1}')
-    case "$_rows" in
-        ''|*[!0-9]*) _plines=22 ;;
-        *) _plines=$((_rows - 8)); [ "$_plines" -lt 12 ] && _plines=12 ;;
+    rows=$(stty size 2>/dev/null | awk '{print $1}')
+    case "$rows" in
+        ''|*[!0-9]*) plines=22 ;;
+        *) plines=$((rows - 8)); [ "$plines" -lt 12 ] && plines=12 ;;
     esac
 
     # Page-start line numbers, snapped so a page never breaks mid-bullet: fill up
-    # to _plines lines, then back the cut up to the nearest header/bullet/rule so a
+    # to plines lines, then back the cut up to the nearest header/bullet/rule so a
     # wrapped bullet's continuation lines stay with it. Hard-cuts only if a single
     # unit is taller than one page.
-    _starts=$(awk -v plines="$_plines" '
+    starts=$(awk -v plines="$plines" '
         { safe[NR] = ($0 ~ /^## / || $0 ~ /^- / || index($0, "your version:")) ? 1 : 0 }
         END {
             total = NR; s = 1; printf "%d", s
@@ -644,58 +674,58 @@ show_changelog() {
                 printf " %d", cut
                 s = cut
             }
-        }' "$_cl_rn")
-    [ -z "$_starts" ] && _starts=1                  # defensive: never wedge navigation on empty awk output
-    _pages=$(echo "$_starts" | awk '{print NF}')
-    case "$_pages" in ''|*[!0-9]*|0) _pages=1 ;; esac
+        }' "$cl_rn")
+    [ -z "$starts" ] && starts=1                  # defensive: never wedge navigation on empty awk output
+    pages=$(echo "$starts" | awk '{print NF}')
+    case "$pages" in ''|*[!0-9]*|0) pages=1 ;; esac
 
-    _page=1
+    page=1
     while :; do
-        _start=$(echo "$_starts" | cut -d' ' -f"$_page")
-        _nstart=$(echo "$_starts" | cut -d' ' -f"$((_page + 1))")
-        if [ -n "$_nstart" ]; then _end=$((_nstart - 1)); else _end=$_total; fi
+        start=$(echo "$starts" | cut -d' ' -f"$page")
+        nstart=$(echo "$starts" | cut -d' ' -f"$((page + 1))")
+        if [ -n "$nstart" ]; then end=$((nstart - 1)); else end=$total; fi
         clear
         print_centered_header "Change Log"
         printf "\n"
-        sed -n "${_start},${_end}p" "$_cl_rn"
+        sed -n "${start},${end}p" "$cl_rn"
         printf " ──────────────────────────────────────────────────────────────────────────────\n"
 
         # House pager footer: [P] Previous  <chips|Page X/Y>  [N] Next  [U]?  [0] label.
         # Numbered chips up to 9 pages (read_single_char can't take a two-digit
         # jump); a "Page X of Y" counter beyond that.
         printf " [P] Previous   "
-        if [ "$_pages" -le 9 ]; then
-            _i=1
-            while [ "$_i" -le "$_pages" ]; do
-                if [ "$_i" -eq "$_page" ]; then printf "%b[%d]%b " "$BOLD" "$_i" "$RESET"
-                else printf "%b[%d]%b " "$GREY" "$_i" "$RESET"; fi
-                _i=$((_i + 1))
+        if [ "$pages" -le 9 ]; then
+            i=1
+            while [ "$i" -le "$pages" ]; do
+                if [ "$i" -eq "$page" ]; then printf "%b[%d]%b " "$BOLD" "$i" "$RESET"
+                else printf "%b[%d]%b " "$GREY" "$i" "$RESET"; fi
+                i=$((i + 1))
             done
         else
-            printf "%bPage %d of %d%b   " "$BOLD" "$_page" "$_pages" "$RESET"
+            printf "%bPage %d of %d%b   " "$BOLD" "$page" "$pages" "$RESET"
         fi
         printf "  [N] Next   "
-        [ "$_behind" -eq 1 ] && printf "[U] Update   "
-        printf "[0] %s  " "$_exitlbl"
+        [ "$behind" -eq 1 ] && printf "[U] Update   "
+        printf "[0] %s  " "$exitlbl"
 
-        _key=$(read_single_char)
+        key=$(read_single_char)
         printf "\n"
-        case "$_key" in
-            p|P) [ "$_page" -gt 1 ]        && _page=$((_page - 1)) ;;
-            n|N) [ "$_page" -lt "$_pages" ] && _page=$((_page + 1)) ;;
-            u|U) if [ "$_behind" -eq 1 ]; then
+        case "$key" in
+            p|P) [ "$page" -gt 1 ]        && page=$((page - 1)) ;;
+            n|N) [ "$page" -lt "$pages" ] && page=$((page + 1)) ;;
+            u|U) if [ "$behind" -eq 1 ]; then
                      apply_update "$@"   # execs on success; returns here only on failure
                      press_any_key
                  fi ;;
             0)   break ;;
-            [1-9]) if [ "$_pages" -le 9 ] && [ "$_key" -le "$_pages" ]; then
-                       _page="$_key"
+            [1-9]) if [ "$pages" -le 9 ] && [ "$key" -le "$pages" ]; then
+                       page="$key"
                    fi ;;
             *)   : ;;
         esac
     done
 
-    rm -f "$_cl_rn"
+    rm -f "$cl_rn"
     return 0
 }
 
@@ -728,21 +758,23 @@ apply_update() {
 # release exists — offers to open the changelog viewer (where [U] applies it).
 # Silent when already current, so startup stays quiet unless there's news.
 check_self_update() {
-    local ans _rc
+    local ans rc
     LOCAL_VERSION="$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r')"
     [ -z "$LOCAL_VERSION" ] && LOCAL_VERSION="0000-00-00"
 
     # Fetch the remote copy to read its version. When a first-run install-skip
     # notice is on screen (STARTUP_NOTICE), let the spinner run 2s longer so the
     # message reads as productive activity instead of a dead pause. The sh -c
-    # wrapper preserves wget's real exit code across the padding sleep.
+    # wrapper preserves wget's real exit code across the padding sleep. Its inner
+    # rc= is single-quoted and runs in that child shell - it is NOT this
+    # function's local rc, and the two never interact. Don't "fix" the name.
     if [ "$STARTUP_NOTICE" = 1 ]; then
         spin_run "Checking for updates" sh -c 'wget -q -O "$1" "$2"; rc=$?; sleep 2; exit $rc' sh "$TMP_NEW_SCRIPT" "$SCRIPT_URL"
     else
         spin_run "Checking for updates" wget -q -O "$TMP_NEW_SCRIPT" "$SCRIPT_URL"
     fi
-    _rc=$?
-    if [ "$_rc" -ne 0 ]; then
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
         rm -f "$SPIN_LOG" 2>/dev/null
         UPDATE_STATUS="unknown"
         return 1
@@ -2244,6 +2276,7 @@ HELPEOF
 }
 
 update_agh_credentials() {
+    local u_retry p_retry
     clear
     print_centered_header "Set Web UI Credentials"
     if [ "$PASS_STATUS" = "✅" ]; then
@@ -2269,8 +2302,8 @@ update_agh_credentials() {
         [ -n "$user_name" ] && break
         printf "\n"
         print_warning "Username cannot be blank."
-        printf "Try again? [Y/n]: "; read -r _u_retry; printf "\n"
-        case "$_u_retry" in n|N) print_info "Operation cancelled."; return ;; esac
+        printf "Try again? [Y/n]: "; read -r u_retry; printf "\n"
+        case "$u_retry" in n|N) print_info "Operation cancelled."; return ;; esac
     done
 
     # Password with confirmation; blank or mismatch offers retry/cancel
@@ -2279,8 +2312,8 @@ update_agh_credentials() {
         if [ -z "$user_pass" ]; then
             printf "\n"
             print_warning "Password cannot be blank."
-            printf "Try again? [Y/n]: "; read -r _p_retry; printf "\n"
-            case "$_p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
+            printf "Try again? [Y/n]: "; read -r p_retry; printf "\n"
+            case "$p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
             continue
         fi
         user_pass_conf=$(get_password "Confirm Password: ")
@@ -2289,8 +2322,8 @@ update_agh_credentials() {
         fi
         printf "\n"
         print_warning "Passwords do not match."
-        printf "Try again? [Y/n]: "; read -r _p_retry; printf "\n"
-        case "$_p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
+        printf "Try again? [Y/n]: "; read -r p_retry; printf "\n"
+        case "$p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
     done
 
     BCRYPT_HASH=$(htpasswd -n -B -b "$user_name" "$user_pass" | cut -d: -f2)
@@ -5197,14 +5230,15 @@ HELPEOF
 }
 
 check_install_prompt() {
+    local ip_ans
     [ "$SCRIPT_PATH" = "$INSTALL_PATH" ] && return
     [ "$INSTALL_PROMPTED" -eq 1 ] && return
 
     print_info "Installing to $INSTALL_PATH lets you run this program from anywhere as a system command."
     printf "   Install as a system command? [Y/n]: "
-    read -r _ip_ans
+    read -r ip_ans
     printf "\n"
-    case "$_ip_ans" in
+    case "$ip_ans" in
         n|N)
             sed -i 's/^INSTALL_PROMPTED=0$/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
             print_info "Skipping. You can install later via System Tweaks > Toolkit Management."
@@ -5217,6 +5251,7 @@ check_install_prompt() {
 }
 
 do_install_to_sbin() {
+    local persist_ans
     print_action "Installing to $INSTALL_PATH..."
     if ! cp "$SCRIPT_PATH" "$INSTALL_PATH" || ! chmod +x "$INSTALL_PATH"; then
         print_error "Install failed. Check write permissions on /usr/sbin."
@@ -5227,9 +5262,9 @@ do_install_to_sbin() {
 
     if ! toolkit_persistence_enabled; then
         printf "\n   Persist across firmware upgrades? [Y/n]: "
-        read -r _persist_ans
+        read -r persist_ans
         printf "\n"
-        case "$_persist_ans" in
+        case "$persist_ans" in
             n|N) print_warning "Not persisted — will be lost on next sysupgrade." ;;
             *)   set_toolkit_persistence 1 ;;
         esac
@@ -5292,7 +5327,7 @@ manage_display_settings() {
         esac
     }
 
-    local _page=1 total=3
+    local page_num=1 total=3
     while true; do
         clear
         print_centered_header "Display Settings"
@@ -5318,14 +5353,14 @@ manage_display_settings() {
             *) detected_desc="Compatible terminal → Compatible mode" ;;
         esac
 
-        _display_settings_screen "$_page" "$detected_desc"
+        _display_settings_screen "$page_num" "$detected_desc"
 
         # Footer / navigation (mirrors the Hardware Info pager)
         printf "\n ──────────────────────────────────────────────────────────────────────────────\n"
         printf " [P] Prev   "
         local i=1
         while [ "$i" -le "$total" ]; do
-            if [ "$i" -eq "$_page" ]; then
+            if [ "$i" -eq "$page_num" ]; then
                 printf "%b[%d]%b " "${BOLD}" "$i" "${RESET}"
             else
                 printf "%b[%d]%b " "${GREY}" "$i" "${RESET}"
@@ -5339,12 +5374,12 @@ manage_display_settings() {
         printf "\n"
 
         case "$nav_choice" in
-            p|P|b|B) [ "$_page" -gt 1 ] && _page=$((_page - 1)) ;;
-            n|N)     [ "$_page" -lt "$total" ] && _page=$((_page + 1)) ;;
-            1|2|3)   _page="$nav_choice" ;;
+            p|P|b|B) [ "$page_num" -gt 1 ] && page_num=$((page_num - 1)) ;;
+            n|N)     [ "$page_num" -lt "$total" ] && page_num=$((page_num + 1)) ;;
+            1|2|3)   page_num="$nav_choice" ;;
             c|C)
                 local new_pref
-                case "$_page" in
+                case "$page_num" in
                     1) new_pref="full"   ;;
                     2) new_pref="compat" ;;
                     3) new_pref="auto"   ;;
@@ -5506,6 +5541,423 @@ manage_toolkit() {
                 CL_EXIT_LABEL=""
                 ;;
             \?|h|H|❓) show_toolkit_help ;;
+            0) return ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+# =============================================================================
+# VPN MTU Optimizer
+# =============================================================================
+# Recommended tunnel MTU = (MTU of the interface that routes to the peer's
+# endpoint) - protocol overhead. WireGuard overhead is exact (60 IPv4 / 80 IPv6);
+# OpenVPN is a conservative estimate. Everything is derived at runtime from
+# `wg show` / `ip` — no interface names or subnets are hardcoded.
+mtu_get() { ip link show "$1" 2>/dev/null | sed -n 's/.* mtu \([0-9]*\).*/\1/p' | head -1; }
+
+# One line per active tunnel: type|role|iface|endpoint|overhead|underlay_family
+mtu_detect() {
+    local iface endpoint role overhead family
+    iface=""; endpoint=""; role=""; overhead=""; family=""
+    if command -v wg >/dev/null 2>&1; then
+        for iface in $(wg show interfaces 2>/dev/null); do
+            endpoint=$(wg show "$iface" endpoints 2>/dev/null | awk 'NF>1{print $2; exit}')
+            endpoint=$(printf '%s' "$endpoint" | sed 's/^\[//; s/\]:[0-9]*$//; s/:[0-9]*$//')
+            case "$iface" in
+                *server*) role=Server ;;
+                *client*) role=Client ;;
+                *) case "$(wg show "$iface" allowed-ips 2>/dev/null)" in *0.0.0.0/0*) role=Client ;; *) role=Server ;; esac ;;
+            esac
+            case "$endpoint" in *:*) overhead=80; family=IPv6 ;; *) overhead=60; family=IPv4 ;; esac
+            printf 'WireGuard|%s|%s|%s|%s|%s\n' "$role" "$iface" "$endpoint" "$overhead" "$family"
+        done
+    fi
+    for iface in $(ls /sys/class/net 2>/dev/null | grep -E '^(tun|ovpn)'); do
+        [ "$(ip -4 addr show dev "$iface" 2>/dev/null | grep -c 'inet ')" -eq 0 ] && continue
+        endpoint=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*peer \([0-9.]*\).*#\1#p' | head -1)
+        case "$iface" in *server*) role=Server ;; *) role=Client ;; esac
+        printf 'OpenVPN|%s|%s|%s|69|IPv4\n' "$role" "$iface" "$endpoint"
+    done
+}
+
+# List the config sections whose .mtu governs this tunnel — one per line, the
+# functional (proto-handler) key first. Derived from GL's own netifd proto
+# handlers and web UI, not guessed:
+#
+#   WG server   -> wireguard_server.<servers-section>          [verified 4.3/4.9]
+#   OVPN server -> ovpnserver.<general-section>                [verified 4.3/4.9]
+#   client 4.9  -> network.<iface>   (wg/ovpnclient.sh reads this first on ifup)
+#              +  route_policy.@rule[via==iface]   (the value the web UI shows)
+#   client 4.3  -> package section via network.<iface>.config pointer
+#                 (ovpnclient.<cfg> / wireguard.<cfg>; no route_policy on 4.3)
+#
+# The 4.9-vs-4.3 split is decided structurally (does a route_policy rule name
+# this interface?), never by firmware version. Prints nothing for an unmapped
+# tunnel, so callers fall back to a live-only apply and say so.
+mtu_gl_targets() {
+    local iface type cfg proto rule
+    iface="$1"; type="$2"; cfg=""; proto=""; rule=""
+    case "$iface" in
+        *server*)
+            case "$type" in
+                WireGuard) uci show wireguard_server 2>/dev/null | grep '=servers$' | head -1 | cut -d= -f1 ;;
+                OpenVPN)   uci show ovpnserver 2>/dev/null | grep '=general$' | head -1 | cut -d= -f1 ;;
+            esac
+            return 0 ;;
+    esac
+    # --- client ---
+    rule=$(uci show route_policy 2>/dev/null | grep "\.via='$iface'\$" | grep '@rule' | head -1 | cut -d. -f1-2)
+    [ -n "$rule" ] && [ "$(uci -q get "$rule" 2>/dev/null)" != rule ] && rule=""
+    if [ -n "$rule" ]; then
+        # 4.9.x policy-routed model: interface MTU (functional) + rule MTU (UI).
+        uci -q get network."$iface" >/dev/null 2>&1 && printf 'network.%s\n' "$iface"
+        printf '%s\n' "$rule"
+    else
+        # 4.3.x package model: MTU lives in the section the interface points at.
+        proto=$(uci -q get network."$iface".proto 2>/dev/null)
+        cfg=$(uci -q get network."$iface".config 2>/dev/null)
+        case "$proto" in
+            ovpnclient) [ -n "$cfg" ] && printf 'ovpnclient.%s\n' "$cfg" ;;
+            wgclient)   [ -n "$cfg" ] && printf 'wireguard.%s\n' "$cfg" ;;
+        esac
+    fi
+}
+
+# Delete any stale network.<iface>.mtu this toolkit wrote before we knew GL's
+# keys — but never when network.<iface> is itself a live target (4.9.x clients).
+mtu_drop_legacy() {
+    rm -f "/etc/hotplug.d/iface/99-glutils-mtu-$1" 2>/dev/null
+    printf '%s\n' "$2" | grep -Fqx "network.$1" && return 0
+    if uci -q get network."$1".mtu >/dev/null 2>&1; then
+        uci -q delete network."$1".mtu 2>/dev/null && uci -q commit network 2>/dev/null
+    fi
+}
+
+# Write the MTU to every governing section, commit, and apply it live.
+mtu_apply() {
+    local iface val type targets primary pkgs wrote sec pkg oldifs
+    iface="$1"; val="$2"; type="$3"
+    targets=$(mtu_gl_targets "$iface" "$type")
+    primary=""; pkgs=""; wrote=""; sec=""; pkg=""
+    oldifs=$IFS; IFS='
+'; set -f
+    for sec in $targets; do
+        [ -z "$sec" ] && continue
+        uci -q set "$sec.mtu=$val" 2>/dev/null
+        [ -z "$primary" ] && primary="$sec"
+        case " $pkgs " in *" ${sec%%.*} "*) ;; *) pkgs="$pkgs ${sec%%.*}" ;; esac
+    done
+    set +f; IFS=$oldifs
+    for pkg in $pkgs; do uci -q commit "$pkg" 2>/dev/null; done
+    [ -n "$primary" ] && [ "$(uci -q get "$primary.mtu")" = "$val" ] && wrote=1
+    mtu_drop_legacy "$iface" "$targets"
+    if ip link set "$iface" mtu "$val" 2>/dev/null; then
+        sleep 1
+        if [ -n "$wrote" ]; then
+            print_success "MTU on $iface is now $(mtu_get "$iface") (saved to the router's VPN config)."
+            print_info "Shows in the GL web UI under this tunnel's Options and survives a reboot."
+        elif [ -n "$primary" ]; then
+            print_success "MTU on $iface is now $(mtu_get "$iface")."
+            print_warning "Config write to $primary.mtu did not stick — applied live only, may not survive a reboot."
+        else
+            print_success "MTU on $iface is now $(mtu_get "$iface")."
+            print_warning "Applied live only — this firmware's config layout isn't mapped, so it may not survive a reboot."
+        fi
+    else
+        print_error "Failed to set MTU on $iface to $val."
+    fi
+}
+
+# Active probe: temporarily raise the tunnel, DF-search the peer tunnel IP, restore.
+mtu_probe() {
+    local type iface endpoint overhead role underlay_mtu
+    local orig own_ip peer_ip lo hi best mid computed answer pinger
+    type="$1"; iface="$2"; endpoint="$3"; overhead="$4"; role="$5"; underlay_mtu="$6"
+    orig=""; own_ip=""; peer_ip=""; lo=1280; hi=1500; best=0; mid=0; computed=""; answer=""; pinger=""
+    clear
+    print_centered_header "MTU Active Probe"
+    # Work out the peer's tunnel-internal IP first. If there isn't one we can
+    # reach, there's nothing to probe — bail before installing or changing a thing.
+    own_ip=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*inet \([0-9.]*\)/.*#\1#p' | head -1)
+    case "$type" in
+        OpenVPN)
+            peer_ip=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*peer \([0-9.]*\).*#\1#p' | head -1) ;;
+        *)  if [ "$role" = Client ]; then
+                peer_ip="${own_ip%.*}.1"
+            else
+                peer_ip=$(wg show "$iface" allowed-ips 2>/dev/null | grep -oE '[0-9.]+/32' | grep -v "^${own_ip}/" | head -1)
+                peer_ip=${peer_ip%/*}
+            fi ;;
+    esac
+    if [ -z "$peer_ip" ]; then
+        printf "\n"
+        print_warning "Active probe isn't available for this tunnel."
+        print_info "No peer tunnel IP could be determined to send test packets to."
+        press_any_key; return
+    fi
+    printf "\n %bWhat this does%b\n" "$CYAN" "$RESET"
+    printf "   Briefly raises %s to 1500, sends don't-fragment test packets to\n" "$iface"
+    printf "   %s over the tunnel to find the largest that survives, then restores\n" "$peer_ip"
+    printf "   your MTU. Best-effort: a fragmenting path can read high.\n\n"
+    printf "Run the probe? [y/N]: "; read -r answer; printf "\n"
+    case "$answer" in y|Y) ;; *) print_info "Cancelled."; press_any_key; return ;; esac
+    # Find a don't-fragment-capable pinger. Busybox ping lacks -M do and shadows
+    # iputils on PATH, so when the PATH ping can't do it, install iputils via the
+    # standard helper (a no-op if already present) and call /usr/bin/ping directly.
+    pinger="ping"
+    if ! ping -M do -c1 -W1 127.0.0.1 >/dev/null 2>&1; then
+        install_package "iputils-ping" || { press_any_key; return; }
+        pinger="/usr/bin/ping"
+    fi
+    if ! "$pinger" -M do -c1 -W1 127.0.0.1 >/dev/null 2>&1; then
+        print_warning "Couldn't get a don't-fragment pinger; skipping probe."; press_any_key; return
+    fi
+    orig=$(mtu_get "$iface")
+    print_action "Probing over $iface to $peer_ip ..."
+    [ "${orig:-0}" -lt 1500 ] && ip link set "$iface" mtu 1500 2>/dev/null
+    while [ "$lo" -le "$hi" ]; do
+        mid=$(( (lo + hi) / 2 ))
+        if "$pinger" -M do -s $((mid - 28)) -c1 -W1 -I "$iface" "$peer_ip" >/dev/null 2>&1; then best=$mid; lo=$((mid + 1)); else hi=$((mid - 1)); fi
+    done
+    [ -n "$orig" ] && ip link set "$iface" mtu "$orig" 2>/dev/null
+    printf "\n"
+    if [ "$best" -eq 0 ]; then
+        print_warning "No test packet got a reply over the tunnel — probe inconclusive."
+        print_info "The peer may not answer ICMP, or the tunnel is idle. Trust the computed value."
+        press_any_key; return
+    fi
+    [ -n "$underlay_mtu" ] && computed=$((underlay_mtu - overhead))
+    printf "   Largest tunnel MTU that survived: %b%s%b\n" "$GREEN" "$best" "$RESET"
+    if [ -n "$computed" ]; then
+        printf "   Computed recommendation:          %s\n" "$computed"
+        if [ "$best" -lt "$computed" ] 2>/dev/null; then
+            print_warning "Probe is lower than computed — a real path limit; consider $best."
+        elif [ "$best" -gt "$computed" ] 2>/dev/null; then
+            print_info "Probe read higher — likely fragmenting; trust the computed $computed."
+        else
+            print_success "Probe agrees with the computed recommendation."
+        fi
+    fi
+    press_any_key
+}
+
+# Remove the toolkit's MTU override from every governing section so the router's
+# own VPN default governs again (and the web UI field returns to Optional).
+mtu_reset() {
+    local iface type targets pkgs cleared sec pkg oldifs
+    iface="$1"; type="$2"
+    targets=$(mtu_gl_targets "$iface" "$type")
+    pkgs=""; cleared=""; sec=""; pkg=""
+    oldifs=$IFS; IFS='
+'; set -f
+    for sec in $targets; do
+        [ -z "$sec" ] && continue
+        uci -q get "$sec.mtu" >/dev/null 2>&1 && cleared=1
+        uci -q delete "$sec.mtu" 2>/dev/null
+        case " $pkgs " in *" ${sec%%.*} "*) ;; *) pkgs="$pkgs ${sec%%.*}" ;; esac
+    done
+    set +f; IFS=$oldifs
+    for pkg in $pkgs; do uci -q commit "$pkg" 2>/dev/null; done
+    mtu_drop_legacy "$iface" ""
+    # Report the actual delta — only say "cleared" when something was cleared.
+    if [ -n "$cleared" ]; then
+        print_success "Cleared the MTU override on $iface."
+        print_info "The web UI MTU field is back to Optional; restart the tunnel to pick up the default."
+    else
+        print_info "$iface had no MTU override — already at the router's default."
+    fi
+}
+
+# Would this action actually change anything? Design notes item 5 — check before
+# you ask, and warn-and-explain when already satisfied, rather than walking the
+# user through a target selection that lands on a no-op. Returns 0 if at least
+# one tunnel in $2 would change.
+mtu_actionable() {
+    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur sec
+    pick="$1"; tf="$2"
+    type=""; role=""; iface=""; endpoint=""; overhead=""; family=""
+    underlay=""; underlay_mtu=""; rec=""; cur=""; sec=""
+    while IFS='|' read -r type role iface endpoint overhead family; do
+        [ -z "$iface" ] && continue
+        if [ "$pick" = 4 ]; then
+            sec=$(mtu_gl_targets "$iface" "$type" | head -1)
+            [ -n "$sec" ] && uci -q get "$sec.mtu" >/dev/null 2>&1 && return 0
+        else
+            underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+            [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
+            underlay_mtu=$(mtu_get "$underlay")
+            [ -z "$underlay_mtu" ] && continue
+            rec=$((underlay_mtu - overhead))
+            cur=$(mtu_get "$iface")
+            [ "$cur" != "$rec" ] && return 0
+        fi
+    done < "$tf"
+    return 1
+}
+
+# Apply Optimize (pick 1) or Reset (pick 4) to every detected tunnel in $2 (the
+# detect file). Each tunnel gets its own computed value / its own reset, with a
+# running per-tunnel summary.
+mtu_batch() {
+    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur answer
+    pick="$1"; tf="$2"
+    type=""; role=""; iface=""; endpoint=""; overhead=""; family=""
+    underlay=""; underlay_mtu=""; rec=""; cur=""; answer=""
+    case "$pick" in 1|4) ;; *) return ;; esac
+    # Optimize puts every tunnel into its ideal, reversible state — the named
+    # action is the decision, so it doesn't ask. Reset discards a value the user
+    # set, so it does (design notes item 8).
+    if [ "$pick" = 4 ]; then
+        printf "Remove the toolkit's MTU override on all tunnels? [y/N]: "; read -r answer; printf "\n"
+        case "$answer" in y|Y) ;; *) print_info "No change."; press_any_key; return ;; esac
+    fi
+    while IFS='|' read -r type role iface endpoint overhead family; do
+        [ -z "$iface" ] && continue
+        if [ "$pick" = 4 ]; then
+            mtu_reset "$iface" "$type"
+        else
+            underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+            [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
+            underlay_mtu=$(mtu_get "$underlay")
+            [ -n "$underlay_mtu" ] && rec=$((underlay_mtu - overhead)) || rec=""
+            cur=$(mtu_get "$iface")
+            if [ -z "$rec" ]; then print_warning "$iface: underlay unresolved — skipped."
+            elif [ "$cur" = "$rec" ]; then print_info "$iface: already at recommended $rec."
+            else mtu_apply "$iface" "$rec" "$type"; fi
+        fi
+    done < "$tf"
+    press_any_key
+}
+
+manage_mtu() {
+    local tf count pick sel line oldifs type role iface endpoint overhead family cur underlay underlay_mtu rec rec_display source_label sec answer val idx token action allow_all
+    tf="/tmp/.gl-mtu.$$"
+    while true; do
+        clear
+        print_centered_header "VPN MTU Optimizer"
+        printf "\n"
+        mtu_detect > "$tf"
+        if [ ! -s "$tf" ]; then
+            print_warning "No active WireGuard or OpenVPN tunnels found."
+            printf "\n"; rm -f "$tf"; press_any_key; return
+        fi
+        # STATUS blocks (read-only, coloured headers, no selection numbers).
+        while IFS='|' read -r type role iface endpoint overhead family; do
+            cur=$(mtu_get "$iface")
+            underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+            [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
+            underlay_mtu=$(mtu_get "$underlay")
+            if [ -n "$underlay_mtu" ]; then rec=$((underlay_mtu - overhead)); else rec=""; fi
+            if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then
+                rec_display="${GREEN}${rec}${RESET}   (optimal)"
+            elif [ -n "$rec" ]; then
+                if [ "${cur:-0}" -lt "$rec" ] 2>/dev/null; then rec_display="${YELLOW}${rec}${RESET}   (can raise)"; else rec_display="${YELLOW}${rec}${RESET}   (should lower)"; fi
+            else
+                rec_display="${YELLOW}unknown (endpoint not resolved)${RESET}"
+            fi
+            sec=$(mtu_gl_targets "$iface" "$type" | head -1); source_label=""
+            if [ -n "$sec" ]; then
+                if uci -q get "$sec.mtu" >/dev/null 2>&1; then source_label="   (override)"; else source_label="   (default)"; fi
+            fi
+            printf " %b%s %s: %s%b\n" "$CYAN" "$type" "$role" "$iface" "$RESET"
+            printf "   Current MTU:  %b%s%b%s\n" "$GREEN" "${cur:-N/A}" "$RESET" "$source_label"
+            printf "   Underlay:     %b%s (MTU %s)%b\n" "$GREEN" "${underlay:-N/A}" "${underlay_mtu:-N/A}" "$RESET"
+            printf "   Overhead:     %b-%s (%s / %s)%b\n" "$GREEN" "$overhead" "$type" "$family" "$RESET"
+            printf "   Recommended:  %b\n" "$rec_display"
+            printf "\n"
+        done < "$tf"
+        printf "%s  Optimize a tunnel (apply recommended)\n" "$N1"
+        printf "%s  Set MTU manually\n" "$N2"
+        printf "%s  Verify with an active probe\n" "$N3"
+        printf "%s  Reset MTU (remove override)\n" "$N4"
+        printf "%s  Back\n" "$N0"
+        printf "\nChoose [1-4/0]: "
+        read -r pick; printf "\n"
+        case "$pick" in
+            1|2|3|4) ;;
+            0) rm -f "$tf"; return ;;
+            *) print_error "Invalid option"; sleep 1; continue ;;
+        esac
+        count=$(wc -l < "$tf")
+        # Optimize and Reset can act on every tunnel at once; Set and Probe can't.
+        case "$pick" in 1|4) allow_all=1 ;; *) allow_all="" ;; esac
+        case "$pick" in 1) action="Optimize" ;; 2) action="Set MTU on" ;; 3) action="Probe" ;; 4) action="Reset" ;; esac
+        # Refuse a no-op before asking which tunnel (design notes item 5).
+        case "$pick" in
+            1|4)
+                if ! mtu_actionable "$pick" "$tf"; then
+                    if [ "$pick" = 1 ]; then
+                        print_info "Every tunnel is already at its recommended MTU — nothing to optimize."
+                    else
+                        print_info "No tunnel has an MTU override to remove."
+                    fi
+                    press_any_key; continue
+                fi ;;
+        esac
+        if [ "$count" -eq 1 ]; then
+            sel=1
+        else
+            printf "%s which tunnel?\n\n" "$action"
+            idx=0
+            while IFS='|' read -r type role iface endpoint overhead family; do
+                idx=$((idx + 1))
+                if [ "$idx" -le 9 ]; then eval "token=\$N$idx"; else token="[$idx]"; fi
+                printf "%s  %s %s: %s\n" "$token" "$type" "$role" "$iface"
+            done < "$tf"
+            [ -n "$allow_all" ] && printf "%s  All Tunnels\n" "$NA"
+            printf "%s  Cancel\n" "$N0"
+            if [ -n "$allow_all" ]; then printf "\nChoose [1-%s/A/0]: " "$count"; else printf "\nChoose [1-%s/0]: " "$count"; fi
+            read -r sel; printf "\n"
+            case "$sel" in
+                0) continue ;;
+                [aA]) if [ -n "$allow_all" ]; then mtu_batch "$pick" "$tf"; continue; else print_error "Invalid selection"; sleep 1; continue; fi ;;
+            esac
+        fi
+        case "$sel" in ''|*[!0-9]*) print_error "Invalid selection"; sleep 1; continue ;; esac
+        if [ "$sel" -lt 1 ] || [ "$sel" -gt "$count" ]; then print_error "Invalid selection"; sleep 1; continue; fi
+        line=$(sed -n "${sel}p" "$tf")
+        oldifs=$IFS; IFS='|'; set -- $line; IFS=$oldifs
+        type="$1"; role="$2"; iface="$3"; endpoint="$4"; overhead="$5"; family="$6"
+        cur=$(mtu_get "$iface")
+        underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
+        [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
+        underlay_mtu=$(mtu_get "$underlay")
+        [ -n "$underlay_mtu" ] && rec=$((underlay_mtu - overhead)) || rec=""
+        case "$pick" in
+            1)
+                if [ -z "$rec" ]; then print_error "No recommendation (underlay unresolved)."; sleep 2; continue; fi
+                if [ "$cur" = "$rec" ]; then print_info "$iface is already at the recommended $rec."; press_any_key; continue; fi
+                mtu_apply "$iface" "$rec" "$type"
+                press_any_key ;;
+            2)
+                printf "Enter MTU for %s (1280-1500, 0 to cancel): " "$iface"; read -r val; printf "\n"
+                case "$val" in
+                    ''|0) continue ;;
+                    *[!0-9]*) print_error "Invalid MTU"; sleep 1; continue ;;
+                esac
+                if [ "$val" -ge 1280 ] && [ "$val" -le 1500 ]; then mtu_apply "$iface" "$val" "$type"; else print_error "MTU must be 1280-1500"; fi
+                press_any_key ;;
+            3) mtu_probe "$type" "$iface" "$endpoint" "$overhead" "$role" "$underlay_mtu" ;;
+            4)
+                printf "Remove the toolkit's MTU override on %s? [y/N]: " "$iface"; read -r answer; printf "\n"
+                case "$answer" in y|Y) mtu_reset "$iface" "$type" ;; *) print_info "No change." ;; esac
+                press_any_key ;;
+        esac
+    done
+}
+
+manage_vpn_tools() {
+    while true; do
+        clear
+        print_centered_header "VPN Tools"
+        printf "%s  VPN MTU Optimizer\n" "$N1"
+        printf "%s  Main menu\n" "$N0"
+        printf "\nChoose [1/0]: "
+        read -r vpn_choice
+        printf "\n"
+        case "$vpn_choice" in
+            1) manage_mtu ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
@@ -6568,23 +7020,39 @@ view_uci_config() {
                 print_centered_header "VPN Configuration"
                 
                 found_vpn=0
-                
-                if uci show network 2>/dev/null | grep -q "proto='wireguard'"; then
-                    printf "%b\n" "${CYAN}WireGuard Servers:${RESET}"
-                    for iface in $(uci show network | grep "proto='wireguard'" | cut -d'.' -f2 | cut -d'=' -f1); do
-                        private_key=$(uci get network.${iface}.private_key 2>/dev/null)
-                        listen_port=$(uci get network.${iface}.listen_port 2>/dev/null)
-                        addresses=$(uci get network.${iface}.addresses 2>/dev/null)
-                        
+
+                # GL.iNet keeps VPN config in its own packages, not the stock
+                # OpenWrt ones — read wireguard_server / ovpnserver (servers) and
+                # the wireguard / ovpnclient peer sections (clients).
+                if uci show wireguard_server 2>/dev/null | grep -q "=servers"; then
+                    printf "%b\n" "${CYAN}WireGuard Server:${RESET}"
+                    for iface in $(uci show wireguard_server 2>/dev/null | grep "=servers" | cut -d'.' -f2 | cut -d'=' -f1); do
+                        listen_port=$(uci get wireguard_server.${iface}.port 2>/dev/null)
+                        addr_v4=$(uci get wireguard_server.${iface}.address_v4 2>/dev/null)
+                        mtu=$(uci get wireguard_server.${iface}.mtu 2>/dev/null)
                         printf "  Interface: %b%s%b\n" "${GREEN}" "$iface" "${RESET}"
                         [ -n "$listen_port" ] && printf "    Listen Port: %s\n" "$listen_port"
-                        [ -n "$addresses" ] && printf "    Addresses: %s\n" "$addresses"
-                        [ -n "$private_key" ] && printf "    Private Key: %b[configured]%b\n" "${YELLOW}" "${RESET}"
+                        [ -n "$addr_v4" ] && printf "    Address: %s\n" "$addr_v4"
+                        [ -n "$mtu" ] && printf "    MTU: %s\n" "$mtu"
                         printf "\n"
                         found_vpn=1
                     done
                 fi
-                
+
+                if uci show ovpnserver 2>/dev/null | grep -q "=general"; then
+                    printf "%b\n" "${CYAN}OpenVPN Server:${RESET}"
+                    proto=$(uci get ovpnserver.vpn.proto 2>/dev/null)
+                    port=$(uci get ovpnserver.vpn.port 2>/dev/null)
+                    subnet=$(uci get ovpnserver.vpn.subnetv4 2>/dev/null)
+                    mtu=$(uci get ovpnserver.global.mtu 2>/dev/null)
+                    [ -n "$proto" ] && printf "    Protocol: %s\n" "$proto"
+                    [ -n "$port" ] && printf "    Port: %s\n" "$port"
+                    [ -n "$subnet" ] && printf "    Subnet: %s\n" "$subnet"
+                    [ -n "$mtu" ] && printf "    MTU: %s\n" "$mtu"
+                    printf "\n"
+                    found_vpn=1
+                fi
+
                 if uci show wireguard 2>/dev/null | grep -q "=peers"; then
                     printf "%b\n" "${CYAN}WireGuard Clients:${RESET}"
                     for peer in $(uci show wireguard 2>/dev/null | grep "=peers" | cut -d'.' -f2 | cut -d'=' -f1); do
@@ -6593,7 +7061,7 @@ view_uci_config() {
                         addr_v4=$(uci get wireguard.${peer}.address_v4 2>/dev/null)
                         allowed=$(uci get wireguard.${peer}.allowed_ips 2>/dev/null)
                         keepalive=$(uci get wireguard.${peer}.persistent_keepalive 2>/dev/null)
-                        
+
                         printf "  Peer: %b%s%b\n" "${GREEN}" "${name:-$peer}" "${RESET}"
                         [ -n "$endpoint" ] && printf "    Endpoint: %s\n" "$endpoint"
                         [ -n "$addr_v4" ] && printf "    Address: %s\n" "$addr_v4"
@@ -6603,23 +7071,21 @@ view_uci_config() {
                         found_vpn=1
                     done
                 fi
-                
-                if [ -f /etc/config/openvpn ] && uci show openvpn 2>/dev/null | grep -q "enabled='1'"; then
-                    printf "%b\n" "${CYAN}OpenVPN Instances:${RESET}"
-                    for instance in $(uci show openvpn | grep "enabled='1'" | cut -d'.' -f2 | cut -d'=' -f1); do
-                        config=$(uci get openvpn.${instance}.config 2>/dev/null)
-                        proto=$(uci get openvpn.${instance}.proto 2>/dev/null)
-                        port=$(uci get openvpn.${instance}.port 2>/dev/null)
-                        
-                        printf "  Instance: %b%s%b\n" "${GREEN}" "$instance" "${RESET}"
-                        [ -n "$config" ] && printf "    Config: %s\n" "$config"
+
+                if uci show ovpnclient 2>/dev/null | grep -q "=clients"; then
+                    printf "%b\n" "${CYAN}OpenVPN Clients:${RESET}"
+                    for client in $(uci show ovpnclient 2>/dev/null | grep "=clients" | cut -d'.' -f2 | cut -d'=' -f1); do
+                        name=$(uci get ovpnclient.${client}.name 2>/dev/null)
+                        remote=$(uci get ovpnclient.${client}.remote 2>/dev/null)
+                        proto=$(uci get ovpnclient.${client}.proto 2>/dev/null)
+                        printf "  Client: %b%s%b\n" "${GREEN}" "${name:-$client}" "${RESET}"
+                        [ -n "$remote" ] && printf "    Remote: %s\n" "$remote"
                         [ -n "$proto" ] && printf "    Protocol: %s\n" "$proto"
-                        [ -n "$port" ] && printf "    Port: %s\n" "$port"
                         printf "\n"
                         found_vpn=1
                     done
                 fi
-                
+
                 if [ "$found_vpn" -eq 0 ]; then
                     print_warning "No active VPN configurations found"
                     printf "\n"
@@ -6833,10 +7299,11 @@ show_menu() {
         printf "%s  AdGuardHome Control Center\n" "$N2"
         printf "%s  System Tweaks\n" "$N3"
         printf "%s  System Benchmarks\n" "$N4"
-        printf "%s  View System Configuration (UCI)\n" "$N5"
+        printf "%s  VPN Tools\n" "$N5"
+        printf "%s  View System Configuration (UCI)\n" "$N6"
         printf "%s  Exit\n" "$N0"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-5/0/?]: "
+        printf "\nChoose [1-6/0/?]: "
         read opt
         
         case $opt in
@@ -6845,7 +7312,8 @@ show_menu() {
             2) [ $AGH_DISABLED != 1 ] && agh_control_center || { print_error "AGH not found. Feature disabled."; sleep 2; } ;;
             3) system_tweaks ;;
             4) benchmark_system ;;
-            5) view_uci_config ;;
+            5) manage_vpn_tools ;;
+            6) view_uci_config ;;
             0) clear; printf "\n"; print_success "Thanks for using GL.iNet Toolkit!"; printf "\n"; exit 0 ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac

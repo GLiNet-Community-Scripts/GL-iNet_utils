@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-21
+# Version: 2026-07-26
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -328,6 +328,24 @@ ensure_stty() {
 # Cursor advance probe: prints sym at col 1, queries cursor via ESC[6n,
 # returns number of columns advanced. Cleans up after itself. Falls back to 2
 # (which resolves to the Windows Terminal profile) if stty/the probe is absent.
+probe_da2() {
+    # Secondary Device Attributes -> "ESC [ > Type ; Version ; Keyboard c".
+    # Used only to separate terminals that share an advance signature but render
+    # differently. Never consulted on its own: DA2 "0;95" is also emitted by
+    # terminals that draw emoji correctly, so callers must pair it with a width
+    # check. Returns "Type;Version" or empty.
+    local saved stty_bin tmpf="/tmp/.da2.$$" out
+    stty_bin=$(command -v stty 2>/dev/null) || return 1
+    saved=$("$stty_bin" -g 2>/dev/null)     || return 1
+    "$stty_bin" raw -echo min 0 time 3 2>/dev/null
+    printf '\033[>c' >/dev/tty
+    dd if=/dev/tty bs=32 count=1 >"$tmpf" 2>/dev/null
+    "$stty_bin" "$saved" 2>/dev/null
+    out=$(sed 's/.*\[>\([0-9]*\);\([0-9]*\).*/\1;\2/' "$tmpf" 2>/dev/null)
+    rm -f "$tmpf"
+    case "$out" in [0-9]*\;[0-9]*) printf '%s' "$out" ;; *) return 1 ;; esac
+}
+
 probe_advance() {
     local sym="$1" col saved stty_bin tmpf="/tmp/.probe.$$"
     stty_bin=$(command -v stty 2>/dev/null) || { printf '2'; return; }
@@ -379,6 +397,20 @@ detect_output_mode() {
             wide=$(probe_advance '✅')
             if [ "$wide" = "1" ]; then
                 _TERM_PROFILE="ttyd"            # xterm.js: all emoji adv=1
+                # NOTE how narrow this key is: macOS Terminal answers DA2 1;95,
+                # differing only in the type digit, and Windows Terminal 0;10.
+                # Keying on the version alone would capture Terminal.app. Two
+                # things prevent that - the type digit, AND the fact that mac
+                # never reaches here because its ✅ advance is 2. Do not relax
+                # either condition. (Measured: Termius 0;95, mac 1;95, wt 0;10.)
+                # Same advance, different rendering: Termius reports DA2 0;95 and
+                # PAINTS ✅ two cells while advancing one, and paints 🔒 one cell
+                # while advancing two - the inverse of xterm.js. Only reached when
+                # adv==1, so terminals sharing DA2 0;95 that measure correctly
+                # (iTerm2) never match.
+                case "$(probe_da2 2>/dev/null)" in
+                    0\;95) _TERM_PROFILE="termius" ;;
+                esac
             else
                 ambig=$(probe_advance '⚠️')
                 [ "$ambig" = "2" ] && _TERM_PROFILE="wt"
@@ -391,7 +423,9 @@ detect_output_mode() {
     # ── Step 4: Set symbol variables ─────────────────────────────────────────
     if [ "$OUTPUT_MODE" = "full" ]; then
 
-        # Wide emoji (✅ ❌ ⏳): adv=2 on mac/wt, adv=1 on ttyd — 1sp correct for all
+        # Wide emoji (✅ ❌ ⏳): adv=2 on mac/wt, adv=1 on ttyd — 1sp correct for
+        # those three. NOT universal: termius advances 1 but PAINTS 2, so it
+        # overrides these below. Only safe where advance == painted width.
         # (⏳ is wide-by-default, NOT ambig+VS like ⚠️ ℹ️ ⚙️ — it takes 1sp even
         # in the default profile where those take 2sp)
         _S_OK="✅ "
@@ -405,6 +439,34 @@ detect_output_mode() {
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
                 NQ="❓"; NCL="🆑"; NA="🅰️"
+                # xterm.js advances AND paints all emoji at 1 cell, so pad to
+                # the advance. NOT verified against a real ttyd session - if the
+                # web terminal paints 2 cells like Termius it needs those pads.
+                _S_RLA_AC="✅       "; _S_RLA_IA="❌       "; _S_RLA_RO="🔒      "
+                ;;
+            termius)
+                # Inherits ttyd's symbol set; only the fixed-width status cells
+                # differ, padded to RENDERED width rather than advance:
+                #   ✅ ❌ paint 2 -> 6sp      🔒 paints 1 (mono text glyph) -> 7sp
+                # Verified by eye at three font sizes; advances are a wcwidth
+                # table lookup and do not vary with font size.
+                # Wide-by-default BMP emoji advance 1 but PAINT 2 here, so the
+                # single trailing space set outside this case is drawn over the
+                # glyph's right half and the message text butts against it.
+                # Two spaces give one visible gap. The ambiguous+VS16 set below
+                # advances 2 and paints 2, so it is correct with one.
+                _S_OK="✅  ";   _S_ERR="❌  ";  _S_TIME="⏳  "
+                _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ "
+                # Keycaps advance 3 (digit + VS16 + U+20E3 counted separately)
+                # but PAINT 2, so with the call site's two spaces they land where
+                # the ASCII reference does - no pad needed. NA likewise.
+                # NQ and NCL are printed with ONE space by their call sites, so
+                # each carries one of its own to match the numbered rows.
+                # Measured, not inferred: every glyph paints 2 here except 🔒.
+                N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
+                N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
+                NQ="❓ "; NCL="🆑 "; NA="🅰️"
+                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒       "
                 ;;
             wt)
                 # Windows Terminal: ambig+VS adv=2 — 1sp sufficient
@@ -413,6 +475,7 @@ detect_output_mode() {
                 N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
                 N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
                 NQ="[?] "; NCL="[CL]"; NA="[A]"
+                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒      "
                 ;;
             *)
                 # macOS Terminal + Linux terminals (default)
@@ -421,6 +484,7 @@ detect_output_mode() {
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
                 NQ="❓"; NCL="🆑"; NA="🅰️"
+                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒      "
                 ;;
         esac
 
@@ -435,6 +499,7 @@ detect_output_mode() {
         N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
         N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
         NQ="[?] "; NCL="[CL]"; NA="[A]"
+        _S_RLA_AC="[AC]    "; _S_RLA_IA="[IA]    "; _S_RLA_RO="[RO]    "
     fi
 }
 
@@ -444,9 +509,25 @@ detect_output_mode() {
 # given sequence just ignore it (PuTTY ignores the OSC colors; non-xterm ignore
 # the resize), so this is safe everywhere.
 TERM_MIN_COLS=110
-TERM_MIN_ROWS=30
+TERM_MIN_ROWS=32      # measured: Hardware Information page 1 renders 32 visible
+                      # lines (header box 3 + rule + 27 body + rule + nav). Any
+                      # shorter and the header scrolls off the top.
+# The widest screen the toolkit draws (Remote LAN Access rule = 101 cols). Below
+# this, tables wrap and alignment is lost. Distinct from TERM_MIN_COLS, which is
+# what we *ask* for - some terminals (Termius, verified) ignore the resize
+# escape entirely, so we advise the user instead of assuming it worked.
+TERM_NEED_COLS=101
 _TERM_ORIG_SIZE=""    # "rows;cols" saved at setup; empty = nothing to restore
 _TERM_RESTORED=""
+
+# Message helpers. Defined HERE rather than further down because
+# terminal_size_advisory runs before that point and needs them; the ${VARS} they
+# reference are resolved at call time, so an early definition is safe.
+print_success() { printf "%b\n" "${BOLD}${GREEN}${_S_OK}${RESET}${GREEN}$1${RESET}"; }
+print_error()   { printf "%b\n" "${BOLD}${RED}${_S_ERR}${RESET}${RED}$1${RESET}"; }
+print_warning() { printf "%b\n" "${BOLD}${YELLOW}${_S_WARN}${RESET}${YELLOW}$1${RESET}"; }
+print_info()    { printf "%b\n" "${BOLD}${BLUE}${_S_INFO}${RESET}${BLUE}$1${RESET}"; }
+print_action()  { printf "%b\n" "${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}$1${RESET}"; }
 
 terminal_setup() {
     local sz r c nr nc
@@ -470,6 +551,36 @@ terminal_setup() {
     { [ "$nr" != "$r" ] || [ "$nc" != "$c" ]; } && printf '\033[8;%s;%st' "$nr" "$nc"
 }
 
+terminal_size_advisory() {
+    # Called after terminal_setup, which may or may not have been honoured.
+    # Re-reads the real size and tells the user plainly if it is too small,
+    # offering a recheck because some terminals give no visible size indicator.
+    [ "${GL_NO_TERM_SETUP+x}" ] && return
+    [ -t 1 ] || return
+    command -v stty >/dev/null 2>&1 || return
+    while true; do
+        sz=$(stty size 2>/dev/null </dev/tty); r=${sz% *}; c=${sz#* }
+        case "$r" in ''|*[!0-9]*) return ;; esac
+        case "$c" in ''|*[!0-9]*) return ;; esac
+        [ "$c" -ge "$TERM_NEED_COLS" ] && [ "$r" -ge "$TERM_MIN_ROWS" ] && return
+        printf '\n'
+        print_warning "This window is ${c} x ${r}. Some screens need ${TERM_NEED_COLS} x ${TERM_MIN_ROWS}."
+        [ "$c" -lt "$TERM_NEED_COLS" ] && \
+            print_info "Too narrow by $((TERM_NEED_COLS - c)) columns - wide tables will wrap and lose their alignment."
+        [ "$r" -lt "$TERM_MIN_ROWS" ] && \
+            print_info "Too short by $((TERM_MIN_ROWS - r)) rows - full screens will scroll."
+        print_info "This toolkit asks the terminal to resize itself, but some terminals"
+        print_info "ignore that. Widen the window by hand, then recheck."
+        printf '\n [R] Recheck size   [C] Continue anyway: '
+        read -r _tsz_ans
+        printf '\n'
+        case "$_tsz_ans" in
+            r|R) continue ;;
+            *) return ;;
+        esac
+    done
+}
+
 terminal_restore() {
     [ -n "$_TERM_RESTORED" ] && return              # idempotent - run once
     _TERM_RESTORED=1
@@ -488,6 +599,7 @@ detect_output_mode
 
 # Widen + dark-theme the terminal for this session; restore it all on exit.
 terminal_setup
+terminal_size_advisory
 trap 'terminal_restore' EXIT
 trap 'terminal_restore; exit 130' INT
 trap 'terminal_restore; exit 143' TERM
@@ -563,11 +675,6 @@ print_centered_header() {
     printf "%b\n\n" "${CYAN}└────────────────────────────────────────────────┘${RESET}"
 }
 
-print_success() { printf "%b\n" "${BOLD}${GREEN}${_S_OK}${RESET}${GREEN}$1${RESET}"; }
-print_error()   { printf "%b\n" "${BOLD}${RED}${_S_ERR}${RESET}${RED}$1${RESET}"; }
-print_warning() { printf "%b\n" "${BOLD}${YELLOW}${_S_WARN}${RESET}${YELLOW}$1${RESET}"; }
-print_info()    { printf "%b\n" "${BOLD}${BLUE}${_S_INFO}${RESET}${BLUE}$1${RESET}"; }
-print_action()  { printf "%b\n" "${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}$1${RESET}"; }
 
 # Helper: Secure Password Input with Asterisks
 get_password() {
@@ -4709,6 +4816,7 @@ lscpu|/usr/bin/lscpu|B|/usr/bin/lscpu
 apache|/usr/bin/htpasswd|R|/usr/bin/htpasswd
 htop|/usr/bin/htop|B|/usr/bin/htop
 rsync|/usr/bin/rsync|B|/usr/bin/rsync
+diffutils|/usr/bin/diff|B|/usr/bin/diff
 vim-fuller|/usr/bin/vim|R|/usr/bin/vim
 speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
 
@@ -5554,6 +5662,53 @@ manage_toolkit() {
 # endpoint) - protocol overhead. WireGuard overhead is exact (60 IPv4 / 80 IPv6);
 # OpenVPN is a conservative estimate. Everything is derived at runtime from
 # `wg show` / `ip` — no interface names or subnets are hardcoded.
+# Derive OpenVPN data-channel overhead from the running configuration rather than
+# assuming a worst case.  Measured against a live tunnel with tcpdump: UDP +
+# AES-256-GCM + tun + peer-id = 52 bytes on IPv4, versus the 69 previously assumed.
+#   IPv4 20 + UDP 8 + opcode/peer-id 4 + GCM packet-id 4 + auth tag 16 = 52
+mtu_ovpn_overhead() {                     # iface -> bytes, or empty if undecidable
+    _oif="$1"; _ocfg=""; _ocipher=""; _oauth=""; _oproto=""; _ocomp=0; _ofam=IPv4
+    case "$_oif" in
+        ovpnserver) _ocipher=$(uci -q get ovpnserver.vpn.cipher)
+                    _oauth=$(uci -q get ovpnserver.vpn.auth)
+                    _oproto=$(uci -q get ovpnserver.vpn.proto) ;;
+        *)          _ocfg=$(uci -q get network."$_oif".config)
+                    [ -n "$_ocfg" ] && {
+                        _ocipher=$(uci -q get ovpnclient."$_ocfg".cipher)
+                        _oauth=$(uci -q get ovpnclient."$_ocfg".hmac)
+                        _oproto=$(uci -q get ovpnclient."$_ocfg".proto); } ;;
+    esac
+    # the negotiated cipher wins over the configured one - NCP may pick another
+    _oneg=$(logread 2>/dev/null | grep -i "Data Channel: Cipher" | tail -1 \
+            | sed -n "s/.*Cipher '\([^']*\)'.*/\1/p")
+    [ -n "$_oneg" ] && _ocipher="$_oneg"
+    [ -z "$_ocipher" ] && return 1
+    # compression adds a byte only when a directive is actually emitted
+    grep -qE '^(comp-lzo|compress)' "/tmp/${_oif}/${_oif}" 2>/dev/null && _ocomp=1
+    case "$_oproto" in *tcp*) _otr=20 ;; *) _otr=8 ;; esac
+    # The family that matters is the UNDERLAY - the address OpenVPN's socket talks
+    # to - not what routes into the tunnel.  A full-tunnel client carries the IPv6
+    # default route while its own transport is still IPv4; testing the route table
+    # reports IPv6 there and inflates the overhead by 20 bytes.
+    _orem=$(sed -n 's/^remote  *\([^ ]*\).*/\1/p' "/tmp/${_oif}/${_oif}" 2>/dev/null | head -1)
+    [ -z "$_orem" ] && [ -n "$_ocfg" ] && _orem=$(uci -q get ovpnclient."$_ocfg".remote)
+    case "$_orem" in
+        *:*:*) _ofam=IPv6 ;;
+    esac
+    [ "$_ofam" = IPv6 ] && _oip=40 || _oip=20
+    case "$_ocipher" in
+        *GCM*|*CHACHA20*|*gcm*|*chacha20*) _ocrypt=$((4 + 16)) ;;   # pktid 4 + tag 16
+        *CBC*|*cbc*)
+            case "$_oauth" in
+                *SHA512*|*sha512*) _ohmac=64 ;; *SHA256*|*sha256*) _ohmac=32 ;;
+                *MD5*|*md5*)       _ohmac=16 ;; *)                 _ohmac=20 ;;
+            esac
+            _ocrypt=$((8 + _ohmac + 16 + 16)) ;;                    # pktid+hmac+IV+pad
+        *) return 1 ;;
+    esac
+    echo $(( _oip + _otr + 4 + _ocrypt + _ocomp ))
+}
+
 mtu_get() { ip link show "$1" 2>/dev/null | sed -n 's/.* mtu \([0-9]*\).*/\1/p' | head -1; }
 
 # One line per active tunnel: type|role|iface|endpoint|overhead|underlay_family
@@ -5577,7 +5732,10 @@ mtu_detect() {
         [ "$(ip -4 addr show dev "$iface" 2>/dev/null | grep -c 'inet ')" -eq 0 ] && continue
         endpoint=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*peer \([0-9.]*\).*#\1#p' | head -1)
         case "$iface" in *server*) role=Server ;; *) role=Client ;; esac
-        printf 'OpenVPN|%s|%s|%s|69|IPv4\n' "$role" "$iface" "$endpoint"
+        overhead=$(mtu_ovpn_overhead "$iface" 2>/dev/null)
+        [ -z "$overhead" ] && overhead=69          # undecidable: keep the safe estimate
+        case "$overhead" in 72|92) family=IPv6 ;; *) family=IPv4 ;; esac
+        printf 'OpenVPN|%s|%s|%s|%s|%s\n' "$role" "$iface" "$endpoint" "$overhead" "$family"
     done
 }
 
@@ -5947,17 +6105,1712 @@ manage_mtu() {
     done
 }
 
+# =============================================================================
+#  Remote LAN Access  -  read / guard / write / detect / authorise / probe
+#  Drives GL's own uci keys and apply helpers so the fw3/fw4 split never
+#  reaches us.  See CHANGELOG 2026-07-26.
+# =============================================================================
+
+# ============================================================================
+# Remote LAN Access - read layer.  Candidate code for glinet_utils.sh.
+# Pure reads: no uci writes, no firewall changes.  Runs ON a router.
+#
+#   sh rla_lib.sh dump     print everything this layer resolves
+# ============================================================================
+
+# ---- detect active VPN instances -------------------------------------------
+# one line per instance: type|role|iface
+rla_detect() {
+    local i
+    for i in $(wg show interfaces 2>/dev/null); do
+        [ -n "$(ip -4 addr show "$i" 2>/dev/null | grep inet)" ] || continue
+        case "$i" in
+            *server*) printf 'WireGuard|server|%s\n' "$i" ;;
+            *)        printf 'WireGuard|client|%s\n' "$i" ;;
+        esac
+    done
+    for i in $(ls /sys/class/net 2>/dev/null | grep -E '^(tun|ovpn)'); do
+        [ -n "$(ip -4 addr show "$i" 2>/dev/null | grep inet)" ] || continue
+        case "$i" in
+            *server*) printf 'OpenVPN|server|%s\n' "$i" ;;
+            *)        printf 'OpenVPN|client|%s\n' "$i" ;;
+        esac
+    done
+}
+
+# ---- GL's UI/source section for a tunnel's toggles --------------------------
+rla_src_section() {
+    local iface="$1" type="$2" role="$3" rule cfg proto
+    if [ "$role" = server ]; then
+        case "$type" in
+            WireGuard) uci show wireguard_server 2>/dev/null | grep '=servers$' | head -1 | cut -d= -f1 ;;
+            OpenVPN)   uci show ovpnserver 2>/dev/null | grep '=general$' | head -1 | cut -d= -f1 ;;
+        esac
+        return 0
+    fi
+    rule=$(uci show route_policy 2>/dev/null | grep "\.via='$iface'\$" | grep '@rule' | head -1 | cut -d. -f1-2)
+    if [ -n "$rule" ] && [ "$(uci -q get "$rule" 2>/dev/null)" = rule ]; then
+        printf '%s' "$rule"; return 0
+    fi
+    cfg=$(uci -q get network."$iface".config 2>/dev/null)
+    proto=$(uci -q get network."$iface".proto 2>/dev/null)
+    [ -n "$cfg" ] || return 0
+    case "$proto" in
+        wgclient)   printf 'wireguard.%s' "$cfg" ;;
+        ovpnclient) printf 'ovpnclient.%s' "$cfg" ;;
+    esac
+}
+
+# ---- firewall zone name for an interface (NOT assumed = iface) -------------
+rla_zone() {
+    local iface="$1" z n nets
+    for z in $(uci show firewall 2>/dev/null | grep '=zone$' | cut -d= -f1); do
+        n=$(uci -q get "$z.name" 2>/dev/null)
+        nets=" $(uci -q get "$z.network" 2>/dev/null) "
+        case "$nets" in *" $iface "*) printf '%s' "${n:-$iface}"; return 0 ;; esac
+        [ "$n" = "$iface" ] && { printf '%s' "$n"; return 0; }
+    done
+    printf '%s' "$iface"
+}
+
+# ---- toggle state: read the FIREWALL key (what actually governs behaviour) --
+# masq: absent = ON (GL default).  access: absent/ACCEPT = ON.
+rla_masq() {
+    local zone="$1" v
+    v=$(uci -q get firewall."$zone".masq 2>/dev/null)
+    case "$v" in 0) echo off ;; 1) echo on ;; '') echo on ;; *) echo "?" ;; esac
+}
+rla_access() {
+    local zone="$1" v
+    v=$(uci -q get firewall."$zone".input 2>/dev/null)
+    case "$v" in ACCEPT) echo on ;; REJECT|DROP) echo off ;; '') echo "?" ;; *) echo "?" ;; esac
+}
+
+# ---- addresses --------------------------------------------------------------
+rla_tunnel_ip()  { ip -4 addr show "$1" 2>/dev/null | sed -n 's#.*inet \([0-9.]*\)/.*#\1#p' | head -1; }
+rla_lan_ip()     { uci -q get network.lan.ipaddr 2>/dev/null; }
+rla_lan_cidr()   { local ip; ip=$(rla_lan_ip); [ -n "$ip" ] && printf '%s.0/24' "${ip%.*}"; }
+
+# peer's tunnel IP (the far router's tunnel address)
+rla_peer_tunnel_ip() {
+    local iface="$1" type="$2" role="$3" own peer
+    own=$(rla_tunnel_ip "$iface")
+    [ -n "$own" ] || return 0
+    # point-to-point tunnels expose a peer address; GL's OpenVPN uses
+    # "topology subnet" which does not, so fall back to .1 of the subnet.
+    peer=$(ip -4 addr show "$iface" 2>/dev/null | sed -n 's#.*peer \([0-9.]*\).*#\1#p' | head -1)
+    [ -n "$peer" ] && { printf '%s' "$peer"; return 0; }
+    if [ "$role" = client ]; then
+        printf '%s.1' "${own%.*}"
+        return 0
+    fi
+    # server: first connected peer (see rla_peers for the full list)
+    case "$type" in
+        WireGuard)
+            peer=$(wg show "$iface" allowed-ips 2>/dev/null | grep -oE '[0-9.]+/32' \
+                   | grep -v "^${own}/" | head -1)
+            printf '%s' "${peer%/*}" ;;
+        OpenVPN)
+            # GL configures no status file, so use the daemon's own log
+            peer=$(logread 2>/dev/null | grep "MULTI: Learn:" | tail -1 \
+                   | sed -n 's/.*MULTI: Learn: \([0-9.]*\) .*/\1/p')
+            printf '%s' "$peer" ;;
+    esac
+}
+
+# ---- connected peers on a SERVER: one line per peer  ident|tunnel_ip -------
+# WireGuard: from the kernel.  OpenVPN: needs a status file, which GL does not
+# configure, so clients are not enumerable - callers must degrade gracefully.
+rla_peers() {
+    local iface="$1" type="$2" own
+    own=$(rla_tunnel_ip "$iface")
+    case "$type" in
+        WireGuard)
+            wg show "$iface" dump 2>/dev/null | tail -n +2 | while IFS="$(printf '\t')" read -r pk psk ep aips hs rx tx ka; do
+                [ -z "$aips" ] && continue
+                printf '%s|%s\n' "$(printf '%s' "$pk" | cut -c1-8)" "$(printf '%s' "$aips" | tr ',' '\n' | grep '/32$' | head -1 | cut -d/ -f1)"
+            done ;;
+        OpenVPN) return 0 ;;
+    esac
+}
+
+# ---- remote LAN: stored -> specific AllowedIPs -> pushed route -> unset -----
+rla_remote_lan() {
+    local iface="$1" type="$2" v ai r own ownnet
+    v=$(uci -q get glutils."vpn_$iface".remote_lan 2>/dev/null)
+    [ -n "$v" ] && { printf '%s' "$v"; return 0; }
+    own=$(rla_tunnel_ip "$iface")
+    ownnet="${own%.*}."          # exclude the tunnel's own subnet
+    if [ "$type" = WireGuard ]; then
+        ai=$(wg show "$iface" allowed-ips 2>/dev/null | tr '\t' '\n' | tr ',' '\n' \
+             | grep -E '^[0-9.]+/[0-9]+$' | grep -v '^0\.0\.0\.0/0$' | grep -v '/32$' \
+             | grep -v "^${ownnet}" | head -1)
+        [ -n "$ai" ] && { printf '%s' "$ai"; return 0; }
+    else
+        r=$(ip route show dev "$iface" 2>/dev/null | awk '{print $1}' \
+            | grep -E '^(10|172|192)\.' | grep '/' | grep -v "^${ownnet}" | head -1)
+        [ -n "$r" ] && { printf '%s' "$r"; return 0; }
+    fi
+}
+
+# ---- does traffic to <dest> actually leave via <iface>? ---------------------
+# Uses the kernel's own decision (ip route get), which accounts for policy
+# routing. Grepping the main table is WRONG: OpenVPN clients use table 8000 and
+# WireGuard clients table 1001, so a main-table check misses both.
+rla_routes_via() {
+    local dest="$1" iface="$2" probe out
+    [ -z "$dest" ] || [ -z "$iface" ] && return 1
+    probe="${dest%%/*}"
+    case "$dest" in */*) probe="${probe%.*}.1" ;; esac
+    out=$(ip route get "$probe" 2>/dev/null | head -1)
+    case "$out" in *" dev $iface "*) return 0 ;; esac
+    return 1
+}
+
+# ---- subnet overlap guard ---------------------------------------------------
+# 0 = overlap (unsafe), 1 = distinct.  /24 granularity, matches GL defaults.
+rla_overlap() {
+    local a="$1" b="$2"
+    [ -z "$a" ] || [ -z "$b" ] && return 1
+    [ "${a%%/*}" = "${b%%/*}" ] && return 0
+    return 1
+}
+
+
+# ---- flow table -------------------------------------------------------------
+# Emits one line per flow:  dir|from_label|from_addr|as|to|status|lever
+#   status: active | blocked | unknown
+#   lever : masq | route | access | remote | tunnel   (UI maps these to options)
+#
+# Status is COMPUTED from config, not probed - "Test reachability" is what
+# probes. Reachability of a destination uses the kernel's own decision
+# (rla_routes_via), which accounts for policy routing on both protocols.
+rla_flows() {
+    local iface="$1" type="$2" role="$3"
+    local zone tun peer lan lanip rlan masq acc lo hi rgw asrc st rr fwd
+    zone=$(rla_zone "$iface")
+    tun=$(rla_tunnel_ip "$iface")
+    peer=$(rla_peer_tunnel_ip "$iface" "$type" "$role")
+    lanip=$(rla_lan_ip); lan=$(rla_lan_cidr)
+    rlan=$(rla_remote_lan "$iface" "$type")
+    masq=$(rla_masq "$zone"); acc=$(rla_access "$zone")
+    lo="${lanip%.*}.2-254"
+    [ -z "$peer" ] && peer="not set"
+    if [ -n "$rlan" ]; then hi="${rlan%.*}.2-254"; rgw="${rlan%.*}.1"
+    else rlan="not set"; hi="not set"; rgw="not set"; fi
+    if [ "$masq" = on ]; then asrc="$tun"; else asrc="source IP"; fi
+
+    # far side accepts our un-NATed source? WireGuard filters by AllowedIPs
+    # (needs the remote config -> unknown); OpenVPN does no source filtering.
+    _acc() { if [ "$masq" = on ]; then echo active
+             elif [ "$type" = OpenVPN ]; then echo active
+             else echo unknown; fi; }
+
+    # ---- OUTBOUND: static 6 rows -------------------------------------------
+    # to the peer tunnel address (up whenever the tunnel is up)
+    printf 'out|ld|LAN devices|%s|%s|%s|%s|masq\n'   "$lo"    "$asrc" "$peer" "$(_acc)"
+    printf 'out|rt|this router|%s|%s|%s|unknown|remote\n' "$tun" "$tun" "$peer"
+    printf 'out|rl|this router|%s|%s|%s|%s|masq\n'   "$lanip" "$asrc" "$peer" "$(_acc)"
+    # to the remote LAN
+    if [ "$rlan" = "not set" ]; then
+        printf 'out|ld|LAN devices|%s|%s|not set|unknown|identify\n'   "$lo"    "$asrc"
+        printf 'out|rt|this router|%s|%s|not set|unknown|identify\n'   "$tun"   "$tun"
+        printf 'out|rl|this router|%s|%s|not set|unknown|identify\n'   "$lanip" "$asrc"
+    else
+        rla_routes_via "$rlan" "$iface" && rr=yes || rr=no
+        printf 'out|ld|LAN devices|%s|%s|%s|%s|masq\n' "$lo" "$asrc" "$rlan" "$(_acc)"
+        [ "$rr" = yes ] && st=active || st=blocked
+        printf 'out|rt|this router|%s|%s|%s|%s|route\n' "$tun" "$tun" "$rlan" "$st"
+        [ "$rr" = yes ] && st=$(_acc) || st=blocked
+        printf 'out|rl|this router|%s|%s|%s|%s|route\n' "$lanip" "$asrc" "$rlan" "$st"
+    fi
+
+    # ---- INBOUND: static 6 rows --------------------------------------------
+    # MEASURED: the access toggle gates traffic to our tunnel address too.
+    # (An earlier reading said otherwise, but that harness wrote only the uci
+    # SOURCE key, which does not change the firewall - so access was never
+    # actually off in that test.)
+    fwd=$(rla_fwd_to_lan "$zone" && echo yes || echo no)
+    [ "$acc" = on ] && st=active || st=blocked
+    printf 'in|ld|remote LAN|%s|?|%s|%s|access\n'    "$hi"   "$tun" "$st"
+    printf 'in|rt|remote router|%s|?|%s|%s|access\n' "$peer" "$tun" "$st"
+    printf 'in|rl|remote router|%s|?|%s|%s|access\n' "$rgw"  "$tun" "$st"
+    if [ "$acc" != on ] || [ "$fwd" != yes ]; then st=blocked; else st=unknown; fi
+    printf 'in|ld|remote LAN|%s|?|%s|%s|access\n'    "$hi"   "$lan" "$st"
+    printf 'in|rt|remote router|%s|?|%s|%s|access\n' "$peer" "$lan" "$st"
+    printf 'in|rl|remote router|%s|?|%s|%s|remote\n' "$rgw" "$lan" "$st"
+}
+
+# does this protocol accept un-NATed LAN sources from us?
+# WireGuard filters by AllowedIPs (needs remote config -> unknown here).
+# OpenVPN does no source filtering -> always accepts.
+rla_far_accepts() { [ "$1" = OpenVPN ]; }
+
+# is tunnel -> lan forwarding configured for this zone?
+rla_fwd_to_lan() {
+    local zone="$1" f
+    for f in $(uci show firewall 2>/dev/null | grep "\.src='$zone'\$" | cut -d. -f1-2); do
+        [ "$(uci -q get "$f.dest")" = lan ] || continue
+        [ "$(uci -q get "$f.enabled")" = 0 ] && continue
+        return 0
+    done
+    return 1
+}
+
+# ============================================================================
+case "${1:-}" in
+dump)
+  printf 'host          %s  fw %s\n' "$(uname -n)" "$(cat /etc/glversion 2>/dev/null)"
+  printf 'lan           %s (%s)\n' "$(rla_lan_cidr)" "$(rla_lan_ip)"
+  printf 'backend       %s\n' "$(nft list tables 2>/dev/null | grep -q 'inet fw4' && echo nftables || echo iptables)"
+  rla_detect | while IFS='|' read -r type role iface; do
+    [ -z "$iface" ] && continue
+    src=$(rla_src_section "$iface" "$type" "$role")
+    zone=$(rla_zone "$iface")
+    tun=$(rla_tunnel_ip "$iface")
+    peer=$(rla_peer_tunnel_ip "$iface" "$type" "$role")
+    rlan=$(rla_remote_lan "$iface" "$type")
+    printf '\n%s %s: %s\n' "$type" "$role" "$iface"
+    printf '  src section   %s\n' "${src:-UNRESOLVED}"
+    printf '  fw zone       %s\n' "$zone"
+    printf '  tunnel ip     %s\n' "${tun:-?}"
+    printf '  peer tun ip   %s\n' "${peer:-?}"
+    printf '  remote lan    %s\n' "${rlan:-<not set>}"
+    [ "$role" = server ] && printf '  peers         %s\n' "$(rla_peers "$iface" "$type" | tr '\n' ' ')"
+    printf '  masq          %s   (fw key=%s, src key=%s)\n' "$(rla_masq "$zone")" \
+           "$(uci -q get firewall.$zone.masq)" "$(uci -q get $src.masq 2>/dev/null)"
+    printf '  access        %s   (fw key=%s)\n' "$(rla_access "$zone")" \
+           "$(uci -q get firewall.$zone.input)"
+    printf '  rlan via tun  %s\n' "$(rla_routes_via "$rlan" "$iface" && echo yes || echo no)"
+    printf '  peer via tun  %s\n' "$(rla_routes_via "$peer" "$iface" && echo yes || echo no)"
+    printf '  lan overlap   %s\n' "$(rla_overlap "$(rla_lan_cidr)" "$rlan" && echo COLLISION || echo ok)"
+  done
+  ;;
+flows)
+  rla_detect | while IFS='|' read -r type role iface; do
+    [ -z "$iface" ] && continue
+    printf '\n%s %s: %s\n' "$type" "$role" "$iface"
+    printf '  %-4s %-13s %-17s %-11s %-17s %-8s %s\n' dir from addr as to status lever
+    rla_flows "$iface" "$type" "$role" | while IFS='|' read -r d fl fa as to st lv; do
+      printf '  %-4s %-13s %-17s %-11s %-17s %-8s %s\n' "$d" "$fl" "$fa" "$as" "$to" "$st" "$lv"
+    done
+  done ;;
+*) : ;;   # silent when sourced
+esac
+
+# Remote LAN Access - guardrail layer.  See rla-guardrail-spec.md.
+# Pure busybox ash; no bashisms, no external deps beyond ip/netstat/uci.
+
+# ---- G4: CIDR arithmetic -----------------------------------------------------
+guard_ip2int() { # a.b.c.d -> integer, or empty on garbage
+    case "$1" in
+        *[!0-9.]*|"") return 1 ;;
+    esac
+    IFS=. read -r a b c d <<EOF
+$1
+EOF
+    [ -z "$d" ] && return 1
+    for o in "$a" "$b" "$c" "$d"; do
+        [ -z "$o" ] && return 1
+        [ "$o" -gt 255 ] 2>/dev/null && return 1
+    done
+    echo $(( (a << 24) + (b << 16) + (c << 8) + d ))
+}
+
+guard_cidr_contains() { # <cidr|ip> <ip> -> 0 if ip falls inside
+    cidr="$1"; probe="$2"
+    [ -z "$cidr" ] || [ -z "$probe" ] && return 1
+    case "$cidr" in
+        */*) net="${cidr%%/*}"; bits="${cidr##*/}" ;;
+        *)   net="$cidr";       bits=32 ;;
+    esac
+    case "$bits" in *[!0-9]*|"") return 1 ;; esac
+    [ "$bits" -gt 32 ] && return 1
+    ni=$(guard_ip2int "$net") || return 1
+    pi=$(guard_ip2int "$probe") || return 1
+    [ -z "$ni" ] || [ -z "$pi" ] && return 1
+    if [ "$bits" -eq 0 ]; then return 0; fi
+    mask=$(( 0xFFFFFFFF ^ ((1 << (32 - bits)) - 1) ))
+    [ $(( ni & mask )) -eq $(( pi & mask )) ]
+}
+
+guard_overlap() { # <cidr_a> <cidr_b> -> 0 if the ranges intersect
+    a="$1"; b="$2"
+    case "$a" in */*) an="${a%%/*}"; ab="${a##*/}" ;; *) an="$a"; ab=32 ;; esac
+    case "$b" in */*) bn="${b%%/*}"; bb="${b##*/}" ;; *) bn="$b"; bb=32 ;; esac
+    case "$ab$bb" in *[!0-9]*) return 1 ;; esac
+    ai=$(guard_ip2int "$an") || return 1
+    bi=$(guard_ip2int "$bn") || return 1
+    [ -z "$ai" ] || [ -z "$bi" ] && return 1
+    # the shorter prefix is the coarser net; they overlap iff one contains the other's base
+    if [ "$ab" -le "$bb" ]; then bits="$ab"; else bits="$bb"; fi
+    [ "$bits" -eq 0 ] && return 0
+    mask=$(( 0xFFFFFFFF ^ ((1 << (32 - bits)) - 1) ))
+    [ $(( ai & mask )) -eq $(( bi & mask )) ]
+}
+
+# ---- G1: session discovery ---------------------------------------------------
+guard_my_source() { # source IP of the session running this script
+    if [ -n "$SSH_CLIENT" ]; then
+        echo "${SSH_CLIENT%% *}"
+    elif [ -n "$SSH_CONNECTION" ]; then
+        echo "${SSH_CONNECTION%% *}"
+    else
+        echo "127.0.0.1"          # web terminal / console - never assume safe
+    fi
+}
+
+guard_sessions() { # -> ip|svc  for every live management session
+    netstat -tn 2>/dev/null | awk '
+        /ESTABLISHED/ {
+            lport = $4; sub(/.*:/, "", lport)          # local port
+            rip   = $5; sub(/:[^:]*$/, "", rip)        # foreign ip, strip :port
+            svc = ""
+            if (lport == "22") svc = "ssh"
+            else if (lport == "80" || lport == "443") svc = "http"
+            if (svc != "" && rip ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) print rip "|" svc
+        }' | sort -u
+}
+
+guard_lan_cidr() { # local LAN as a.b.c.0/nn
+    ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2; exit}' | while read -r a; do
+        i="${a%%/*}"; b="${a##*/}"
+        IFS=. read -r w x y z <<EOF
+$i
+EOF
+        [ "$b" = 24 ] && echo "$w.$x.$y.0/24" || echo "$w.$x.$y.0/$b"
+    done
+}
+
+guard_tunnel_cidr() { # tunnel subnet for an iface
+    ip -4 addr show "$1" 2>/dev/null | awk '/inet /{print $2; exit}' | while read -r a; do
+        i="${a%%/*}"; b="${a##*/}"
+        [ "$b" = 32 ] && b=24
+        IFS=. read -r w x y z <<EOF
+$i
+EOF
+        echo "$w.$x.$y.0/$b"
+    done
+}
+
+guard_classify() { # <ip> <iface> -> lan|tunnel|remote|local|other
+    gip="$1"; gif="$2"
+    case "$gip" in 127.*) echo local; return ;; esac
+    l=$(guard_lan_cidr)
+    [ -n "$l" ] && guard_cidr_contains "$l" "$gip" && { echo lan; return; }
+    t=$(guard_tunnel_cidr "$gif")
+    [ -n "$t" ] && guard_cidr_contains "$t" "$gip" && { echo tunnel; return; }
+    r=$(uci -q get glutils."vpn_$gif".remote_lan 2>/dev/null)
+    [ -n "$r" ] && guard_cidr_contains "$r" "$gip" && { echo remote; return; }
+    echo other
+}
+
+guard_at_risk() { # <iface> -> sessions whose path traverses this tunnel
+    gif="$1"
+    guard_sessions | while IFS='|' read -r ip svc; do
+        c=$(guard_classify "$ip" "$gif")
+        case "$c" in tunnel|remote) echo "$ip|$svc|$c" ;; esac
+    done
+}
+
+# ---- G2: alternate transports ------------------------------------------------
+guard_alternates() { # <affected-iface> -> live interfaces that could carry mgmt traffic
+    gif="$1"
+    for i in br-lan wgserver ovpnserver $(ls /sys/class/net 2>/dev/null | grep -E '^(wg|ovpn)client'); do
+        [ "$i" = "$gif" ] && continue
+        a=$(ip -4 addr show "$i" 2>/dev/null | awk '/inet /{print $2; exit}')
+        [ -n "$a" ] && echo "$i|$a"
+    done
+}
+
+# ---- G3: detached commit-confirm ---------------------------------------------
+# The reverter must outlive this shell: if the session dies the revert must still fire.
+guard_confirm_spawn() { # <name> <revert-cmd> <timeout-sec>
+    gname="$1"; grev="$2"; gto="${3:-30}"
+    rm -f "/tmp/guard_${gname}.token"
+    cat > "/tmp/guard_${gname}.rev" <<EOF
+#!/bin/sh
+i=0
+while [ \$i -lt $gto ]; do
+    [ -f "/tmp/guard_${gname}.token" ] && exit 0
+    sleep 1; i=\$((i+1))
+done
+[ -f "/tmp/guard_${gname}.token" ] && exit 0
+$grev
+logger -t glutils-rla "commit-confirm timed out; reverted ${gname}"
+EOF
+    chmod +x "/tmp/guard_${gname}.rev"
+    # setsid/nohup do not exist on GL busybox, and a bare `&` child dies with the
+    # parent script - verified on GL firmware 4.9.1.  start-stop-daemon -b survives.
+    if command -v start-stop-daemon >/dev/null 2>&1; then
+        start-stop-daemon -S -b -x "/tmp/guard_${gname}.rev" >/dev/null 2>&1
+    else
+        sh -c "(/tmp/guard_${gname}.rev) >/dev/null 2>&1 &" &
+    fi
+    return 0
+}
+
+guard_confirm_ok() { # <name> - cancel the pending revert
+    touch "/tmp/guard_$1.token"
+}
+
+# Remote LAN Access - write layer.  Drives GL's own uci keys and apply helpers so
+# the fw3/fw4 split never reaches us.  See rla-guardrail-spec.md.
+
+# ---- protocol abstraction ----------------------------------------------------
+w_pkg() { # iface -> uci package holding the levers
+    case "$1" in
+        ovpnserver)  echo ovpnserver ;;
+        wgserver)    echo wireguard_server ;;
+        ovpnclient*) echo ovpnclient ;;
+        wgclient*)   echo wireguard ;;
+        *) return 1 ;;
+    esac
+}
+
+w_sect() { # iface -> section holding masq/access
+    case "$1" in
+        ovpnserver) echo global ;;
+        wgserver)   echo main_server ;;
+        *) uci -q get network."$1".config ;;   # clients point at their own section
+    esac
+}
+
+w_func() { # iface -> GL's firewall apply helper, ONLY if it actually exists
+    # 4.9.x ships ovpnserver_func.sh / wgserver_func.sh which sync the package option
+    # into the firewall zone.  4.3.25 ships NEITHER - its RPC handler writes
+    # firewall.<iface>.masq directly and calls /etc/init.d/firewall reload.
+    # So this must gate on file existence, not on the interface name, or servers on
+    # 4.3.25 silently take the 4.9 path and nothing applies.
+    case "$1" in
+        ovpnserver) f=/etc/openvpn/scripts/ovpnserver_func.sh ;;
+        wgserver)   f=/etc/wireguard/scripts/wgserver_func.sh ;;
+        *) return 1 ;;
+    esac
+    [ -x "$f" ] || return 1
+    echo "$f"
+}
+
+# ---- levers ------------------------------------------------------------------
+w_akey() { # iface -> name of the access option (servers: access, clients: local_access)
+    case "$1" in ovpnserver|wgserver) echo access ;; *) echo local_access ;; esac
+}
+w_get_masq()   { p=$(w_pkg "$1") && s=$(w_sect "$1") && uci -q get "$p.$s.masq"; }
+w_get_access() { p=$(w_pkg "$1") && s=$(w_sect "$1") && uci -q get "$p.$s.$(w_akey "$1")"; }
+
+w_apply_firewall() { # iface -> run GL's own helper; backend-agnostic by construction
+    # Clients ship no *_func.sh (verified on MT1300 4.3.25 and MT3600BE 4.9.0),
+    # so they fall back to a plain firewall reload.
+    if ! f=$(w_func "$1"); then
+        /etc/init.d/firewall reload >/dev/null 2>&1
+        return 0
+    fi
+    [ -x "$f" ] || { /etc/init.d/firewall reload >/dev/null 2>&1; return 0; }
+    # GL's helper ends in `exit $?` picking up reload_modified_service, so it returns 1
+    # even on success - verified on 4.9.1.  Never gate on its rc; assert behaviour instead.
+    "$f" "$1" set_firewall >/dev/null 2>&1
+    return 0
+}
+
+# ---- zone state --------------------------------------------------------------
+w_zone_enabled() { # iface -> 0 if the firewall zone exists AND is enabled
+    # A disabled zone makes masq/access writes silent no-ops: the backend never
+    # emits rules for it.  Callers must report this rather than claim success.
+    uci -q get "firewall.$1" >/dev/null 2>&1 || return 1
+    # namespaced: a bare `e` here clobbered a caller's variable of the same name
+    # (POSIX sh has no `local` in these helpers, so every temp is global)
+    _wze=$(uci -q get "firewall.$1.enabled")
+    [ "$_wze" = "0" ] && return 1
+    return 0
+}
+
+# ---- behavioural observables (H3) - backend aware ----------------------------
+w_masq_active() { # iface -> 0 if the kernel is really masquerading this zone (IPv4)
+    # IPv4-specific on purpose: fw4/fw3 emit a separate IPv6 masquerade rule for the
+    # same iface (firewall.<z>.masq6) which w_set_masq does not touch - a loose match
+    # reads the v6 rule and never appears to change.
+    # No `grep -A<n>` context fallback: it bleeds into the adjacent chain and picks up
+    # srcnat_wan's masquerade.  Verified on MT1300 4.3.25.
+    # Backend detection must test for the fw4 TABLE, not for the nft binary: nft is
+    # installed on fw3 boxes too (4.9.0), where `nft list ruleset` succeeds but returns
+    # nothing relevant - so a binary-presence check silently always reports "not masqueraded".
+    if nft list table inet fw4 >/dev/null 2>&1; then
+        nft list ruleset 2>/dev/null | grep -q "masquerade.*IPv4 $1 traffic"
+        return $?
+    fi
+    iptables -t nat -S "zone_$1_postrouting" 2>/dev/null | grep -q MASQUERADE
+}
+
+w_wait_masq() { # iface expected(0|1) [tries] -> 0 when the kernel agrees
+    n=0; lim="${3:-8}"
+    while [ "$n" -lt "$lim" ]; do
+        if w_masq_active "$1"; then a=1; else a=0; fi
+        [ "$a" = "$2" ] && return 0
+        n=$((n+1)); sleep 1
+    done
+    return 1
+}
+
+w_set_masq() { # iface 0|1   -> rc 3 = zone disabled, the write would do nothing
+    p=$(w_pkg "$1") || return 1; s=$(w_sect "$1") || return 1
+    case "$2" in 0|1) ;; *) return 1 ;; esac
+    # Guard here, not at one UI entry point: a disabled zone makes the backend
+    # skip it entirely, so uci writes and reads back correctly while producing
+    # no kernel rules. Every caller needs this - including lv_apply's detached
+    # revert, which would otherwise report a successful revert that never
+    # happened. Observed on MT1300 with the wgserver zone left disabled.
+    if ! w_zone_enabled "$1"; then
+        echo "refused: firewall zone for $1 is disabled - this would have no effect" >&2
+        return 3
+    fi
+    uci set "$p.$s.masq=$2" && uci commit "$p" || return 1
+    # Two-key model: GL's package option is only the UI mirror.  Servers have a
+    # set_firewall helper that syncs it; clients do NOT, so the firewall zone -
+    # the key the backend actually reads - must be written directly.
+    # Verified on MT1300 4.3.25: writing only ovpnclient.<sect>.masq changed nothing.
+    if ! w_func "$1" >/dev/null 2>&1; then
+        if uci -q get "firewall.$1" >/dev/null 2>&1; then
+            uci set "firewall.$1.masq=$2" && uci commit firewall
+        fi
+    fi
+    w_apply_firewall "$1"
+}
+
+w_set_access() { # iface ACCEPT|DROP|REJECT (servers) | 0|1 (clients)
+                 # rc 3 = zone disabled, the write would do nothing
+    p=$(w_pkg "$1") || return 1; s=$(w_sect "$1") || return 1; k=$(w_akey "$1")
+    if ! w_zone_enabled "$1"; then
+        echo "refused: firewall zone for $1 is disabled - this would have no effect" >&2
+        return 3
+    fi
+    if [ "$k" = access ]; then
+        case "$2" in ACCEPT|DROP|REJECT) ;; *) return 1 ;; esac
+    else
+        case "$2" in 0|1) ;; *) return 1 ;; esac
+    fi
+    uci set "$p.$s.$k=$2" && uci commit "$p" || return 1
+    # No helper (clients anywhere, servers on 4.3.25) -> write the zone ourselves.
+    if ! w_func "$1" >/dev/null 2>&1 && uci -q get "firewall.$1" >/dev/null 2>&1; then
+        case "$2" in
+            1|ACCEPT) uci set "firewall.$1.input=ACCEPT" ;;
+            *)        uci set "firewall.$1.input=DROP" ;;
+        esac
+        uci commit firewall
+    fi
+    w_apply_firewall "$1"
+}
+
+# ---- route rules (GL's own storage) -----------------------------------------
+# GL's proto handlers read dest and mask as SEPARATE options and build
+#   wgserver:   AllowedIPs=${dest}/${mask}      and  ip route add ${dest}/${mask}
+#   ovpnserver: iroute $(ipcalc_network $dest $mask)   -> the ccd file
+# so a rule written as dest="a.b.c.0/24" yields "a.b.c.0/24/" and breaks on ifup.
+# Writing them split is also what makes [3] work: GL derives the per-peer
+# authorisation (AllowedIPs / iroute) from these same sections, gated on the
+# gateway matching the peer's tunnel address.
+w_route_list() { # iface -> dest/mask|gateway|metric
+    p=$(w_pkg "$1") || return 1
+    i=0
+    while :; do
+        d=$(uci -q get "$p.@route_rules[$i].dest") || break
+        [ -z "$d" ] && break
+        m=$(uci -q get "$p.@route_rules[$i].mask")
+        printf '%s/%s|%s|%s\n' "$d" "${m:-32}" \
+            "$(uci -q get "$p.@route_rules[$i].gateway")" \
+            "$(uci -q get "$p.@route_rules[$i].metric")"
+        i=$((i+1))
+    done
+}
+
+w_route_idx() { # iface dest-cidr -> index of the matching rule
+    p=$(w_pkg "$1") || return 1
+    want_d="${2%%/*}"; want_m="${2##*/}"; [ "$want_m" = "$2" ] && want_m=32
+    i=0
+    while :; do
+        d=$(uci -q get "$p.@route_rules[$i].dest") || return 1
+        [ -z "$d" ] && return 1
+        m=$(uci -q get "$p.@route_rules[$i].mask")
+        [ "$d" = "$want_d" ] && [ "${m:-32}" = "$want_m" ] && { echo "$i"; return 0; }
+        i=$((i+1))
+    done
+}
+
+w_route_add() { # iface dest-cidr gateway [metric]
+    ifc="$1"; dest="$2"; gw="$3"; met="${4:-100}"
+    p=$(w_pkg "$ifc") || return 1
+    lan=$(guard_lan_cidr)
+    if [ -n "$lan" ] && guard_overlap "$lan" "$dest"; then
+        echo "refused: $dest overlaps local LAN $lan" >&2
+        return 2
+    fi
+    w_route_idx "$ifc" "$dest" >/dev/null 2>&1 && return 0   # idempotent
+    dnet="${dest%%/*}"; dmask="${dest##*/}"; [ "$dmask" = "$dest" ] && dmask=32
+    uci add "$p" route_rules >/dev/null 2>&1 || return 1
+    uci set "$p.@route_rules[-1].dest=$dnet"
+    uci set "$p.@route_rules[-1].mask=$dmask"
+    uci set "$p.@route_rules[-1].gateway=$gw"
+    uci set "$p.@route_rules[-1].metric=$met"
+    uci set "$p.@route_rules[-1].route_flag=4"
+    uci commit "$p" || return 1
+    ip route replace "$dnet/$dmask" via "$gw" dev "$ifc" metric "$met" 2>/dev/null
+    ip route replace table 9910 "$dnet/$dmask" via "$gw" dev "$ifc" metric "$met" 2>/dev/null
+    return 0
+}
+
+w_route_del() { # iface dest-cidr
+    ifc="$1"; dest="$2"
+    p=$(w_pkg "$ifc") || return 1
+    dnet="${dest%%/*}"; dmask="${dest##*/}"; [ "$dmask" = "$dest" ] && dmask=32
+    idx=$(w_route_idx "$ifc" "$dest") || { ip route del "$dnet/$dmask" dev "$ifc" 2>/dev/null; return 0; }
+    uci delete "$p.@route_rules[$idx]" && uci commit "$p"
+    ip route del "$dnet/$dmask" dev "$ifc" 2>/dev/null
+    ip route del table 9910 "$dnet/$dmask" dev "$ifc" 2>/dev/null
+    return 0
+}
+
+# ---- behaviour verification (H3) ---------------------------------------------
+w_route_active() { # iface dest -> 0 if the kernel actually has it
+    ip route show dev "$2" 2>/dev/null | grep -q "^${1%%/*}" || \
+    ip route show 2>/dev/null | grep -q "^$1 .*dev $2"
+}
+
+# Remote LAN Access - option [4] detection cascade.
+#   config -> ssh -> probe -> manual        first three definitive-to-inferred in order.
+# Every rung reports what it tried and why it failed; nothing is silent.
+
+D_TRACE=/tmp/rla_detect_trace.$$
+d_trace_reset() { : > "$D_TRACE"; }
+d_trace()       { printf '%s|%s|%s\n' "$1" "$2" "$3" >> "$D_TRACE"; }   # rung|result|detail
+d_trace_show()  { [ -f "$D_TRACE" ] && cat "$D_TRACE"; }
+
+# ---- helpers -----------------------------------------------------------------
+d_mask2bits() { # 255.255.255.0 -> 24
+    case "$1" in *.*.*.*) ;; *) return 1 ;; esac
+    IFS=. read -r m1 m2 m3 m4 <<EOF
+$1
+EOF
+    b=0
+    for o in "$m1" "$m2" "$m3" "$m4"; do
+        case "$o" in
+            255) b=$((b+8)) ;; 254) b=$((b+7)) ;; 252) b=$((b+6)) ;; 248) b=$((b+5)) ;;
+            240) b=$((b+4)) ;; 224) b=$((b+3)) ;; 192) b=$((b+2)) ;; 128) b=$((b+1)) ;;
+            0)   ;;
+            *) return 1 ;;
+        esac
+    done
+    echo "$b"
+}
+
+d_netof() { # ip bits -> network cidr
+    ni=$(guard_ip2int "$1") || return 1
+    [ "$2" -ge 0 ] 2>/dev/null || return 1
+    [ "$2" -eq 0 ] && { echo "0.0.0.0/0"; return 0; }
+    mask=$(( 0xFFFFFFFF ^ ((1 << (32 - $2)) - 1) ))
+    n=$(( ni & mask ))
+    echo "$(( (n >> 24) & 255 )).$(( (n >> 16) & 255 )).$(( (n >> 8) & 255 )).$(( n & 255 ))/$2"
+}
+
+# ---- provenance --------------------------------------------------------------
+d_store() { # iface cidr src   -> persist value + how we learned it
+    ifc="$1"; cidr="$2"; src="$3"
+    lan=$(guard_lan_cidr)
+    if [ -n "$lan" ] && guard_overlap "$lan" "$cidr"; then
+        echo "refused: $cidr overlaps local LAN $lan" >&2
+        return 2
+    fi
+    uci -q get glutils >/dev/null 2>&1 || touch /etc/config/glutils
+    uci -q get "glutils.vpn_$ifc" >/dev/null 2>&1 || uci set "glutils.vpn_$ifc=vpn"
+    uci set "glutils.vpn_$ifc.remote_lan=$cidr"
+    uci set "glutils.vpn_$ifc.remote_lan_src=$src"
+    uci commit glutils
+}
+
+d_get()     { uci -q get "glutils.vpn_$1.remote_lan"; }
+d_get_src() { uci -q get "glutils.vpn_$1.remote_lan_src"; }
+d_clear()   { uci -q delete "glutils.vpn_$1.remote_lan" 2>/dev/null
+              uci -q delete "glutils.vpn_$1.remote_lan_src" 2>/dev/null; uci commit glutils; }
+
+# ---- rung 1: config (definitive, free, always runs) --------------------------
+d_config() { # iface type -> cidr from AllowedIPs / pushed routes
+    ifc="$1"; typ="$2"
+    own=$(ip -4 addr show "$ifc" 2>/dev/null | awk '/inet /{print $2; exit}')
+    ownnet="${own%%/*}"; ownnet="${ownnet%.*}."
+    if [ "$typ" = WireGuard ]; then
+        v=$(wg show "$ifc" allowed-ips 2>/dev/null | tr '\t' '\n' | tr ',' '\n' \
+            | grep -E '^[0-9.]+/[0-9]+$' | grep -v '^0\.0\.0\.0/0$' | grep -v '/32$' \
+            | grep -v "^${ownnet}" | head -1)
+    else
+        v=$(ip route show dev "$ifc" 2>/dev/null | awk '{print $1}' \
+            | grep -E '^(10|172|192)\.' | grep '/' | grep -v "^${ownnet}" | head -1)
+    fi
+    if [ -n "$v" ]; then d_trace config found "$v"; echo "$v"; return 0; fi
+    if [ "$typ" = WireGuard ]; then
+        d_trace config none "AllowedIPs declares no specific remote subnet"
+    else
+        d_trace config none "no pushed route names a remote subnet"
+    fi
+    return 1
+}
+
+# ---- rung 2: ssh (definitive, exact mask, needs credentials) -----------------
+d_ssh_reachable() { # peer-ip -> 0 if pingable AND sshd answers
+    p="$1"
+    [ -z "$p" ] && { d_trace ssh skip "no peer tunnel address known"; return 1; }
+    # Reject addresses that resolve to ourselves.  0.0.0.0 pings as localhost and
+    # `nc 0.0.0.0 22` reaches our OWN sshd - without this we would ssh to ourselves
+    # and store our own LAN as the remote one.  Caught by test, not by reasoning.
+    case "$p" in
+        0.0.0.0|0.*|127.*|255.255.255.255)
+            d_trace ssh invalid "$p is not a routable peer address"; return 1 ;;
+    esac
+    if ip -4 addr show 2>/dev/null | grep -qE "inet $p/"; then
+        d_trace ssh invalid "$p is one of this router's own addresses"; return 1
+    fi
+    if ! ping -c1 -W2 "$p" >/dev/null 2>&1; then
+        d_trace ssh unreachable "$p does not answer - the far side blocks it"
+        return 1
+    fi
+    # busybox nc has no -z; a real connect + banner grep is the portable check
+    if echo | timeout 4 nc "$p" 22 2>/dev/null | head -c 32 | grep -qi ssh; then
+        d_trace ssh reachable "$p:22 answering"
+        return 0
+    fi
+    d_trace ssh noport "$p reachable but nothing answers on :22"
+    return 1
+}
+
+d_ssh_query() { # peer-ip [user] -> cidr
+    # If router-to-router key trust already exists this runs with NO prompt at all.
+    # Otherwise ssh prompts once; credentials are never stored or logged.
+    # dropbear ignores OpenSSH -o options, so -y is the host-key flag, not -o Strict...
+    p="$1"; u="${2:-root}"
+    q='echo "$(uci -q get network.lan.ipaddr) $(uci -q get network.lan.netmask)"'
+    if command -v k_can_auth >/dev/null 2>&1 && k_can_auth "$p" "$u"; then
+        kf=$(k_key_path 2>/dev/null)
+        out=$(timeout 15 ssh -y -i "$kf" "$u@$p" "$q" </dev/null 2>/dev/null)
+        d_trace ssh keyauth "logged in to $p with an existing key - no password needed"
+    else
+        out=$(timeout 60 ssh -y "$u@$p" "$q" 2>/dev/null)
+    fi
+    ipa="${out%% *}"; msk="${out##* }"
+    [ -z "$ipa" ] || [ -z "$msk" ] && { d_trace ssh failed "no answer from uci on $p"; return 1; }
+    b=$(d_mask2bits "$msk") || { d_trace ssh failed "unparsable netmask '$msk'"; return 1; }
+    c=$(d_netof "$ipa" "$b") || return 1
+    d_trace ssh found "$c (exact mask from the remote router)"
+    echo "$c"
+}
+
+# ---- rung 3: probe (inferred - guessed candidate, assumed /24) ---------------
+d_can_probe() { # iface -> 0 if traffic to an arbitrary dest would enter this tunnel
+    ip route show dev "$1" 2>/dev/null | grep -q '^default' && return 0
+    ip route show table 1001 2>/dev/null | grep -q "^default dev $1" && return 0
+    ip route show 2>/dev/null | grep -q "^default dev $1" && return 0
+    return 1
+}
+
+d_candidates() { # iface -> well-known gateways worth probing, minus anything of ours
+    lan=$(guard_lan_cidr); tun=$(guard_tunnel_cidr "$1")
+    for g in 192.168.1.1 192.168.0.1 192.168.2.1 192.168.8.1 192.168.10.1 \
+             192.168.31.1 192.168.50.1 10.0.0.1 172.16.0.1; do
+        [ -n "$lan" ] && guard_cidr_contains "$lan" "$g" && continue   # our own LAN: false positive
+        [ -n "$tun" ] && guard_cidr_contains "$tun" "$g" && continue
+        echo "$g"
+    done
+}
+
+d_probe() { # iface -> cidr (inferred) by pinging well-known gateways through the tunnel
+    ifc="$1"
+    if ! d_can_probe "$ifc"; then
+        d_trace probe skip "no route sends arbitrary traffic into $ifc - a probe cannot leave"
+        return 1
+    fi
+    hits=""
+    for g in $(d_candidates "$ifc"); do
+        ping -c1 -W1 -I "$ifc" "$g" >/dev/null 2>&1 && hits="$hits $g"
+    done
+    set -- $hits
+    case $# in
+        0) d_trace probe none "no well-known gateway answered through $ifc"; return 1 ;;
+        1) c=$(d_netof "$1" 24)
+           d_trace probe found "$c (guessed /24 from $1 - mask not verified)"
+           echo "$c"; return 0 ;;
+        *) d_trace probe ambiguous "several answered ($hits) - cannot choose"; return 1 ;;
+    esac
+}
+
+# ---- the cascade -------------------------------------------------------------
+# Returns the subnet and echoes provenance on stderr-free stdout as "cidr|src".
+# Rung 2 is opt-in because it prompts for a password; callers pass want_ssh=1.
+d_cascade() { # iface type role [want_ssh] [peer-ip]
+    ifc="$1"; typ="$2"; rol="$3"; want_ssh="${4:-0}"; peer="$5"
+    d_trace_reset
+
+    v=$(d_get "$ifc")
+    if [ -n "$v" ]; then
+        s=$(d_get_src "$ifc"); d_trace stored found "$v (set earlier by: ${s:-unknown})"
+        echo "$v|${s:-manual}"; return 0
+    fi
+
+    if v=$(d_config "$ifc" "$typ"); then echo "$v|config"; return 0; fi
+
+    if [ "$want_ssh" = 1 ]; then
+        if d_ssh_reachable "$peer"; then
+            if v=$(d_ssh_query "$peer"); then d_store "$ifc" "$v" ssh >/dev/null 2>&1
+                                              echo "$v|ssh"; return 0; fi
+        fi
+    else
+        d_trace ssh skip "not requested (prompts for the remote router's password)"
+    fi
+
+    if v=$(d_probe "$ifc"); then
+        d_store "$ifc" "$v" probe >/dev/null 2>&1
+        echo "$v|probe"; return 0
+    fi
+
+    d_trace manual required "no automatic rung succeeded - enter the subnet yourself"
+    return 1
+}
+
+# Remote LAN Access - option [3]: per-peer authorisation.
+#
+# A kernel route alone is not enough.  Each protocol needs to be told WHICH peer
+# owns the remote subnet:
+#   OpenVPN   ccd file named after the client's CN, containing `iroute`
+#   WireGuard the subnet present in that peer's AllowedIPs
+#
+# GL derives both from wireguard_server/ovpnserver @route_rules, but writes the
+# OpenVPN iroute into ccd/DEFAULT - which applies to EVERY client and therefore
+# cannot bind a subnet to one peer.  A per-CN ccd file overrides DEFAULT and is
+# never regenerated by GL (its proto handler only removes DEFAULT), so that is
+# what we write.  Requires client_auth 2 or 3 so the CN is the username.
+
+AZ_CCD=/etc/openvpn/ccd
+AZ_USERS=/etc/openvpn/cert/user_passwd.txt
+
+# ---- capability gate ---------------------------------------------------------
+az_unique_cn() { # ovpnserver -> 0 if each client gets its own CN
+    a=$(uci -q get ovpnserver.vpn.client_auth)
+    [ "$a" = 2 ] || [ "$a" = 3 ]
+}
+
+az_blocker() { # iface -> empty if [3] can proceed, else the reason
+    case "$1" in
+        ovpnserver)
+            az_unique_cn && return 0
+            echo "every client shares the certificate CN, so a subnet cannot be bound to one peer - set Authentication Mode to include a username first"
+            return 1 ;;
+        wgserver) return 0 ;;
+        *) echo "per-peer authorisation applies to VPN servers only"; return 1 ;;
+    esac
+}
+
+# ---- peer enumeration --------------------------------------------------------
+az_peers() { # iface -> name|id   the identities a subnet can be bound to
+    case "$1" in
+        ovpnserver)
+            [ -f "$AZ_USERS" ] || return 1
+            awk '{ if ($1 != "") print $1 "|" $1 }' "$AZ_USERS" ;;
+        wgserver)
+            i=0
+            while :; do
+                pid=$(uci -q get "wireguard_server.@peers[$i].peer_id") || break
+                [ -z "$pid" ] && break
+                n=$(uci -q get "wireguard_server.@peers[$i].name")
+                printf '%s|%s\n' "${n:-peer_$pid}" "$pid"
+                i=$((i+1))
+            done ;;
+        *) return 1 ;;
+    esac
+}
+
+az_peer_tunnel_ip() { # iface peer-id -> that peer's address inside the tunnel
+    case "$1" in
+        wgserver)
+            c=$(uci -q get "wireguard_server.peer_$2.client_ip")
+            echo "${c%%/*}" ;;
+        ovpnserver)
+            # OpenVPN assigns from the pool; read what the peer actually holds
+            logread 2>/dev/null | grep "MULTI: Learn:" | grep "> $2/" \
+                | tail -1 | awk '{print $(NF-2)}' ;;
+    esac
+}
+
+# ---- grant / revoke ----------------------------------------------------------
+az_granted() { # iface peer -> subnets currently bound to that peer
+    case "$1" in
+        ovpnserver)
+            f="$AZ_CCD/$2"
+            [ -f "$f" ] || return 1
+            # the ccd stores a dotted netmask; callers speak CIDR
+            awk '/^iroute /{print $2, $3}' "$f" | while read -r n m; do
+                b=$(az_mask2bits "$m") || continue
+                echo "$n/$b"
+            done ;;
+        wgserver)
+            uci -q get "wireguard_server.peer_$2.allowed_ips" | tr ',' '\n' \
+                | grep -E '^[0-9]' | grep -v '/32$' ;;
+    esac
+}
+
+az_grant() { # iface peer cidr
+    ifc="$1"; peer="$2"; cidr="$3"
+    az_blocker "$ifc" >/dev/null || return 3
+    lan=$(guard_lan_cidr)
+    [ -n "$lan" ] && guard_overlap "$lan" "$cidr" && {
+        echo "refused: $cidr overlaps local LAN $lan" >&2; return 2; }
+    net="${cidr%%/*}"; bits="${cidr##*/}"
+    case "$ifc" in
+        ovpnserver)
+            mkdir -p "$AZ_CCD" || return 1
+            nm=$(az_bits2mask "$bits") || return 1
+            f="$AZ_CCD/$peer"
+            touch "$f"
+            grep -qE "^iroute $net $nm\$" "$f" 2>/dev/null || echo "iroute $net $nm" >> "$f"
+            ;;
+        wgserver)
+            cur=$(uci -q get "wireguard_server.peer_$peer.allowed_ips")
+            case ",$cur," in *",$cidr,"*) ;; *)
+                uci set "wireguard_server.peer_$peer.allowed_ips=${cur:+$cur,}$cidr" ;;
+            esac
+            uci commit wireguard_server
+            tip=$(az_peer_tunnel_ip "$ifc" "$peer")
+            [ -n "$tip" ] && w_route_add "$ifc" "$cidr" "$tip" >/dev/null 2>&1
+            az_wg_sync "$peer"
+            ;;
+        *) return 1 ;;
+    esac
+}
+
+az_revoke() { # iface peer cidr
+    ifc="$1"; peer="$2"; cidr="$3"
+    net="${cidr%%/*}"; bits="${cidr##*/}"
+    case "$ifc" in
+        ovpnserver)
+            f="$AZ_CCD/$peer"; [ -f "$f" ] || return 0
+            nm=$(az_bits2mask "$bits") || return 1
+            sed -i "\\|^iroute $net $nm\$|d" "$f"
+            [ -s "$f" ] || rm -f "$f"
+            ;;
+        wgserver)
+            cur=$(uci -q get "wireguard_server.peer_$peer.allowed_ips")
+            new=$(echo "$cur" | tr ',' '\n' | grep -vxF "$cidr" | tr '\n' ',' | sed 's/,*$//')
+            uci set "wireguard_server.peer_$peer.allowed_ips=$new"
+            uci commit wireguard_server
+            w_route_del "$ifc" "$cidr" >/dev/null 2>&1
+            az_wg_sync "$peer"
+            ;;
+    esac
+}
+
+az_mask2bits() { # 255.255.255.0 -> 24
+    case "$1" in *.*.*.*) ;; *) return 1 ;; esac
+    IFS=. read -r q1 q2 q3 q4 <<EOF
+$1
+EOF
+    b=0
+    for o in "$q1" "$q2" "$q3" "$q4"; do
+        case "$o" in
+            255) b=$((b+8)) ;; 254) b=$((b+7)) ;; 252) b=$((b+6)) ;; 248) b=$((b+5)) ;;
+            240) b=$((b+4)) ;; 224) b=$((b+3)) ;; 192) b=$((b+2)) ;; 128) b=$((b+1)) ;;
+            0) ;; *) return 1 ;;
+        esac
+    done
+    echo "$b"
+}
+
+az_bits2mask() { # 24 -> 255.255.255.0
+    case "$1" in *[!0-9]*|"") return 1 ;; esac
+    [ "$1" -gt 32 ] && return 1
+    m=$(( 0xFFFFFFFF ^ ((1 << (32 - $1)) - 1) ))
+    [ "$1" -eq 0 ] && m=0
+    echo "$(( (m>>24)&255 )).$(( (m>>16)&255 )).$(( (m>>8)&255 )).$(( m&255 ))"
+}
+
+# push AllowedIPs to the live interface without bouncing it (gl_wg is a symlink to
+# wg or awg on 4.9; 4.3.25 has plain wg only)
+az_wg_sync() { # peer-id
+    pk=$(uci -q get "wireguard_server.peer_$1.public_key"); [ -z "$pk" ] && return 1
+    cip=$(uci -q get "wireguard_server.peer_$1.client_ip"); cip="${cip%%/*}"
+    aips=$(uci -q get "wireguard_server.peer_$1.allowed_ips" | tr ',' '\n' \
+           | grep -E '^[0-9]' | grep -v '^0\.0\.0\.0/0$' | tr '\n' ',' | sed 's/,*$//')
+    full="${cip}/32${aips:+,$aips}"
+    W=$(command -v gl_wg || command -v wg) || return 1
+    "$W" set wgserver peer "$pk" allowed-ips "$full" 2>/dev/null
+}
+
+# ---- behavioural verification (H3) -------------------------------------------
+az_active() { # iface peer cidr -> 0 if the DATA PLANE really authorises it
+    case "$1" in
+        ovpnserver)
+            grep -qE "^iroute ${3%%/*} " "$AZ_CCD/$2" 2>/dev/null ;;
+        wgserver)
+            pk=$(uci -q get "wireguard_server.peer_$2.public_key")
+            wg show wgserver allowed-ips 2>/dev/null | grep -F "$pk" | grep -qF "$3" ;;
+    esac
+}
+
+# Remote LAN Access - guarded lever application.
+# Composes guard + write: nothing that can sever the management path is applied
+# without capturing the prior value and arming a detached revert first.
+
+LV_STATE=/tmp/rla_lever_prior
+
+lv_risky() { # iface lever -> 0 if this change can cut a live management session
+    case "$2" in access|masq) ;; *) return 1 ;; esac
+    [ -n "$(guard_at_risk "$1")" ]
+}
+
+lv_risk_report() { # iface -> human-readable list of endangered sessions
+    guard_at_risk "$1" | while IFS='|' read -r ip svc via; do
+        printf '   %s (%s) reaches this router via the %s\n' "$ip" "$svc" "$via"
+    done
+}
+
+lv_alternates_report() { # iface
+    guard_alternates "$1" | while IFS='|' read -r i a; do
+        printf '   %-12s %s\n' "$i" "$a"
+    done
+}
+
+# Apply a lever under commit-confirm.  Returns 0 applied, 1 failed, 3 nothing to do.
+lv_apply() { # iface lever value [timeout]
+    ifc="$1"; lev="$2"; val="$3"; to="${4:-30}"
+    case "$lev" in
+        masq)   cur=$(w_get_masq "$ifc") ;;
+        access) cur=$(w_get_access "$ifc") ;;
+        *) return 1 ;;
+    esac
+    [ "$cur" = "$val" ] && return 3
+    # prior value on DISK, not in a shell variable - the reverter outlives this shell
+    printf '%s|%s|%s\n' "$ifc" "$lev" "$cur" > "$LV_STATE.$ifc.$lev"
+    guard_confirm_spawn "$ifc$lev" \
+        "sh -c '. /tmp/rla_guard.sh; . /tmp/rla_write.sh; w_set_$lev $ifc $cur'" "$to"
+    case "$lev" in
+        masq)   w_set_masq   "$ifc" "$val" ;;
+        access) w_set_access "$ifc" "$val" ;;
+    esac || return 1
+    return 0
+}
+
+lv_confirm() { guard_confirm_ok "$1$2"; rm -f "$LV_STATE.$1.$2"; }
+
+lv_pending() { [ -f "/tmp/guard_$1$2.rev" ] && [ ! -f "/tmp/guard_$1$2.token" ]; }
+
+# Did the kernel actually follow?  Used to decide confirm vs report-failure.
+lv_verify() { # iface lever value
+    case "$2" in
+        masq)   w_wait_masq "$1" "$3" 8 ;;
+        access) [ "$(w_get_access "$1")" = "$3" ] ;;
+    esac
+}
+
+# Remote LAN Access - option [1]: reachability testing.
+# Outbound is testable locally.  Inbound genuinely requires the far side, so it is
+# only truthfully reportable when router-to-router key trust exists; otherwise we
+# say so rather than inferring it from local config.
+
+pr_ping() { # dest [source-ip] -> 0 reachable
+    [ -z "$1" ] && return 1
+    case "$1" in unknown|*[!0-9./]*) return 1 ;; esac
+    if [ -n "$2" ]; then ping -c1 -W2 -I "$2" "$1" >/dev/null 2>&1
+    else                 ping -c1 -W2 "$1" >/dev/null 2>&1; fi
+}
+
+pr_gw_of() { echo "${1%%/*}" | awk -F. '{print $1"."$2"."$3".1"}'; }
+
+# ---- outbound: from this router, both source identities ----------------------
+pr_out() { # iface peer-tunnel-ip remote-lan-cidr -> rows: from|to|result
+    ifc="$1"; peer="$2"; rlan="$3"
+    tun=$(ip -4 addr show "$ifc" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+    lan=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
+    for dst in "$peer" "$(pr_gw_of "$rlan")"; do
+        [ -z "$dst" ] && continue
+        case "$rlan" in unknown) [ "$dst" = "$(pr_gw_of "$rlan")" ] && continue ;; esac
+        for src in "$tun" "$lan"; do
+            [ -z "$src" ] && continue
+            if pr_ping "$dst" "$src"; then r=reachable; else r=unreachable; fi
+            printf '%s|%s|%s\n' "$src" "$dst" "$r"
+        done
+    done
+}
+
+# ---- inbound: only the far side can answer this ------------------------------
+pr_in_possible() { k_can_auth "$1" 2>/dev/null; }
+
+pr_in() { # peer-tunnel-ip our-tunnel-ip our-lan-cidr -> rows: from|to|result
+    peer="$1"; tun="$2"; lan="$3"
+    if ! pr_in_possible "$peer"; then
+        printf '%s|%s|%s\n' "$peer" "$tun" "untestable"
+        printf '%s|%s|%s\n' "$peer" "$lan" "untestable"
+        return 1
+    fi
+    kf=$(k_key_path 2>/dev/null)
+    for dst in "$tun" "$(pr_gw_of "$lan")"; do
+        [ -z "$dst" ] && continue
+        o=$(timeout 15 ssh -y -i "$kf" "root@$peer" \
+              "ping -c1 -W2 $dst >/dev/null 2>&1 && echo OK || echo NO" </dev/null 2>/dev/null)
+        case "$o" in *OK*) r=reachable ;; *NO*) r=unreachable ;; *) r=untestable ;; esac
+        printf '%s|%s|%s\n' "$peer" "$dst" "$r"
+    done
+}
+
+pr_summary() { # reads rows on stdin -> one word
+    ok=0; bad=0; unk=0
+    while IFS='|' read -r f t r; do
+        case "$r" in reachable) ok=$((ok+1));; unreachable) bad=$((bad+1));; *) unk=$((unk+1));; esac
+    done
+    if [ "$unk" -gt 0 ] && [ "$ok" -eq 0 ] && [ "$bad" -eq 0 ]; then echo untestable
+    elif [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]; then echo all-reachable
+    elif [ "$ok" -eq 0 ]; then echo none-reachable
+    else echo partial; fi
+}
+
+# Router-to-router SSH trust (OUTBOUND: lets THIS router log in to another).
+# Distinct from the existing SSH Authorized Keys Manager, which governs who may
+# log in TO this router.  Keys are dropbear-format; authorized_keys lives in
+# /etc/dropbear/, not /root/.ssh/ - verified on 4.9.1, 4.9.0 and 4.3.25.
+
+K_DIR=/root/.ssh
+K_AUTH=/etc/dropbear/authorized_keys
+K_TAG="glinet_utils-rla"          # comment marker so we can find/revoke only ours
+
+k_key_path() { # prefer a key that already exists; else our own
+    for k in "$K_DIR/id_dropbear" "$K_DIR/id_ed25519" "$K_DIR/id_rsa"; do
+        [ -s "$k" ] && { echo "$k"; return 0; }
+    done
+    echo "$K_DIR/id_dropbear"; return 1
+}
+
+k_have_key() { k_key_path >/dev/null 2>&1; }
+
+k_gen_key() { # create a keypair only if none exists; never overwrite silently
+    k=$(k_key_path) && return 0
+    mkdir -p "$K_DIR" && chmod 700 "$K_DIR"
+    dropbearkey -t ed25519 -f "$K_DIR/id_dropbear" >/dev/null 2>&1 || return 1
+    chmod 600 "$K_DIR/id_dropbear"
+    return 0
+}
+
+k_pubkey() { # -> the public key line for whichever private key we hold
+    k=$(k_key_path 2>/dev/null) || return 1
+    [ -s "$k" ] || return 1
+    dropbearkey -y -f "$k" 2>/dev/null | grep -E '^(ssh-|ecdsa-)' | head -1
+}
+
+k_pubkey_tagged() { # replace dropbearkey's own comment with our tag, so revoke is exact
+    p=$(k_pubkey) || return 1
+    set -- $p
+    [ -n "$2" ] || return 1
+    echo "$1 $2 $K_TAG@$(cat /proc/sys/kernel/hostname 2>/dev/null)"
+}
+
+# ---- remote auth -------------------------------------------------------------
+# dropbear's client IGNORES OpenSSH -o options (it prints "Ignoring unknown
+# configuration option"), so BatchMode cannot be used to suppress the password
+# prompt.  Redirecting stdin from /dev/null makes a prompt fail immediately
+# instead of hanging, which is what makes this safe to call non-interactively.
+k_can_auth() { # host [user] -> 0 if keyless login already works
+    h="$1"; u="${2:-root}"
+    [ -z "$h" ] && return 1
+    case "$h" in 0.0.0.0|0.*|127.*) return 1 ;; esac
+    k=$(k_key_path 2>/dev/null) || return 1
+    out=$(timeout 10 ssh -y -i "$k" "$u@$h" 'echo __RLA_OK__' </dev/null 2>/dev/null)
+    case "$out" in *__RLA_OK__*) return 0 ;; *) return 1 ;; esac
+}
+
+k_installed_on() { # host [user] -> 0 if OUR tagged key is present remotely
+    h="$1"; u="${2:-root}"
+    k_can_auth "$h" "$u" || return 1
+    k=$(k_key_path 2>/dev/null) || return 1
+    timeout 10 ssh -y -i "$k" "$u@$h" "grep -q '$K_TAG' $K_AUTH 2>/dev/null && echo YES" \
+        </dev/null 2>/dev/null | grep -q YES
+}
+
+# INTERACTIVE: prompts once for the remote password.  Nothing is stored or logged.
+k_install() { # host [user]
+    h="$1"; u="${2:-root}"
+    [ -z "$h" ] && return 1
+    k_gen_key || return 1
+    pub=$(k_pubkey_tagged) || return 1
+    k_can_auth "$h" "$u" && { k_installed_on "$h" "$u" && return 0; }
+    # append idempotently, create the file with sane perms if absent
+    timeout 60 ssh -y "$u@$h" \
+        "mkdir -p $(dirname $K_AUTH); touch $K_AUTH; chmod 600 $K_AUTH;
+         grep -qF '$pub' $K_AUTH || echo '$pub' >> $K_AUTH" 2>/dev/null || return 1
+    k_can_auth "$h" "$u"
+}
+
+k_revoke() { # host [user] - remove ONLY our tagged key, never the user's own
+    h="$1"; u="${2:-root}"
+    k=$(k_key_path 2>/dev/null) || return 1
+    timeout 30 ssh -y -i "$k" "$u@$h" \
+        "sed -i '/$K_TAG/d' $K_AUTH 2>/dev/null" </dev/null 2>/dev/null
+}
+
+# ---- local inbound view (what the existing keys menu governs) -----------------
+k_local_authorized() { # -> count|tagged-count  of keys allowed INTO this router
+    t=0; g=0
+    [ -f "$K_AUTH" ] && { t=$(grep -c . "$K_AUTH" 2>/dev/null); g=$(grep -c "$K_TAG" "$K_AUTH" 2>/dev/null); }
+    echo "${t:-0}|${g:-0}"
+}
+
+rla_link_state() {              # iface type [role] -> what we can actually measure
+    # WireGuard exposes a real handshake timestamp, so age is reported precisely.
+    # OpenVPN exposes none (GL enables no status file and sets no `status` directive),
+    # so no time is claimed for it - only whether a peer is known.
+    # ASCII only: busybox printf pads by BYTES, so a multi-byte separator here
+    # would under-pad the topology column by one display position.
+    _lsif="$1"; _lsty="$2"; _lsro="$3"
+    ip -4 addr show "$_lsif" 2>/dev/null | grep -q "inet " || { echo "down"; return; }
+    if [ "$_lsty" = WireGuard ]; then
+        _hs=$(wg show "$_lsif" latest-handshakes 2>/dev/null | awk '{print $2}' | sort -rn | head -1)
+        [ -z "$_hs" ] && { echo "up"; return; }
+        [ "$_hs" = 0 ] && { echo "up  no peer"; return; }
+        _age=$(( $(date +%s) - _hs ))
+        [ "$_age" -lt 0 ] && _age=0
+        if [ "$_age" -lt 60 ]; then echo "up  ${_age}s ago"
+        elif [ "$_age" -lt 3600 ]; then echo "up  $((_age/60))m ago"
+        elif [ "$_age" -lt 86400 ]; then echo "up  $((_age/3600))h ago"
+        else echo "up  $((_age/86400))d ago"; fi
+    else
+        _lsp=$(rla_peer_tunnel_ip "$_lsif" "$_lsty" "$_lsro")
+        [ -n "$_lsp" ] && echo "up" || echo "up  no peer"
+    fi
+}
+
+rla_ctr() {                     # text width -> text centred in a field of width
+    _t="$1"; _w="$2"; _l=${#_t}
+    if [ "$_l" -ge "$_w" ]; then printf '%s' "$_t"; return; fi
+    _p=$(( (_w - _l) / 2 ))
+    rla_rep ' ' "$_p"; printf '%s' "$_t"; rla_rep ' ' "$(( _w - _l - _p ))"
+}
+
+rla_rep() { _i=0; while [ "$_i" -lt "$2" ]; do printf '%s' "$1"; _i=$((_i+1)); done; }
+
+rla_ctx() {                              # shared lookups for the action handlers
+    A_IF="$1"; A_TY="$2"; A_RO="$3"
+    A_TUN=$(rla_tunnel_ip "$A_IF")
+    A_PEER=$(rla_peer_tunnel_ip "$A_IF" "$A_TY" "$A_RO")
+    A_LAN=$(rla_lan_cidr)
+    A_RLAN=$(d_get "$A_IF"); [ -z "$A_RLAN" ] && A_RLAN=$(rla_remote_lan "$A_IF" "$A_TY")
+    [ -z "$A_RLAN" ] && A_RLAN="unknown"
+}
+
+# ---- [1] reachability --------------------------------------------------------
+rla_do_test() {
+    rla_ctx "$1" "$2" "$3"; _dir="$4"
+    print_info "Testing reachability - this sends a few pings and changes nothing."
+    printf '\n'
+    if [ "$_dir" = out ]; then
+        printf '   %-18s%-18s%s\n' From To Result
+        pr_out "$A_IF" "$A_PEER" "$A_RLAN" | while IFS='|' read -r f t r; do
+            printf '   %-18s%-18s%s\n' "$f" "$t" "$r"
+        done
+        printf '\n'
+        case "$(pr_out "$A_IF" "$A_PEER" "$A_RLAN" | pr_summary)" in
+            all-reachable)  print_success "Everything on the remote side answered." ;;
+            none-reachable) print_warning "Nothing answered. Check options 2 and 4." ;;
+            partial)        print_warning "Some destinations answered and some did not." ;;
+            *)              print_info "Not enough information to judge." ;;
+        esac
+    else
+        if pr_in_possible "$A_PEER"; then
+            printf '   %-18s%-18s%s\n' From To Result
+            pr_in "$A_PEER" "$A_TUN" "$A_LAN" | while IFS='|' read -r f t r; do
+                printf '   %-18s%-18s%s\n' "$f" "$t" "$r"
+            done
+        else
+            print_warning "Inbound cannot be tested from this router."
+            print_info "Only the remote router can prove it can reach us. Set up key"
+            print_info "trust with it (option 3) and this test becomes available."
+        fi
+    fi
+    printf '\n'; press_any_key
+}
+
+# ---- [2] outbound: route+authorise | inbound: access -------------------------
+rla_do_lever2() {
+    rla_ctx "$1" "$2" "$3"; _dir="$4"
+    if [ "$_dir" = out ]; then
+        if [ "$A_RLAN" = unknown ]; then
+            print_warning "The remote LAN subnet is not known yet."
+            print_info "Use option 4 first - a route needs a destination."
+            press_any_key; return
+        fi
+        if guard_overlap "$A_LAN" "$A_RLAN"; then
+            print_error "Refused: $A_RLAN overlaps this router's LAN $A_LAN."
+            print_info "Two identical subnets cannot be routed between. Change one of them."
+            press_any_key; return
+        fi
+        if rla_routes_via "$A_RLAN" "$A_IF" 2>/dev/null; then
+            spin_run "Removing the route to $A_RLAN" w_route_del "$A_IF" "$A_RLAN"
+            print_success "This router no longer routes $A_RLAN over $A_IF."
+        else
+            _blk=$(az_blocker "$A_IF" 2>&1)
+            if [ -n "$_blk" ]; then
+                print_warning "Route added, but per-peer authorisation is not possible:"
+                print_info "$_blk"
+            fi
+            spin_run "Routing $A_RLAN via $A_PEER" w_route_add "$A_IF" "$A_RLAN" "$A_PEER"
+            if [ -z "$_blk" ]; then
+                _pid=$(az_peers "$A_IF" 2>/dev/null | head -1 | cut -d'|' -f2)
+                [ -n "$_pid" ] && az_grant "$A_IF" "$_pid" "$A_RLAN" >/dev/null 2>&1
+            fi
+            print_success "This router now routes $A_RLAN over $A_IF."
+            print_info "Use option 1 to confirm it actually answers."
+        fi
+    else
+        _cur=$(w_get_access "$A_IF")
+        case "$_cur" in ACCEPT|1) _new=$( [ "$_cur" = 1 ] && echo 0 || echo DROP ) ;;
+                        *)        _new=$( [ "$_cur" = 0 ] && echo 1 || echo ACCEPT ) ;; esac
+        _risk=$(guard_at_risk "$A_IF")
+        if [ -n "$_risk" ]; then
+            print_warning "This change can cut live management sessions:"
+            lv_risk_report "$A_IF"
+            printf '\n'; print_info "Other ways in that are currently up:"
+            lv_alternates_report "$A_IF"
+            printf '\n'
+            printf ' Apply anyway? It reverts automatically in 30s unless confirmed [y/N]: '
+            read -r _yn; printf '\n'
+            case "$_yn" in y|Y) ;; *) print_info "Cancelled - nothing changed."; press_any_key; return ;; esac
+        fi
+        lv_apply "$A_IF" access "$_new" 30
+        if lv_verify "$A_IF" access "$_new"; then
+            if [ -n "$_risk" ]; then
+                print_warning "Applied. Confirm within 30 seconds or it reverts."
+                printf ' Still connected? Press y to keep it [y/N]: '
+                read -r _yn
+                case "$_yn" in y|Y) lv_confirm "$A_IF" access; print_success "Kept." ;;
+                               *) print_info "Not confirmed - it will revert." ;; esac
+            else
+                lv_confirm "$A_IF" access
+                print_success "Remote access is now $_new."
+            fi
+        else
+            print_error "The firewall did not follow the setting - reverting."
+        fi
+    fi
+    press_any_key
+}
+
+# ---- [3] outbound: masquerade | inbound: remote-side setup -------------------
+rla_do_lever3() {
+    rla_ctx "$1" "$2" "$3"; _dir="$4"
+    if [ "$_dir" = out ]; then
+        _cur=$(w_get_masq "$A_IF"); _new=$( [ "$_cur" = 1 ] && echo 0 || echo 1 )
+        if ! w_zone_enabled "$A_IF"; then
+            # w_set_masq refuses this too (rc 3); checked here as well so the
+            # user gets an explanation instead of a silently skipped action.
+            print_error "The firewall zone for $A_IF is disabled."
+            print_info "This setting would have no effect until the VPN is enabled properly."
+            press_any_key; return
+        fi
+        _risk=$(guard_at_risk "$A_IF")
+        if [ -n "$_risk" ]; then
+            print_warning "This changes how traffic is addressed and can interrupt sessions:"
+            lv_risk_report "$A_IF"
+            printf '\n Apply anyway? It reverts automatically in 30s unless confirmed [y/N]: '
+            read -r _yn; printf '\n'
+            case "$_yn" in y|Y) ;; *) print_info "Cancelled - nothing changed."; press_any_key; return ;; esac
+        fi
+        lv_apply "$A_IF" masq "$_new" 30
+        if lv_verify "$A_IF" masq "$_new"; then
+            lv_confirm "$A_IF" masq
+            if [ "$_new" = 0 ]; then print_success "Your devices now show their real addresses to the remote side."
+            else print_success "Your devices are now hidden behind $A_TUN."; fi
+        else
+            print_error "The firewall did not follow the setting - it will revert."
+        fi
+    else
+        print_info "Only the remote router can allow traffic back to your LAN."
+        printf '\n'
+        if k_can_auth "$A_PEER" 2>/dev/null; then
+            print_success "Key trust with $A_PEER already exists."
+            print_info "Inbound testing (option 1) is available."
+        else
+            print_warning "There is no key trust with $A_PEER yet."
+            print_info "Installing a key lets this router query and test the remote side"
+            print_info "without a password each time. The remote router will trust this"
+            print_info "one until you revoke it."
+            printf '\n Install a key on %s now? [y/N]: ' "$A_PEER"
+            read -r _yn; printf '\n'
+            case "$_yn" in
+                y|Y) if k_install "$A_PEER"; then print_success "Key installed - $A_PEER now trusts this router."
+                     else print_error "Could not install the key. Is $A_PEER reachable on port 22?"; fi ;;
+                *)   print_info "Skipped." ;;
+            esac
+        fi
+        printf '\n'
+        print_info "On the remote router, allow its LAN to be reached over the tunnel"
+        print_info "and make sure it is not masquerading traffic toward you."
+    fi
+    press_any_key
+}
+
+# ---- [4] detect or set the remote LAN subnet ---------------------------------
+rla_do_detect() {
+    rla_ctx "$1" "$2" "$3"
+    print_info "Looking for the remote LAN subnet..."
+    printf '\n'
+    _want_ssh=0
+    k_can_auth "$A_PEER" 2>/dev/null && _want_ssh=1
+    _res=$(d_cascade "$A_IF" "$A_TY" "$A_RO" "$_want_ssh" "$A_PEER" 2>/dev/null)
+    # A REPORT of what was attempted, not a list of choices. Previously this was
+    # a keyword+description list indented directly above a prompt - the same
+    # shape as every menu in the program - and read as four selectable options.
+    # The heading and the "- " separator make it a log; the verdict is a
+    # sentence rather than a fourth row.
+    printf '   Checked:\n'
+    d_trace_show | while IFS='|' read -r rung result detail; do
+        [ "$rung" = manual ] && continue
+        printf '     %-8s - %s\n' "$rung" "$detail"
+    done
+    printf '\n'
+    if [ -n "$_res" ]; then
+        print_success "Remote LAN: ${_res%%|*}  (learned from: ${_res##*|})"
+        [ "${_res##*|}" = probe ] && print_warning "Inferred by probing - the mask is a guess. Correct it below if wrong."
+    else
+        print_info "Nothing found automatically - enter the subnet below."
+    fi
+    printf '\n'
+    printf ' Enter the remote LAN subnet (e.g. 192.168.2.0/24), or press Enter to keep: '
+    read -r _in; printf '\n'
+    if [ -n "$_in" ]; then
+        case "$_in" in
+            */*) ;;
+            *) print_error "Needs a prefix length, e.g. 192.168.2.0/24"; press_any_key; return ;;
+        esac
+        if guard_overlap "$A_LAN" "$_in"; then
+            print_error "Refused: $_in overlaps this router's LAN $A_LAN."
+            print_info "Remote LAN access cannot work between two identical subnets."
+            press_any_key; return
+        fi
+        if d_store "$A_IF" "$_in" manual; then print_success "Remote LAN set to $_in."
+        else print_error "Could not store that subnet."; fi
+    elif [ -z "$_res" ]; then
+        # Only option 2 needs the subnet - it has nowhere to route without one.
+        # Option 1 still works: it tests the peer's tunnel address and simply
+        # omits the remote-LAN destination it cannot name.
+        print_info "Left unknown - option 2 needs a subnet before it can route anywhere."
+    fi
+    press_any_key
+}
+
+# ---- Remote LAN Access screen ------------------------------------------------
+rla_pages_build() {                     # flat page list: tunnel x direction
+    : > /tmp/rla_pages.$$
+    rla_detect | while IFS='|' read -r t r i; do
+        [ -z "$i" ] && continue
+        printf '%s|%s|%s|out\n%s|%s|%s|in\n' "$t" "$r" "$i" "$t" "$r" "$i" >> /tmp/rla_pages.$$
+    done
+}
+
+rla_navlab() {                          # name whichever axis actually changes
+    _p=$(sed -n "${1}p" /tmp/rla_pages.$$)
+    _i=${_p#*|}; _i=${_i#*|}; _d=${_i#*|}; _i=${_i%%|*}
+    if [ "$_i" != "$2" ]; then printf '%s' "$_i"
+    elif [ "$_d" = out ]; then printf 'OUTBOUND'; else printf 'INBOUND'; fi
+}
+
+rla_rows() {                            # section|from|as|to|change
+    _if="$1"; _ty="$2"; _ro="$3"; _dir="$4"
+    _zone=$(rla_zone "$_if"); _tun=$(rla_tunnel_ip "$_if")
+    _peer=$(rla_peer_tunnel_ip "$_if" "$_ty" "$_ro")
+    _lanip=$(rla_lan_ip); _lan=$(rla_lan_cidr)
+    _rlan=$(d_get "$_if"); [ -z "$_rlan" ] && _rlan=$(rla_remote_lan "$_if" "$_ty")
+    [ -z "$_rlan" ] && _rlan="unknown"
+    [ "$(d_get_src "$_if")" = probe ] && [ "$_rlan" != unknown ] && _rlan="$_rlan*"
+    _masq=$(rla_masq "$_zone"); _acc=$(rla_access "$_zone")
+    [ -z "$_peer" ] && _peer="(none)"
+    _lo="${_lanip%.*}.2-254"
+    if [ "$_dir" = out ]; then
+        for _d in "$_peer" "$_rlan"; do
+            if [ "$_d" = unknown ]; then
+                echo "INACTIVE|$_lo|$_tun|$_d|Subnet not known yet - opt 4"
+                echo "INACTIVE|$_lanip|$_tun|$_d|Subnet not known yet - opt 4"
+                echo "INACTIVE|$_lo|$_lo|$_d|Subnet not known yet - opt 4"
+                echo "INACTIVE|$_lanip|$_lanip|$_d|Subnet not known yet - opt 4"
+                continue
+            fi
+            if [ "$_masq" = on ]; then
+                echo "ACTIVE|$_lo|$_tun|$_d|Opt 3 stops masquerading"
+                echo "ACTIVE|$_lanip|$_tun|$_d|Opt 3 stops masquerading"
+                echo "INACTIVE|$_lo|$_lo|$_d|Masquerading is on - opt 3"
+                echo "INACTIVE|$_lanip|$_lanip|$_d|Masquerading is on - opt 3"
+            else
+                echo "INACTIVE|$_lo|$_tun|$_d|Masquerading is off - opt 3"
+                echo "INACTIVE|$_lanip|$_tun|$_d|Masquerading is off - opt 3"
+                echo "ACTIVE|$_lo|$_lo|$_d|Opt 3 hides devices behind $_tun"
+                echo "ACTIVE|$_lanip|$_lanip|$_d|Opt 3 hides devices behind $_tun"
+            fi
+        done
+        echo "REMOTE ONLY|$_tun|$_tun|$_peer|Set on the remote router"
+        if [ "$_rlan" = unknown ]; then
+            echo "INACTIVE|$_tun|$_tun|$_rlan|Subnet not known yet - opt 4"
+        elif rla_routes_via "${_rlan%\*}" "$_if" 2>/dev/null; then
+            echo "ACTIVE|$_tun|$_tun|$_rlan|Opt 2 removes this route"
+        else
+            echo "INACTIVE|$_tun|$_tun|$_rlan|No route here - opt 2"
+        fi
+    else
+        if [ "$_rlan" = unknown ]; then
+            echo "INACTIVE|unknown|$_peer|$_tun|Subnet not known yet - opt 4"
+            echo "INACTIVE|unknown|$_peer|$_lan|Subnet not known yet - opt 4"
+            echo "INACTIVE|unknown|unknown|$_tun|Subnet not known yet - opt 4"
+            echo "INACTIVE|unknown|unknown|$_lan|Subnet not known yet - opt 4"
+        else
+            _b="${_rlan%\*}"; _sfx=""; [ "$_b" != "$_rlan" ] && _sfx="*"
+            for _s in "${_b%.*}.2-254$_sfx" "${_b%.*}.1$_sfx"; do
+                if [ "$_acc" = on ]; then
+                    echo "ACTIVE|$_s|$_peer|$_tun|Opt 2 blocks the remote side"
+                    echo "ACTIVE|$_s|$_peer|$_lan|Opt 2 blocks the remote side"
+                else
+                    echo "INACTIVE|$_s|$_peer|$_tun|Remote access is off - opt 2"
+                    echo "INACTIVE|$_s|$_peer|$_lan|Remote access is off - opt 2"
+                fi
+                echo "REMOTE ONLY|$_s|$_s|$_tun|Remote must stop masquerading"
+                echo "REMOTE ONLY|$_s|$_s|$_lan|Remote must route your LAN"
+            done
+        fi
+        if [ "$_acc" = on ]; then
+            echo "ACTIVE|$_peer|$_peer|$_tun|Opt 2 blocks the remote side"
+            echo "ACTIVE|$_peer|$_peer|$_lan|Opt 2 blocks the remote side"
+        else
+            echo "INACTIVE|$_peer|$_peer|$_tun|Remote access is off - opt 2"
+            echo "INACTIVE|$_peer|$_peer|$_lan|Remote access is off - opt 2"
+        fi
+    fi
+}
+
+manage_remote_lan_access() {
+    local pg=1
+    rla_pages_build
+    local np; np=$(wc -l < /tmp/rla_pages.$$)
+    if [ "${np:-0}" -lt 1 ]; then
+        clear; print_centered_header "Remote LAN Access"
+        print_warning "No VPN tunnel is up on this router."
+        print_info "Start a WireGuard or OpenVPN client or server first."
+        press_any_key; rm -f /tmp/rla_pages.$$; return
+    fi
+    # Use the profile-aware cells computed by detect_output_mode - they are padded
+    # to exactly 8 columns for THIS terminal's measured glyph widths. Hardcoding
+    # the pad here is what made the column ragged on terminals where emoji
+    # advance 1 instead of 2.
+    S_AC="$_S_RLA_AC"; S_IA="$_S_RLA_IA"; S_RO="$_S_RLA_RO"
+    # The legend must describe the set actually in use, not the output mode -
+    # a profile can fall back to ASCII status cells while still drawing box rules.
+    case "$S_AC" in
+        \[*) DEC="Legend: [AC] Active  [IA] Inactive  [RO] Remote only  * Inferred" ;;
+        *)  DEC="Legend: ✅ Active  ❌ Inactive  🔒 Remote only  * Inferred" ;;
+    esac
+    if [ "$OUTPUT_MODE" = "compat" ]; then
+        RULE="-"; BAR="|"; TL="|"; TR="|"; LK="===="; WR="--"
+    else
+        RULE="─"; BAR="│"; TL="┤"; TR="├"; LK="════"; WR="──"
+    fi
+    local W=100
+    while true; do
+        [ "$pg" -gt "$np" ] && pg=1
+        [ "$pg" -lt 1 ] && pg="$np"
+        local cur; cur=$(sed -n "${pg}p" /tmp/rla_pages.$$)
+        local type role iface dir
+        type=${cur%%|*}; local rest=${cur#*|}
+        role=${rest%%|*}; rest=${rest#*|}
+        iface=${rest%%|*}; dir=${rest#*|}
+        local rt; case "$role" in server) rt=Server ;; *) rt=Client ;; esac
+        local nx=$(( pg % np + 1 )) pv=$(( (pg - 2 + np) % np + 1 ))
+        local tun peer lan lanip rlan rgw
+        tun=$(rla_tunnel_ip "$iface"); peer=$(rla_peer_tunnel_ip "$iface" "$type" "$role")
+        lan=$(rla_lan_cidr); lanip=$(rla_lan_ip)
+        rlan=$(d_get "$iface"); [ -z "$rlan" ] && rlan=$(rla_remote_lan "$iface" "$type")
+        [ -z "$rlan" ] && rlan="unknown"
+        [ "$(d_get_src "$iface")" = probe ] && [ "$rlan" != unknown ] && rlan="$rlan*"
+        if [ "$rlan" = unknown ]; then rgw="unknown"; else rgw="${rlan%\*}"; rgw="${rgw%.*}.1"; fi
+        [ -z "$peer" ] && peer="(none)"
+
+        clear
+        print_centered_header "Remote LAN Access"
+        # 17, not 15: "WireGuard Server" is 16 characters and overran the
+        # field, leaving no gap before the divider and shifting the topology.
+        # Values are centred under their own label rather than left-justified,
+        # so each column reads as a unit however long the address is.
+        printf ' %-17s%s%s%s%s%s%s%s%s%s\n' "$type $rt" "$BAR" \
+            "$(rla_ctr 'this LAN' 18)" "$WR$TL" "$(rla_ctr 'this router' 15)" \
+            "$TR$LK$TL" "$(rla_ctr 'remote router' 15)" "$TR$WR" \
+            "$(rla_ctr 'remote LAN' 13)" ""
+        printf ' %-17s%s%s%s%s%s%s%s%s\n' "$iface" "$BAR" \
+            "$(rla_ctr "$lan" 18)" "   " "$(rla_ctr "$tun" 15)" \
+            "      " "$(rla_ctr "$peer" 15)" "   " "$(rla_ctr "$rlan" 13)"
+        printf ' %-17s%s%s%s%s%s%s\n' "$(rla_link_state "$iface" "$type" "$role")" "$BAR" \
+            "$(rla_ctr '' 18)" "   " "$(rla_ctr "$lanip" 15)" \
+            "      " "$(rla_ctr "$rgw" 15)"
+        printf ' %s\n' "$(rla_rep "$RULE" $W)"
+        if [ "$dir" = out ]; then printf ' OUTBOUND   From here to the remote side\n'
+        else printf ' INBOUND    From the remote side to here\n'; fi
+        printf '   %-8s%-18s%-18s%-18s%s\n' Status From As To Change
+        # Emit in GENERATION order, not sorted by status. The rows are a fixed
+        # enumeration whose position never changes - only their Status does - so
+        # a toggle updates the row you were looking at instead of moving it
+        # somewhere else. Sorting made sense while the sections had visible
+        # headers to explain the reordering; with the Status column carrying that
+        # information, sorting only costs spatial stability.
+        rla_rows "$iface" "$type" "$role" "$dir" | while IFS='|' read -r k a b c d; do
+            case "$k" in ACTIVE) g="$S_AC";; INACTIVE) g="$S_IA";; *) g="$S_RO";; esac
+            printf '   %s%-18s%-18s%-18s%s\n' "$g" "$a" "$b" "$c" "$d"
+        done
+        printf '\n %s\n' "$DEC"
+        printf ' %s\n' "$(rla_rep "$RULE" $W)"
+        # [N] at a fixed column so it does not drift with the tunnel name -
+        # lands under "addresses" in option 3 below; [0] stays with [2] and [4].
+        printf ' %-25s%-30s%s\n' "[P] Prev to $(rla_navlab $pv "$iface")" \
+            "[N] Next to $(rla_navlab $nx "$iface")" '[0] Back'
+        # [2] and [3] are toggles: the label must say what pressing them WILL DO
+        # from the current state, not name one fixed direction. Otherwise after
+        # acting the option still advertises what has already happened.
+        if [ "$dir" = out ]; then
+            if [ "$rlan" != unknown ] && rla_routes_via "${rlan%\*}" "$iface" 2>/dev/null
+            then _o2="[2] Stop routing to the remote LAN"
+            else _o2="[2] Let this router reach the remote LAN"; fi
+            if [ "$(rla_masq "$(rla_zone "$iface")")" = on ]
+            then _o3="[3] Show my devices real addresses to the remote side"
+            else _o3="[3] Hide my devices behind $tun"; fi
+            printf ' %-55s%s\n' "[1] Test reachability" "$_o2"
+            printf ' %-55s%s\n' "$_o3" "[4] Detect or set the remote LAN subnet"
+        else
+            if [ "$(rla_access "$(rla_zone "$iface")")" = on ]
+            then _o2="[2] Block the remote side from my LAN"
+            else _o2="[2] Let the remote side reach my LAN"; fi
+            printf ' %-55s%s\n' "[1] Test reachability" "$_o2"
+            printf ' %-55s%s\n' "[3] Set up the remote router for LAN access" "[4] Detect or set the remote LAN subnet"
+        fi
+        printf '\nChoose [1-4/P/N/0]: '
+        read -r c; printf '\n'
+        case "$c" in
+            1) rla_do_test "$iface" "$type" "$role" "$dir" ;;
+            2) rla_do_lever2 "$iface" "$type" "$role" "$dir" ;;
+            3) rla_do_lever3 "$iface" "$type" "$role" "$dir" ;;
+            4) rla_do_detect "$iface" "$type" "$role" ;;
+            p|P) pg=$pv ;;
+            n|N) pg=$nx ;;
+            0) rm -f /tmp/rla_pages.$$; return ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
 manage_vpn_tools() {
     while true; do
         clear
         print_centered_header "VPN Tools"
         printf "%s  VPN MTU Optimizer\n" "$N1"
+        printf "%s  Remote LAN Access\n" "$N2"
         printf "%s  Main menu\n" "$N0"
-        printf "\nChoose [1/0]: "
+        printf "\nChoose [1-2/0]: "
         read -r vpn_choice
         printf "\n"
         case "$vpn_choice" in
             1) manage_mtu ;;
+            2) manage_remote_lan_access ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac

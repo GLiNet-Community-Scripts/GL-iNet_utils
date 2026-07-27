@@ -39,6 +39,13 @@
 - 🔐 **VPN Tools**
   - **MTU Optimizer:** Finds your active WireGuard and OpenVPN tunnels — client or server — and recommends the right MTU (the underlay link MTU minus that protocol's exact overhead), so tunnelled traffic stops fragmenting and silently losing throughput. Apply it with one keypress, set a value by hand, run an optional active probe, or reset to the router's default. On routers with more than one tunnel, Optimize and Reset can act on all of them at once, each with its own correct value.
   - **Written where the router expects it:** the MTU goes into GL.iNet's own VPN configuration rather than a generic network setting, so it appears in the Admin Panel under that tunnel's Options and survives a reboot. On older firmware, where the web UI can set an MTU but not clear it again, Reset is the only way back to the default.
+  - **Remote LAN Access** — shows every traffic combination across the tunnel in
+    both directions, marked Active / Inactive / Remote only, with the reason and
+    the option that changes it. Detects the remote LAN subnet (config, SSH, or
+    probe — guessed values are flagged), writes routes and per-peer
+    authorisation into GL's own config so they appear in the web UI, and applies
+    firewall changes under a 30-second auto-revert so a wrong toggle cannot lock
+    you out.
 - 📋 **Secure UCI Viewer:** Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
 - 🔄 **Native Self-Updater:** Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 **GPL-3.0 Licensed:** Free, open, and community-driven.
@@ -140,6 +147,7 @@ VPN Tools
 
 ```
 1️⃣  VPN MTU Optimizer
+2️⃣  Remote LAN Access
 0️⃣  Main menu
 ```
 

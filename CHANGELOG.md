@@ -4,6 +4,60 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-26
+- Fixed: masquerade and remote-access changes are now refused outright when the
+  VPN's firewall zone is disabled, instead of appearing to succeed. A disabled
+  zone is skipped entirely by the firewall, so the setting was being written and
+  read back correctly while having no effect at all.
+- Fixed: the Remote LAN Access status column now uses per-terminal padding
+  matched to how each glyph actually renders. On terminals that draw emoji at a
+  different width than they report, the Active/Inactive/Remote-only markers no
+  longer push the table out of alignment.
+- New: on startup the toolkit now checks the real terminal size and says plainly
+  if the window is too small, including how many columns or rows are missing. It
+  already asks the terminal to resize itself, but some terminals ignore that
+  request silently, so this tells you rather than leaving you with a wrapped
+  table. Offers a recheck, because several terminals show no size indicator.
+- Changed: the OpenVPN MTU recommendation is now derived from the tunnel's actual
+  cipher and transport instead of a fixed conservative allowance. Measured against
+  a live tunnel, UDP with AES-256-GCM costs 52 bytes, not the 69 previously
+  assumed — so a 1500-byte link now recommends 1448 rather than 1431, recovering
+  17 bytes of payload on every packet. Where the cipher cannot be determined the
+  old conservative figure is still used.
+- Added diffutils to the optional package manager.
+- New: Remote LAN Access under VPN Tools — a single screen that explains, in
+  plain terms, exactly which traffic can cross your VPN tunnel and which cannot,
+  and lets you change it. It enumerates every source-and-destination combination
+  in both directions rather than showing one summary line, so "it doesn't work"
+  becomes a specific row with a specific reason.
+- Each row is marked Active, Inactive, or Remote only. "Remote only" means the
+  setting lives on the other router and cannot be changed from here — previously
+  the most common source of confusion when remote LAN access silently failed.
+- Detects the remote LAN subnet automatically where that is possible: from the
+  tunnel's own configuration, by querying the remote router over SSH when key
+  trust exists, or by probing well-known gateway addresses. Values that were
+  guessed rather than read are marked with an asterisk, because a probed subnet
+  assumes a /24 that may be wrong.
+- Routes and per-peer authorisation are written to GL's own configuration keys,
+  so changes appear in the GL web UI under Route Rules and survive a reboot.
+- Firewall changes that could cut your own connection now apply under
+  commit-confirm: the change is made, and reverts automatically after 30 seconds
+  unless you confirm you are still connected. The revert runs detached, so it
+  still happens if the session dies mid-change.
+- Refuses outright to route between two identical subnets, and never proposes a
+  probed subnet that matches your own LAN.
+- Reachability testing is honest about what it cannot know: inbound can only be
+  proven by the remote router, so it is reported as untestable rather than
+  guessed from local configuration.
+- The tunnel line reports what it can actually measure: WireGuard shows the real
+  time since the last handshake, and flags a peer that has never connected at all
+  — which is the first thing to check when nothing works. OpenVPN exposes no
+  handshake time, so none is claimed for it.
+- Router-to-router SSH key trust can be set up from the screen, letting the
+  toolkit query and test the far side without a password each time. Keys the
+  toolkit installs are tagged, so revoking removes only its own key and leaves
+  any you added by hand untouched.
+
 ## 2026-07-21
 - New: VPN Tools menu with an MTU Optimizer — detects your active WireGuard and
   OpenVPN tunnels and recommends the right MTU (underlay link MTU minus the

@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-26
+# Version: 2026-07-27
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -302,6 +302,40 @@ _TERM_PROFILE="mac"   # Runtime: "mac"|"wt"|"ttyd"; set by detect_output_mode (f
 # Two display modes: Full and Compatible.
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ---- package manager abstraction --------------------------------------------
+# OpenWrt 25 replaced opkg with apk. These wrap the four operations the toolkit
+# needs so call sites do not care which is present. Package NAMES are mostly
+# unchanged between the two, but not always (e.g. zram-swap resolves to a
+# variant under apk) - so an install can still fail on a name basis; that is
+# handled per-package, not here.
+#
+# Defined HERE, above ensure_stty, because detect_output_mode() runs at startup
+# and calls ensure_stty long before the rest of the toolkit's helpers exist. A
+# definition further down would be invisible at that point and the install would
+# fail with "pkg_update: not found" into a redirected log - silently dropping
+# the display to Compatible mode.
+pkg_mgr() { command -v apk >/dev/null 2>&1 && printf 'apk' || printf 'opkg'; }
+
+pkg_is_installed() {   # <pkg> -> 0 if installed
+    if [ "$(pkg_mgr)" = apk ]; then
+        apk info -e "$1" >/dev/null 2>&1
+    else
+        opkg list-installed 2>/dev/null | grep -q "^$1 "
+    fi
+}
+
+pkg_install() {        # <pkg>
+    if [ "$(pkg_mgr)" = apk ]; then apk add "$1"; else opkg install "$1"; fi
+}
+
+pkg_remove() {         # <pkg>  - removes dependencies too where the manager can
+    if [ "$(pkg_mgr)" = apk ]; then apk del "$1"; else opkg remove --autoremove "$1"; fi
+}
+
+pkg_update() {         # refresh the package index
+    if [ "$(pkg_mgr)" = apk ]; then apk update; else opkg update; fi
+}
+
 # Ensure a real (coreutils) `stty` is available for the cursor-advance probe.
 # busybox's own stty applet can't drive the probe reliably, so we require the
 # coreutils build and install it silently (no prompt) with a small spinner on
@@ -311,7 +345,7 @@ ensure_stty() {
     stty --version 2>&1 | grep -qi coreutils && return 0
 
     local log="/tmp/.stty-install.$$" pid spin='-\|/' c
-    ( opkg update && opkg install coreutils-stty ) >"$log" 2>&1 &
+    ( pkg_update && pkg_install coreutils-stty ) >"$log" 2>&1 &
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         c=${spin%"${spin#?}"}                  # first character
@@ -509,15 +543,18 @@ detect_output_mode() {
 # given sequence just ignore it (PuTTY ignores the OSC colors; non-xterm ignore
 # the resize), so this is safe everywhere.
 TERM_MIN_COLS=110
-TERM_MIN_ROWS=32      # measured: Hardware Information page 1 renders 32 visible
-                      # lines (header box 3 + rule + 27 body + rule + nav). Any
-                      # shorter and the header scrolls off the top.
+TERM_MIN_ROWS=33      # measured: Hardware Information page 1 renders 33 visible
+                      # lines - a leading blank line, then the header box 3 +
+                      # rule + 27 body + rule + nav. The blank line above the
+                      # header is easy to miss when counting and is why this was
+                      # briefly set to 32. Any shorter and the header scrolls off.
 # The widest screen the toolkit draws (Remote LAN Access rule = 101 cols). Below
 # this, tables wrap and alignment is lost. Distinct from TERM_MIN_COLS, which is
 # what we *ask* for - some terminals (Termius, verified) ignore the resize
 # escape entirely, so we advise the user instead of assuming it worked.
 TERM_NEED_COLS=101
 _TERM_ORIG_SIZE=""    # "rows;cols" saved at setup; empty = nothing to restore
+_TERM_RESIZE_SENT=""  # set when terminal_setup actually asked for a resize
 _TERM_RESTORED=""
 
 # Message helpers. Defined HERE rather than further down because
@@ -548,7 +585,17 @@ terminal_setup() {
     nr=$r; nc=$c
     [ "$c" -lt "$TERM_MIN_COLS" ] && nc=$TERM_MIN_COLS
     [ "$r" -lt "$TERM_MIN_ROWS" ] && nr=$TERM_MIN_ROWS
-    { [ "$nr" != "$r" ] || [ "$nc" != "$c" ]; } && printf '\033[8;%s;%st' "$nr" "$nc"
+    if [ "$nr" != "$r" ] || [ "$nc" != "$c" ]; then
+        # Termius ignores CSI 8t. Asking anyway would make the advisory wait for
+        # a resize that provably never lands, so skip the request and let the
+        # advisory judge the real size immediately. Note the profile is only
+        # probed in full mode, so a Termius user in Compatible mode is not
+        # recognised here and still waits out the (bounded) settle window.
+        if [ "$_TERM_PROFILE" != termius ]; then
+            printf '\033[8;%s;%st' "$nr" "$nc"
+            _TERM_RESIZE_SENT=1  # the advisory must let this land before judging
+        fi
+    fi
 }
 
 terminal_size_advisory() {
@@ -558,11 +605,58 @@ terminal_size_advisory() {
     [ "${GL_NO_TERM_SETUP+x}" ] && return
     [ -t 1 ] || return
     command -v stty >/dev/null 2>&1 || return
+    # terminal_setup asks for a resize with CSI 8t and the terminal applies it
+    # asynchronously - the reply has to travel back through the pty, so reading
+    # stty straight away catches the OLD size and warns about a window that is
+    # already being corrected. Wait for it to settle, but only when a resize was
+    # actually requested, and never for long.
+    #
+    # The budget is a 5s DEADLINE rather than a tick count, so it holds whichever
+    # sleep this box has. usleep is a busybox applet that is not on every build;
+    # fractional `sleep` is not an option at all - it errors on some routers and
+    # on others (MT1300) parses as ZERO, which would busy-spin and bring the
+    # spurious warning straight back.
+    if [ -n "$_TERM_RESIZE_SENT" ]; then
+        _tsz_start=$(date +%s)
+        _tsz_end=$(( _tsz_start + 5 ))
+        _tsz_spin='-\|/'
+        while [ "$(date +%s)" -lt "$_tsz_end" ]; do
+            sz=$(stty size 2>/dev/null </dev/tty); r=${sz% *}; c=${sz#* }
+            case "$r$c" in *[!0-9]*|'') break ;; esac
+            { [ "$c" -ge "$TERM_NEED_COLS" ] && [ "$r" -ge "$TERM_MIN_ROWS" ]; } && \
+                { printf '\r\033[K'; return; }
+            # Say something once this is slow enough to look like a hang. A
+            # terminal that honours the resize lands well inside a second, so
+            # staying silent until then keeps the normal path clean instead of
+            # trading one flash for another.
+            if [ "$(( $(date +%s) - _tsz_start ))" -ge 1 ]; then
+                _tsz_c=${_tsz_spin%"${_tsz_spin#?}"}
+                _tsz_spin=${_tsz_spin#?}${_tsz_c}
+                printf '\rChecking window size... %s' "$_tsz_c"
+            fi
+            # 100ms, not 250: the window between the terminal reflowing scrollback
+            # back into view and the caller clearing it is one tick long, and that
+            # tick is the brief flash of the previous run's output on startup.
+            usleep 100000 2>/dev/null || sleep 1
+        done
+        printf '\r\033[K'
+    fi
+    _tsz_warned=""
     while true; do
         sz=$(stty size 2>/dev/null </dev/tty); r=${sz% *}; c=${sz#* }
         case "$r" in ''|*[!0-9]*) return ;; esac
         case "$c" in ''|*[!0-9]*) return ;; esac
-        [ "$c" -ge "$TERM_NEED_COLS" ] && [ "$r" -ge "$TERM_MIN_ROWS" ] && return
+        if [ "$c" -ge "$TERM_NEED_COLS" ] && [ "$r" -ge "$TERM_MIN_ROWS" ]; then
+            # Only reachable with a warning on screen if the user rechecked, and
+            # a recheck that prints nothing reads as if the key did nothing. Say
+            # it worked, then hold it - the caller clears the screen on return.
+            if [ -n "$_tsz_warned" ]; then
+                print_success "Window is now ${c} x ${r}. Continuing."
+                sleep 2
+            fi
+            return
+        fi
+        _tsz_warned=1
         printf '\n'
         print_warning "This window is ${c} x ${r}. Some screens need ${TERM_NEED_COLS} x ${TERM_MIN_ROWS}."
         [ "$c" -lt "$TERM_NEED_COLS" ] && \
@@ -576,7 +670,11 @@ terminal_size_advisory() {
         printf '\n'
         case "$_tsz_ans" in
             r|R) continue ;;
-            *) return ;;
+            *)  # Same reasoning as the recheck path: acknowledge the choice
+                # rather than clearing straight to the splash.
+                print_info "Continuing at ${c} x ${r}. Some screens will wrap or scroll."
+                sleep 2
+                return ;;
         esac
     done
 }
@@ -590,16 +688,27 @@ terminal_restore() {
     [ -n "$_TERM_ORIG_SIZE" ] && printf '\033[8;%st' "$_TERM_ORIG_SIZE"
 }
 
-# Show the splash first, then detect the terminal. On first run this installs
-# coreutils-stty, so the "Setting up terminal support..." spinner appears under
-# the splash (before the menu) rather than on a blank screen.
+# Clear, size the terminal, then clear again and draw. Nothing user-facing is
+# painted until the geometry is final, because anything drawn beforehand is
+# visibly disturbed by the resize: the splash gets painted, then jumps as the
+# window grows. A grow also pulls scrolled-off lines back down into view -
+# `clear` is ESC[H ESC[J, which erases the visible screen but NOT the
+# scrollback - so remnants of the previous run land ABOVE whatever was already
+# drawn, which no amount of clearing beforehand can prevent.
+#
+# The first clear is for detect_output_mode: on first run it installs
+# coreutils-stty, and its "Setting up terminal support..." spinner should have a
+# clean screen to appear on. It has to run before terminal_setup, which needs
+# the detected profile to decide whether asking for a resize is worthwhile.
 command -v clear >/dev/null 2>&1 && clear
-printf "%b\n" "$SPLASH"
 detect_output_mode
 
 # Widen + dark-theme the terminal for this session; restore it all on exit.
 terminal_setup
 terminal_size_advisory
+
+command -v clear >/dev/null 2>&1 && clear
+printf "%b\n" "$SPLASH"
 trap 'terminal_restore' EXIT
 trap 'terminal_restore; exit 130' INT
 trap 'terminal_restore; exit 143' TERM
@@ -965,17 +1074,17 @@ check_connectivity() {
     return 1
 }
 
-# Refresh opkg package lists once per session (gated by $opkg_updated). Shows a
+# Refresh the package index once per session (gated by $opkg_updated). Shows a
 # spinner; on failure prints diagnostics and returns non-zero - callers decide
 # how to recover (it no longer exits the program).
 check_opkg_updated() {
     [ "$opkg_updated" -eq 1 ] && return 0
-    if spin_run "Updating package lists" opkg update; then
+    if spin_run "Updating package lists" pkg_update; then
         opkg_updated=1
         rm -f "$SPIN_LOG" 2>/dev/null
         return 0
     fi
-    print_error "opkg update failed."
+    print_error "Package index update failed."
     check_connectivity
     print_info "Collected errors:"
     tail -n 20 "$SPIN_LOG" 2>/dev/null | grep -E '^(\*|\*\*\*|Collected errors:|wget returned)' | sed 's/^/  /'
@@ -989,10 +1098,10 @@ check_opkg_updated() {
 # Returns 0 if the package is installed afterwards, 1 otherwise.
 install_package() {
     local pkg="$1" name="${2:-$1}"
-    opkg list-installed 2>/dev/null | grep -q "^$pkg " && return 0
+    pkg_is_installed "$pkg" && return 0
     check_opkg_updated || return 1
-    spin_run "Installing $name" opkg install "$pkg"
-    if opkg list-installed 2>/dev/null | grep -q "^$pkg "; then
+    spin_run "Installing $name" pkg_install "$pkg"
+    if pkg_is_installed "$pkg"; then
         print_success "Installed: $name"
         rm -f "$SPIN_LOG" 2>/dev/null
         return 0
@@ -1755,7 +1864,7 @@ On GL.iNet routers, the recommended approach is often to **disable automatic UI 
 • GL.iNet provides their own pre-packaged, tested version of AdGuardHome
 • Auto-updating the UI can sometimes cause compatibility issues with GL.iNet's custom firmware
 • It may overwrite GL.iNet-specific patches or branding
-• Manual updates through GL.iNet's firmware or opkg are usually safer and better integrated
+• Manual updates through GL.iNet's firmware or the package manager are usually safer and better integrated
 
 When should you enable UI updates?
 ──────────────────────────────────
@@ -3316,7 +3425,7 @@ manage_zram() {
         
         case $zram_choice in
             1)
-                if ! opkg list-installed | grep -q "^zram-swap"; then
+                if ! pkg_is_installed zram-swap; then
                     install_package zram-swap || { press_any_key; continue; }
                 fi
                 
@@ -3370,13 +3479,13 @@ manage_zram() {
                 press_any_key
                 ;;
             4)
-                if opkg list-installed | grep -q "^zram-swap"; then
+                if pkg_is_installed zram-swap; then
                     printf "%b" "${YELLOW}Remove zram-swap package? [y/N]: ${RESET}"
                     read -r confirm
                     printf "\n"
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
-                        opkg remove --autoremove zram-swap >/dev/null 2>&1
+                        pkg_remove zram-swap >/dev/null 2>&1
                         for p in /etc/init.d/zram /etc/config/system; do
                             sed -i "\|$p|d" "$up_conf" 2>/dev/null
                         done
@@ -3954,7 +4063,7 @@ manage_guest_limiter() {
         hw_status=$(get_hw_accel_info)
         case "$hw_status" in
             *ENABLED*)
-                hw_message="⃗→ Limits Blocked"
+                hw_message="→ Limits Blocked"
                 ;;
             *)
                 hw_message="→ Limits Ready"
@@ -4000,7 +4109,7 @@ manage_guest_limiter() {
         printf " %b\n" "${CYAN}CONFIGURATION STATUS${RESET}"
         printf "   Download Limit:     %b\n" "$dl_status"
         printf "   Upload Limit:       %b\n" "$ul_status"
-        printf "   Guest -> GL Web UI: %b\n" "$admin_access" 
+        printf "   Guest → GL Web UI: %b\n" "$admin_access" 
         printf "   HW Acceleration:    %b %b\n" "$hw_status" "$hw_message"
         printf "   Persistence:        %b\n" "$persist_status"
         printf "\n"
@@ -4080,10 +4189,10 @@ manage_guest_limiter() {
                 printf "\n"
                 if uci -q get firewall.guest_admin_access >/dev/null; then
                     toggle_admin_access "off"
-                    print_info "Guest -> Web UI Access: DISABLED."
+                    print_info "Guest → Web UI Access: DISABLED."
                 else
                     toggle_admin_access "on"
-                    print_info "Guest -> Web UI Access: ENABLED."
+                    print_info "Guest → Web UI Access: ENABLED."
                 fi
                 press_any_key
                 ;;
@@ -4741,7 +4850,7 @@ EOF
                         print_warning "ttyd service is not running."
                         printf "\n"
                     fi
-                    opkg remove --autoremove ttyd >/dev/null 2>&1
+                    pkg_remove ttyd >/dev/null 2>&1
                     rm -f /etc/config/ttyd
                     if [ -f /etc/ttyd.crt ] || [ -f /etc/ttyd.key ]; then
                         print_info "Removing ttyd SSL certificates..."
@@ -4794,9 +4903,18 @@ create_lazarus_hook() {
     cat << 'EOF' > "$hook"
 #!/bin/sh
 # Lazarus Survival Engine - Post-Upgrade Package Restoration Hook
+#
+# This runs standalone from /etc/uci-defaults after a sysupgrade, with NONE of
+# the toolkit's helpers loaded - so the apk/opkg choice is inlined rather than
+# calling pkg_update/pkg_install, which do not exist in this context.
 if [ -f /etc/lazarus.list ]; then
-    opkg update
-    cat /etc/lazarus.list | xargs opkg install
+    if command -v apk >/dev/null 2>&1; then
+        apk update
+        for _lz in $(cat /etc/lazarus.list 2>/dev/null); do apk add "$_lz"; done
+    else
+        opkg update
+        for _lz in $(cat /etc/lazarus.list 2>/dev/null); do opkg install "$_lz"; done
+    fi
 fi
 # Re-persist the healer list itself
 grep -qFx "/etc/lazarus.list" /etc/sysupgrade.conf || echo "/etc/lazarus.list" >> /etc/sysupgrade.conf
@@ -4973,7 +5091,7 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                                 if [ "$name" == "speedtest" ]; then
                                     rm -f /usr/bin/speedtest
                                 else
-                                    opkg remove --autoremove "$name" >/dev/null 2>&1
+                                    pkg_remove "$name" >/dev/null 2>&1
                                 fi
                             fi
                             
@@ -5349,7 +5467,7 @@ check_install_prompt() {
     case "$ip_ans" in
         n|N)
             sed -i 's/^INSTALL_PROMPTED=0$/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
-            print_info "Skipping. You can install later via System Tweaks > Toolkit Management."
+            print_info "Skipping. You can install later via System Tweaks → Toolkit Management."
             STARTUP_NOTICE=1
             ;;
         *)
@@ -5390,17 +5508,27 @@ manage_display_settings() {
     _display_settings_screen() {
         local page="$1" detected="$2"
         local _R="\033[0m" _G="\033[32m" _Y="\033[33m" _B="\033[38;5;153m" _C="\033[36m" _RD="\033[31m"
+        # The Full-mode samples below must be padded for the CURRENT TERMINAL,
+        # not the current OUTPUT_MODE - which is why they cannot simply use
+        # $_S_OK/$_S_ERR (those follow the active mode, so previewing Full mode
+        # from Compatible mode would show the wrong glyphs entirely).
+        #
+        # On Termius ✅ and ❌ advance one cell but PAINT two, so the single
+        # trailing space used everywhere else lands on top of the glyph and the
+        # sample renders short. Mirror the padding detect_output_mode applies.
+        local _pOK="✅ " _pERR="❌ "
+        [ "$_TERM_PROFILE" = termius ] && { _pOK="✅  "; _pERR="❌  "; }
         case "$page" in
             1)
                 printf " %bPage 1 of 3 — Full mode%b (emoji symbols + color)\n\n" "${BOLD}${CYAN}" "$_R"
                 printf "   %bMessages%b\n" "$_C" "$_R"
-                printf "     %b✅ Operation completed successfully%b\n" "$_G" "$_R"
-                printf "     %b❌ Operation failed%b\n" "$_RD" "$_R"
+                printf "     %b%sOperation completed successfully%b\n" "$_G" "$_pOK" "$_R"
+                printf "     %b%sOperation failed%b\n" "$_RD" "$_pERR" "$_R"
                 printf "     %b⚠️  Something needs attention%b\n" "$_Y" "$_R"
                 printf "     %bℹ️  Informational message%b\n" "$_B" "$_R"
                 printf "     %b⚙️  Action in progress%b\n\n" "$_C" "$_R"
                 printf "   %bStatus%b\n" "$_C" "$_R"
-                printf "     %b✅ On / enabled / running%b      %b❌ Off / disabled / stopped%b\n\n" "$_G" "$_R" "$_RD" "$_R"
+                printf "     %b%sOn / enabled / running%b      %b%sOff / disabled / stopped%b\n\n" "$_G" "$_pOK" "$_R" "$_RD" "$_pERR" "$_R"
                 printf "   %bA menu looks like%b\n" "$_C" "$_R"
                 printf "     1️⃣  Show Hardware Information\n"
                 printf "     2️⃣  AdGuardHome Control Center\n"
@@ -8060,7 +8188,7 @@ manage_librespeed() {
                     printf "%b" "${YELLOW}Remove LibreSpeed package? [y/N]: ${RESET}"; read -r confirm
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         /etc/init.d/librespeed-go stop >/dev/null 2>&1
-                        opkg remove --autoremove librespeed-go >/dev/null 2>&1
+                        pkg_remove librespeed-go >/dev/null 2>&1
                         # Always clean up persistence entries on uninstall
                         sed -i "\|/usr/bin/librespeed-go|d" "$UP_CONF"
                         sed -i "\|/etc/init.d/librespeed-go|d" "$UP_CONF"
@@ -8086,8 +8214,21 @@ install_ookla_speedtest() {
             aarch64) suffix="aarch64" ;;
             armv7*)  suffix="armhf"   ;;
             armv8*)  suffix="aarch64" ;;
-            mips*)   suffix="mips"    ;;
             x86_64)  suffix="x86_64"  ;;
+            mips*)
+                # Ookla ships its own binary rather than a package, and builds
+                # it only for aarch64, armel, armhf, i386 and x86_64 - there is
+                # no MIPS build. Fetching one 404s, so this used to fail only
+                # after the download, with nothing explaining why. No repository
+                # or feed can fix it; say so before spending the user's time.
+                print_error "Ookla Speedtest is not available for this router."
+                print_info "Ookla distributes its own binary and does not build it for MIPS"
+                print_info "($arch). No package repository can provide it either."
+                printf "\n"
+                print_info "LibreSpeed and iperf3 both work here and are in the same menu."
+                press_any_key
+                return 1
+                ;;
             *) print_error "Unsupported Arch: $arch"; press_any_key; return 1 ;;
         esac
 
@@ -8284,7 +8425,11 @@ benchmark_system() {
                 raw_end=$(get_cpu_temp)
                 end_temp_str=$(get_temp)
                 end_fan_str=$(get_fan_speed)
-                usleep 3000000
+                # Settle before the "after cooling" reading. Same fallback as the
+                # other usleep call sites - sleep 3, not 1, so the cooldown is
+                # still 3s on a build without the applet; a shorter pause would
+                # silently change what this measures.
+                usleep 3000000 2>/dev/null || sleep 3
                 raw_post=$(get_cpu_temp)
                 post_temp_str=$(get_temp)
                 post_fan_str=$(get_fan_speed)

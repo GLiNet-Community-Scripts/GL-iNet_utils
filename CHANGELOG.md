@@ -4,6 +4,56 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-27
+- Fixed: package installation on OpenWrt 25, which replaced opkg with apk. All
+  package operations now go through a small abstraction that picks whichever
+  manager the router has, so installing, removing and checking work on both.
+  This is what stopped zram swap installing on OpenWrt 25 - nothing about zram
+  itself was wrong. This also covers the two places that bootstrap themselves:
+  the coreutils-stty install on first run (without which the display silently
+  drops to Compatible mode) and the post-upgrade package restoration hook.
+- Fixed: startup no longer paints the splash and then visibly shifts it, and
+  output from the previous run no longer appears above it. Both had the same
+  cause - the splash was drawn before the window was widened. Clearing the
+  screen does not clear the scrollback, and widening a window pulls
+  scrolled-off lines back into view, so the remnants arrived after the clear
+  rather than before it. Nothing is drawn now until the window has settled at
+  its final size.
+- Fixed: the minimum window height was one row short. Hardware Information
+  page 1 needs 33 rows, not 32 - the blank line above the header was missed
+  when it was measured.
+- Changed: while the toolkit waits for the terminal to apply a resize, it says
+  so with a progress message instead of sitting on a blank screen, which read
+  as a hang on terminals that ignore the request. The message only appears once
+  the wait is long enough to notice; terminals that resize promptly still show
+  nothing.
+- Changed: the window-size prompt now confirms what happened. Rechecking after
+  a successful resize says so, and continuing at a small size acknowledges the
+  choice, rather than either clearing straight to the splash with no output.
+- Fixed: a stray combining character in the guest-limits status made one of the
+  two arrows render as a mangled mark. Arrow style is now consistent across
+  user-facing text.
+- Fixed: Ookla Speedtest now explains itself instead of failing late on MIPS
+  routers. Ookla ships its own binary and does not build one for MIPS, so the
+  install could never succeed there - but it only failed after downloading,
+  with nothing saying why. It now says so before starting and points at
+  LibreSpeed and iperf3, which both work.
+- Fixed: the Full-mode samples on the display-mode preview were spaced for a
+  typical terminal rather than the one in use, so they rendered short in
+  Termius. They now follow the same per-terminal spacing as the rest of the
+  toolkit.
+- Fixed: the cooldown pause in the CPU thermal stress test could be skipped
+  entirely on a build without busybox's `usleep`, making the "after cooling"
+  temperature a duplicate of the peak reading rather than a real measurement.
+  It now falls back to a plain sleep of the same length, as the other pauses
+  already did.
+- Fixed: the terminal-size check no longer warns about a window that is already
+  being resized. It asks the terminal to resize, then waits up to 5 seconds for
+  that to take effect before judging, instead of reading the old size
+  immediately. Terminals known to ignore the request - Termius - are not asked
+  at all, so their advice appears straight away rather than after a wait for
+  something that was never going to happen.
+
 ## 2026-07-26
 - Fixed: masquerade and remote-access changes are now refused outright when the
   VPN's firewall zone is disabled, instead of appearing to succeed. A disabled

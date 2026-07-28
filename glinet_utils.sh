@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-27
+# Version: 2026-07-28
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -469,14 +469,30 @@ detect_output_mode() {
         case "$_TERM_PROFILE" in
             ttyd)
                 # xterm.js: all emoji adv=1 — 1 trailing space after everything
-                _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ ";  _S_TIME="⏳ "
+                # Same rendering as Termius, verified in a real ttyd session:
+                # wide-by-default BMP emoji (✅ ❌ ⏳ ❓ 🆑) advance ONE cell but
+                # PAINT two, so a single trailing space is drawn over the glyph's
+                # right half and the text butts against it. Two gives one visible
+                # gap. The ambiguous+VS16 set (⚠️ ℹ️ ⚙️) advances two and paints
+                # two, so those stay at one.
+                _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ "
+                _S_OK="✅  ";   _S_ERR="❌  ";  _S_TIME="⏳  "
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
-                NQ="❓"; NCL="🆑"; NA="🅰️"
+                # NQ carries a trailing space so that, with the ONE space its call
+                # sites add, Help lands in the same column as the keycap rows -
+                # those get TWO spaces at their call site and the keycap paints a
+                # single cell here. Without it Help sits one column short.
+                NQ="❓ "; NCL="🆑 "; NA="🅰️"
                 # xterm.js advances AND paints all emoji at 1 cell, so pad to
                 # the advance. NOT verified against a real ttyd session - if the
                 # web terminal paints 2 cells like Termius it needs those pads.
-                _S_RLA_AC="✅       "; _S_RLA_IA="❌       "; _S_RLA_RO="🔒      "
+                # Padded to RENDERED width, matching Termius. ✅ ❌ paint 2 -> 6sp;
+                # 🔒 resolves to a monochrome TEXT glyph that paints 1 -> 7sp.
+                # These were previously inverted (7/7/6) on the assumption that
+                # xterm.js paints every emoji at one cell - the comment here even
+                # said it was unverified. It is verified now, and it was wrong.
+                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒       "
                 ;;
             termius)
                 # Inherits ttyd's symbol set; only the fixed-width status cells
@@ -4565,10 +4581,25 @@ manage_web_terminal() {
         fi
         
         zcat "$TARGET_GZ" 2>/dev/null | grep -q "term-wrapper" && inj_status="${GREEN}ENABLED${RESET}" || inj_status="${YELLOW}DISABLED${RESET}"
-        
+
+        # Read the port from config rather than assuming 7681 - it is a uci
+        # option and a user may well have changed it.
+        ttyd_port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${ttyd_port:=7681}"
+        grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_url_proto="https" || ttyd_url_proto="http"
+        ttyd_lan_ip=$(get_lan_ip 2>/dev/null)
+
         printf " %b\n" "${CYAN}STATUS${RESET}"
         printf "   ttyd Service:   %b\n" "$svc_status"
-        printf "   Web UI Button:  %b\n\n" "$inj_status"
+        printf "   Web UI Button:  %b\n" "$inj_status"
+        # The button depends on the admin panel's markup, which differs between
+        # firmware builds; the direct URL always works when the service is up, so
+        # show it rather than leaving the terminal unreachable if the button is
+        # missing.
+        if pgrep ttyd >/dev/null 2>&1 && [ -n "$ttyd_lan_ip" ]; then
+            printf "   Direct URL:     %b\n\n" "${CYAN}${ttyd_url_proto}://${ttyd_lan_ip}:${ttyd_port}${RESET}"
+        else
+            printf "   Direct URL:     %b\n\n" "${GREY}(service not running)${RESET}"
+        fi
         
         printf "%s  Enable Web-UI Terminal\n" "$N1"
         printf "%s  Disable Web-UI Terminal\n" "$N2"
@@ -4647,6 +4678,12 @@ config ttyd
 	list client_option 'scrollback=10000'
 	list client_option 'theme={"background":"#000000"}'
 	list client_option 'titleFixed="Terminal"'
+	# Pinned so the modal's pixel size maps predictably onto columns x rows.
+	# Without it the cell size follows the browser's default monospace font
+	# and the same window yields a different terminal geometry per machine.
+	# This does NOT stop the user resizing: xterm.js refits on every container
+	# change, so drag-resize, maximise and minimise all still work.
+	list client_option 'fontSize=12'
 UCIEOF
                         lan_ip=$(get_lan_ip)
                         print_warning "Before using the terminal, open a new tab and visit: ${CYAN}https://${lan_ip}:7681${RESET}"
@@ -4663,6 +4700,12 @@ config ttyd
 	list client_option 'scrollback=10000'
 	list client_option 'theme={"background":"#000000"}'
 	list client_option 'titleFixed="Terminal"'
+	# Pinned so the modal's pixel size maps predictably onto columns x rows.
+	# Without it the cell size follows the browser's default monospace font
+	# and the same window yields a different terminal geometry per machine.
+	# This does NOT stop the user resizing: xterm.js refits on every container
+	# change, so drag-resize, maximise and minimise all still work.
+	list client_option 'fontSize=12'
 UCIEOF
                     fi
 
@@ -4681,9 +4724,21 @@ UCIEOF
                 # JS Patch logic
                 cat << 'EOF' >> "$TARGET_JS"
 ;(function(){
+  // Anchor candidates, most to least specific. GL's admin panel markup differs
+  // between firmware builds, so binding to a single class means the button
+  // silently never appears on a build that renames or drops it.
+  const ANCHORS = ['.icon-reboot','.icon-question-circle','.icon-logout',
+                   '[class*="icon-reboot"]','[class*="icon-power"]'];
+  const findAnchor = () => {
+    for (const sel of ANCHORS) {
+      const el = document.querySelector(sel);
+      if (el) return el;
+    }
+    return null;
+  };
   const inject = () => {
     if (document.getElementById('term-wrapper')) return;
-    const anchor = document.querySelector('.icon-reboot');
+    const anchor = findAnchor();
     if (!anchor) return;
     const rs = window.getComputedStyle(anchor);
     const rml = parseInt(rs.marginLeft)||0, rmr = parseInt(rs.marginRight)||0;
@@ -4703,7 +4758,25 @@ UCIEOF
                         : host;
       const modal = document.createElement('div');
       modal.id = 'term-modal';
-      modal.style.cssText = 'position:fixed; top:10%; left:10%; width:70%; height:60%; background:#000 !important; z-index:9999; border-radius:10px; box-shadow:0 20px 50px rgba(0,0,0,0.9); overflow:hidden; border:1px solid #444; min-width:300px;';
+      // Sized to the toolkit's standard 110x33.
+      //
+      // Calibrated from measured sessions, not estimated - three estimates in a
+      // row were wrong, including a linear scaling that assumed cell size tracks
+      // fontSize proportionally. It does not.
+      //
+      //   default font, 1095x700 box -> 142x43  => cell 7.7  x 15.4
+      //   fontSize=14,   800x520 box -> 96x29   => cell 8.33 x 16.6
+      //
+      // At fontSize=12 the cell measures about 7.14 x 14.25, so this 800x520 box
+      // should land near 112x33. Trim the width to ~785px if exactly 110 matters.
+      //
+      // FIXED PIXELS, not percentages - a percentage yields a different
+      // cols x rows on every window size, which is what produced 134x38.
+      //
+      // max() inside min() rather than the min-width/min-height PROPERTIES:
+      // those are a permanent floor, and minimise sets the modal to 250x38, so a
+      // floor silently stops it collapsing (the old min-width:300px did that).
+      modal.style.cssText = 'position:fixed; top:8%; left:10%; width:min(96vw, 800px); height:min(90vh, 520px); background:#000 !important; z-index:9999; border-radius:10px; box-shadow:0 20px 50px rgba(0,0,0,0.9); overflow:hidden; border:1px solid #444;';
       const head = document.createElement('div');
       head.id = 'term-header';
       head.style.cssText = 'background:#1a1a1a; padding:10px 15px; display:flex; justify-content:space-between; align-items:center; cursor:move; user-select:none; border-bottom:1px solid #333;';
@@ -4776,16 +4849,39 @@ UCIEOF
         document.onmouseup = () => { document.onmousemove = null; ifrm.style.pointerEvents = ''; };
       };
     };
-    const _anc=[]; let _n=anchor;
-    while(_n){_anc.push(_n);_n=_n.parentElement;}
-    let _h=document.querySelector('.icon-question-circle');
-    while(_h&&!_anc.includes(_h.parentElement))_h=_h.parentElement;
-    const _fp=_h?_h.parentElement:anchor.parentNode;
-    let _ru=anchor;
-    while(_ru.parentElement!==_fp)_ru=_ru.parentElement;
-    _fp.insertBefore(wrapper,_ru);
+    // Placement: land immediately to the LEFT of the reboot icon, in whatever
+    // row actually holds it. Verified identical on every firmware checked -
+    // .hd-right > .switch > [ ...icons..., reboot ] on 4.3.25 through op25.
+    //
+    // Climb only through wrappers that contain nothing but us (an <el-tooltip>
+    // may or may not materialise as its own element depending on the Element-UI
+    // build), then insert as a sibling. Bounded by .hd-right so we can never
+    // escape the header.
+    //
+    // Do NOT compute this from a neighbouring icon. The previous version derived
+    // the insertion parent from .icon-question-circle, and that is precisely
+    // what broke: on 4.3.25 the help icon is a plain sibling, but from 4.8.6 it
+    // moved inside a support dropdown, so the derived parent resolved outside
+    // the toolbar and the button was inserted where nobody could see it.
+    // Equally, do not insert relative to .hd-right itself - that would place the
+    // button before the whole .switch group and MOVE it on firmwares where it
+    // currently renders correctly.
+    try {
+      const box = anchor.closest('.hd-right');
+      let node = anchor, guard = 0;
+      while (node.parentElement && node.parentElement !== box
+             && node.parentElement.children.length === 1 && ++guard < 20) {
+        node = node.parentElement;
+      }
+      node.parentNode.insertBefore(wrapper, node);
+    } catch(e) {
+      try { anchor.parentNode.insertBefore(wrapper, anchor); } catch(e2) {}
+    }
   };
-  setInterval(inject,1000);
+  // Retry forever: the panel is a single-page app, so the toolbar is rebuilt on
+  // navigation and the button has to be re-added each time. Errors are contained
+  // per tick so one bad frame cannot stop later attempts.
+  setInterval(() => { try { inject(); } catch(e) {} },1000);
 })();
 EOF
                 [ "$ttyd_proto" = "https" ] && sed -i 's|http://|https://|g' "$TARGET_JS"
@@ -5516,25 +5612,61 @@ manage_display_settings() {
         # On Termius ✅ and ❌ advance one cell but PAINT two, so the single
         # trailing space used everywhere else lands on top of the glyph and the
         # sample renders short. Mirror the padding detect_output_mode applies.
-        local _pOK="✅ " _pERR="❌ "
-        [ "$_TERM_PROFILE" = termius ] && { _pOK="✅  "; _pERR="❌  "; }
+        # ❓ is the same kind of glyph and needs the same treatment. The real
+        # menus print it as "$NQ" plus ONE space at the call site, and the
+        # termius profile sets NQ="❓ " so the total is two - matching the two
+        # spaces the keycap rows use. Hardcoding one space here left Help sitting
+        # a column left of the numbered items.
+        #
+        # _pPAD is a sacrificial trailing space, and it is load-bearing.
+        #
+        # Measured in Termius: when a line carries a glyph that paints wider than
+        # it advances (✅ ❌ advance 1, paint 2), the LAST CELL OF EACH COLOUR RUN
+        # on that line is clipped. Not the last cell of the line - the run. That
+        # distinction was established by testing two lines differing only in
+        # whether a trailing space sat inside or outside the reset: inside, the
+        # space was eaten and the text survived; outside, the text lost its final
+        # character instead. It is also why the Status row lost a character in
+        # BOTH halves - two runs, two clipped cells.
+        #
+        # So each run ends with a space for the terminal to eat. Splitting the
+        # runs (glyph in one, text in another) does NOT help on its own - that
+        # was tried and the text run still lost its last character.
+        #
+        # Termius only: everywhere else the space is NOT consumed, and the Status
+        # row's second column would sit a space further right than the first.
+        # Glyphs carrying VS16 (⚠️ ℹ️ ⚙️) advance 2 and paint 2, so they never
+        # overflow and those rows need none of this.
+        local _pOK="✅ " _pERR="❌ " _pQ="❓ " _pPAD=""
+        # ttyd renders these exactly as Termius does - ✅ ❌ ❓ advance one
+        # cell but paint two - so both need the wider pad. This was keyed on
+        # termius alone, which is why the samples still looked wrong in the
+        # web terminal after the ttyd PROFILE symbols were corrected: this
+        # page does not use _S_OK/NQ, it has its own copies.
+        case "$_TERM_PROFILE" in
+            termius|ttyd) _pOK="✅  "; _pERR="❌  "; _pQ="❓  " ;;
+        esac
+        # _pPAD is the sacrificial trailing space for Termius's colour-run
+        # clipping. ttyd does NOT clip - "successfully" renders complete there
+        # - so it stays empty, or every row would gain a stray space.
+        [ "$_TERM_PROFILE" = termius ] && _pPAD=" "
         case "$page" in
             1)
                 printf " %bPage 1 of 3 — Full mode%b (emoji symbols + color)\n\n" "${BOLD}${CYAN}" "$_R"
                 printf "   %bMessages%b\n" "$_C" "$_R"
-                printf "     %b%sOperation completed successfully%b\n" "$_G" "$_pOK" "$_R"
-                printf "     %b%sOperation failed%b\n" "$_RD" "$_pERR" "$_R"
-                printf "     %b⚠️  Something needs attention%b\n" "$_Y" "$_R"
-                printf "     %bℹ️  Informational message%b\n" "$_B" "$_R"
-                printf "     %b⚙️  Action in progress%b\n\n" "$_C" "$_R"
+                printf "     %b%s%b%bOperation completed successfully%s%b\n" "$_G" "$_pOK" "$_R" "$_G" "$_pPAD" "$_R"
+                printf "     %b%s%b%bOperation failed%s%b\n" "$_RD" "$_pERR" "$_R" "$_RD" "$_pPAD" "$_R"
+                printf "     %b⚠️  Something needs attention%s%b\n" "$_Y" "$_pPAD" "$_R"
+                printf "     %bℹ️  Informational message%s%b\n" "$_B" "$_pPAD" "$_R"
+                printf "     %b⚙️  Action in progress%s%b\n\n" "$_C" "$_pPAD" "$_R"
                 printf "   %bStatus%b\n" "$_C" "$_R"
-                printf "     %b%sOn / enabled / running%b      %b%sOff / disabled / stopped%b\n\n" "$_G" "$_pOK" "$_R" "$_RD" "$_pERR" "$_R"
+                printf "     %b%s%b%bOn / enabled / running%s%b      %b%s%b%bOff / disabled / stopped%s%b\n\n" "$_G" "$_pOK" "$_R" "$_G" "$_pPAD" "$_R" "$_RD" "$_pERR" "$_R" "$_RD" "$_pPAD" "$_R"
                 printf "   %bA menu looks like%b\n" "$_C" "$_R"
                 printf "     1️⃣  Show Hardware Information\n"
                 printf "     2️⃣  AdGuardHome Control Center\n"
                 printf "     3️⃣  System Tweaks\n"
                 printf "     0️⃣  Exit\n"
-                printf "     ❓ Help\n"
+                printf "     %sHelp\n" "$_pQ"
                 ;;
             2)
                 printf " %bPage 2 of 3 — Compatible mode%b (Unicode symbols + color, PuTTY-safe)\n\n" "${BOLD}${CYAN}" "$_R"
@@ -5581,9 +5713,10 @@ manage_display_settings() {
         case "$OUTPUT_MODE" in
             full)
                 case "$_TERM_PROFILE" in
-                    ttyd) detected_desc="ttyd (browser) → Full mode" ;;
-                    wt)   detected_desc="Windows Terminal → Full mode" ;;
-                    *)    detected_desc="macOS/Linux Terminal → Full mode" ;;
+                    ttyd)    detected_desc="ttyd (browser) → Full mode" ;;
+                    wt)      detected_desc="Windows Terminal → Full mode" ;;
+                    termius) detected_desc="Termius → Full mode" ;;
+                    *)       detected_desc="macOS/Linux Terminal → Full mode" ;;
                 esac
                 ;;
             *) detected_desc="Compatible terminal → Compatible mode" ;;
@@ -5687,9 +5820,10 @@ manage_toolkit() {
             case "$OUTPUT_MODE" in
                 full)
                     case "$_TERM_PROFILE" in
-                        ttyd)  mode_display="$mode_display  [auto: ttyd]" ;;
-                        wt)    mode_display="$mode_display  [auto: Windows Terminal]" ;;
-                        *)     mode_display="$mode_display  [auto: macOS/Linux]" ;;
+                        ttyd)    mode_display="$mode_display  [auto: ttyd]" ;;
+                        wt)      mode_display="$mode_display  [auto: Windows Terminal]" ;;
+                        termius) mode_display="$mode_display  [auto: Termius]" ;;
+                        *)       mode_display="$mode_display  [auto: macOS/Linux]" ;;
                     esac
                     ;;
                 *) mode_display="$mode_display  [auto]" ;;
@@ -8823,7 +8957,7 @@ mt1300|Beryl|MT7621|179.39'
                 print_centered_header "iperf3 Network Speed Test Server"
                 
                 if ! command -v iperf3 >/dev/null 2>&1; then
-                    install_package iperf3
+                    install_package iperf3 || { press_any_key; continue; }
                 fi
                 
                 printf "%b\n\n" "${YELLOW}⏳ Starting iperf3 Server on port 5201...${RESET}"

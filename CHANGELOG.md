@@ -4,6 +4,41 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-28
+- Fixed: text no longer loses its last character in Termius. Lines that mix a
+  status glyph with colour were being clipped by one cell per coloured section,
+  so "Operation completed successfully" rendered as "successfull" and the
+  two-column status row lost a character from BOTH halves. Measured rather than
+  guessed: the terminal drops the final cell of each coloured section on any
+  line carrying a glyph it paints wider than it reserves space for, so each
+  section now ends with a spare space for it to take. A pixel-level overhang
+  remains on some glyphs; that is a font metric and cannot be corrected from
+  here.
+- Fixed: the display-mode preview's Help row sat a column left of the numbered
+  items in Termius, and the same row was misaligned in the browser terminal.
+- Fixed: the Web-UI Terminal button did not appear on firmware 4.9.x. The button
+  is injected next to the reboot icon in the admin panel header, but it worked
+  out WHERE to put itself from the help icon beside it - and from 4.8.6 onward
+  that icon moved into a support dropdown, so the button was inserted outside
+  the toolbar where nothing could show it. It now positions itself relative to
+  the reboot icon alone, which has stayed put across every firmware checked
+  (4.3.25 through OpenWrt 25). Verified on both an affected and an unaffected
+  firmware so the older ones behave exactly as before.
+- Fixed: the Web-UI Terminal opened too small - 130x29, below the 101x33 some
+  screens need, so the toolkit warned about window size inside its own web
+  terminal. It now opens at the standard 110x33, with the font pinned so the
+  size is consistent rather than following whatever the browser defaults to.
+  Resizing, maximising and minimising all still work.
+- Fixed: status symbols were spaced wrongly in the browser terminal. Ticks,
+  crosses and the padlock in the Remote LAN Access table were padded on the
+  assumption that the browser draws every symbol one column wide; it draws
+  several of them two columns wide, exactly as Termius does. Messages, menu
+  rows and that table now line up there.
+- Added: the Web-UI Terminal screen shows the direct URL and port, so the
+  terminal is reachable even if the panel button is missing on some firmware.
+- Fixed: Termius was reported as "macOS/Linux" in Toolkit Management while the
+  Display Settings page correctly identified it. Both now agree.
+
 ## 2026-07-27
 - Fixed: package installation on OpenWrt 25, which replaced opkg with apk. All
   package operations now go through a small abstraction that picks whichever

@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-28
+# Version: 2026-07-28_20:43
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -3577,6 +3577,15 @@ manage_fan_settings() {
     nav_choice=""
 
     reset_to_factory(){
+        # The app bundle restored below is the SAME file the Web-UI Terminal
+        # button is injected into, so this reset wipes the button. Note WHETHER
+        # it was there before we clobber it, then put it back at the end - so a
+        # fan change never silently removes the terminal. (This function runs on
+        # every fan setpoint change, not just the explicit factory reset.)
+        local _rtf_had_term=0
+        local _rtf_app=$(find /www/js/ -name "app.*.js.gz" -type f | head -n 1)
+        [ -n "$_rtf_app" ] && zcat "$_rtf_app" 2>/dev/null | grep -q "term-wrapper" && _rtf_had_term=1
+
         # 1. Restore the 'Engine' (The Library) and the 'Seed' (The ROM config)
         if [ -f "/rom/lib/functions/gl_util.sh" ]; then 
             cp "/rom/lib/functions/gl_util.sh" "/lib/functions/gl_util.sh"
@@ -3607,6 +3616,15 @@ manage_fan_settings() {
         fi
         
         /etc/init.d/gl_fan restart >/dev/null 2>&1
+
+        # Put the Web-UI Terminal button back if it was there before the restore.
+        # from_rom=0: append onto the bundle we just restored, so this coexists
+        # with any fan patches a caller applies afterwards rather than resetting
+        # the file yet again.
+        if [ "$_rtf_had_term" = 1 ] && [ -n "$_rtf_app" ]; then
+            _inject_terminal_into "$_rtf_app" \
+                "$(grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && echo https || echo http)" 0
+        fi
     }
 
     sync_system_and_ui() {
@@ -3680,6 +3698,14 @@ manage_fan_settings() {
         sed -i "s/marks:t.tMarks/marks:{$marks_obj}/g" "$v"
 
         # SECTION F: Information Strings (Info Box / Localization)
+        # The pristine string is a template - "fan start is $$$$ ~ $$$$ ." - so
+        # replacing it with literals is what pins the displayed range.
+        #
+        # The view-bundle sed below currently matches nothing: 0 occurrences on
+        # every firmware we have (4.3.25 through OpenWrt 25) versus exactly 1 in
+        # the i18n JSON. It is KEPT DELIBERATELY - our oldest device is fanless,
+        # so the fan path has never been exercised on early firmware and we
+        # cannot show the phrase was never in the view there. It costs nothing.
         local info_pattern="fan start is [^.]*"
         local info_replacement="fan start is $n_min °C ~ $n_max °C "
         sed -i "s/$info_pattern/$info_replacement/g" "$v"
@@ -3835,6 +3861,7 @@ manage_fan_settings() {
                         sync_system_and_ui "$val" "$u_cur" "$u_wrn" "$ui_max"
                         printf "\n"
                         print_success "Minimum setpoint updated to ${val}°C (System & UI)."
+                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be a number and ≤ Fan-On ($u_cur°C)"
@@ -3849,6 +3876,7 @@ manage_fan_settings() {
                         sync_system_and_ui "$u_min" "$val" "$u_wrn" "$ui_max"
                         printf "\n"
                         print_success "Fan-On setpoint updated"
+                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be between Min ($u_min°C) and Max ($ui_max°C)"
@@ -3863,6 +3891,7 @@ manage_fan_settings() {
                         sync_system_and_ui "$u_min" "$u_cur" "$val" "$ui_max"
                         printf "\n"
                         print_success "Warning setpoint updated"
+                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be between Min ($u_min°C) and Max ($ui_max°C)"
@@ -3883,6 +3912,7 @@ manage_fan_settings() {
                         sync_system_and_ui "$u_min" "$u_cur" "$u_wrn" "$val"
                         printf "\n"
                         print_success "Max setpoint updated to ${val}°C."
+                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be between Fan-On ($u_cur°C) and 120°C"
@@ -3892,7 +3922,8 @@ manage_fan_settings() {
                     print_warning "Restoring to Factory Defaults..."
                     reset_to_factory
                     printf "\n"
-                    print_success "Factory defaults restored. Refresh browser."
+                    print_success "Factory defaults restored."
+                    print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     press_any_key; clear ;;
                 0) return ;;
                 \?|h|H|❓) show_fan_help; clear; continue ;;
@@ -4557,172 +4588,26 @@ HELPEOF
     press_any_key
 }
 
-manage_web_terminal() {
-    while true; do
-        clear
-        print_centered_header "Web-UI Terminal Interface"
-        
-        TARGET_GZ=$(ls /www/js/app.*.js.gz | head -n 1)
-        if [ -z "$TARGET_GZ" ]; then
-            print_error "Cannot find target JS file for patching. Exiting..."
-            press_any_key
-            return
-        fi
-        
-        # Check Service Status via Procd
-        if pgrep ttyd >/dev/null; then
-            if grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null; then
-                svc_status="${GREEN}RUNNING (HTTPS)${RESET}"
-            else
-                svc_status="${GREEN}RUNNING (HTTP)${RESET}"
-            fi
-        else
-            svc_status="${RED}STOPPED${RESET}"
-        fi
-        
-        zcat "$TARGET_GZ" 2>/dev/null | grep -q "term-wrapper" && inj_status="${GREEN}ENABLED${RESET}" || inj_status="${YELLOW}DISABLED${RESET}"
-
-        # Read the port from config rather than assuming 7681 - it is a uci
-        # option and a user may well have changed it.
-        ttyd_port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${ttyd_port:=7681}"
-        grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_url_proto="https" || ttyd_url_proto="http"
-        ttyd_lan_ip=$(get_lan_ip 2>/dev/null)
-
-        printf " %b\n" "${CYAN}STATUS${RESET}"
-        printf "   ttyd Service:   %b\n" "$svc_status"
-        printf "   Web UI Button:  %b\n" "$inj_status"
-        # The button depends on the admin panel's markup, which differs between
-        # firmware builds; the direct URL always works when the service is up, so
-        # show it rather than leaving the terminal unreachable if the button is
-        # missing.
-        if pgrep ttyd >/dev/null 2>&1 && [ -n "$ttyd_lan_ip" ]; then
-            printf "   Direct URL:     %b\n\n" "${CYAN}${ttyd_url_proto}://${ttyd_lan_ip}:${ttyd_port}${RESET}"
-        else
-            printf "   Direct URL:     %b\n\n" "${GREY}(service not running)${RESET}"
-        fi
-        
-        printf "%s  Enable Web-UI Terminal\n" "$N1"
-        printf "%s  Disable Web-UI Terminal\n" "$N2"
-        printf "%s  Completely Uninstall\n" "$N3"
-        printf "%s  Back\n" "$N0"
-        printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-3/0/?]: "
-        read -r term_choice
-        printf "\n"
-        
-        case $term_choice in
-            1)
-                ttyd_proto="http"
-                hash -r
-                if pgrep ttyd >/dev/null; then
-                    if [ "$inj_status" = "${GREEN}ENABLED${RESET}" ]; then
-                         print_warning "Web-UI Terminal is already running and patched."
-                         press_any_key
-                         continue
-                    else
-                         grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_proto="https"
-                         print_warning "Web-UI Terminal service is running but UI is not patched. Re-patching..."
-                    fi
-                else
-                    if ! command -v ttyd >/dev/null 2>&1; then
-                        install_package ttyd
-                    fi
-
-                    print_info "Configuring ttyd service..."
-                    printf "\n"
-
-                    # Detect HTTPS mode and prompt for connection mode
-                    redirect_https=$(uci -q get uhttpd.main.redirect_https 2>/dev/null)
-                    if [ "$redirect_https" = "1" ]; then
-                        print_warning "The GL Admin Panel is set to force HTTPS. ttyd will be installed in HTTPS mode so the\n   embedded terminal loads correctly in your browser.\n"
-                        ttyd_proto="https"
-                    else
-                        print_info "ttyd runs over HTTP by default and will not work when accessing the Admin Panel via HTTPS.\n   ttyd over HTTPS works when accessing the Admin Panel via HTTP or HTTPS but requires a\n   one-time browser cert acceptance."
-                        printf "   Use HTTPS? [y/N]: "
-                        read -r proto_choice
-                        printf "\n"
-                        [ "$proto_choice" = "y" ] || [ "$proto_choice" = "Y" ] && ttyd_proto="https"
-                    fi
-
-                    # Generate cert if HTTPS chosen
-                    if [ "$ttyd_proto" = "https" ]; then
-                        if [ ! -f /etc/ttyd.crt ] || [ ! -f /etc/ttyd.key ]; then
-                            print_info "Generating self-signed certificate for ttyd..."
-                            printf "\n"
-                            openssl req -x509 -nodes -newkey rsa:2048 \
-                                -keyout /etc/ttyd.key \
-                                -out /etc/ttyd.crt \
-                                -days 3650 \
-                                -subj "/CN=gl-router" >/dev/null 2>&1
-                            print_success "Generated /etc/ttyd.crt"
-                            printf "\n"
-                            print_success "Generated /etc/ttyd.key"
-                            printf "\n"
-                        else
-                            print_info "SSL certificates already exist, reusing."
-                            printf "\n"
-                        fi
-                    fi
-
-                    # Write UCI config
-                    if [ "$ttyd_proto" = "https" ]; then
-                        cat << 'UCIEOF' > /etc/config/ttyd
-config ttyd
-	option enable '1'
-	option port '7681'
-	option interface '@lan'
-	option command '/bin/login'
-	option ssl '1'
-	option ssl_cert '/etc/ttyd.crt'
-	option ssl_key '/etc/ttyd.key'
-	list client_option 'scrollback=10000'
-	list client_option 'theme={"background":"#000000"}'
-	list client_option 'titleFixed="Terminal"'
-	# Pinned so the modal's pixel size maps predictably onto columns x rows.
-	# Without it the cell size follows the browser's default monospace font
-	# and the same window yields a different terminal geometry per machine.
-	# This does NOT stop the user resizing: xterm.js refits on every container
-	# change, so drag-resize, maximise and minimise all still work.
-	list client_option 'fontSize=12'
-UCIEOF
-                        lan_ip=$(get_lan_ip)
-                        print_warning "Before using the terminal, open a new tab and visit: ${CYAN}https://${lan_ip}:7681${RESET}"
-                        print_warning "You must accept the certificate warning, then return to the Admin Panel."
-                        print_warning "The terminal will not load until this is done!"
-                        printf "\n"
-                    else
-                        cat << 'UCIEOF' > /etc/config/ttyd
-config ttyd
-	option enable '1'
-	option port '7681'
-	option interface '@lan'
-	option command '/bin/login'
-	list client_option 'scrollback=10000'
-	list client_option 'theme={"background":"#000000"}'
-	list client_option 'titleFixed="Terminal"'
-	# Pinned so the modal's pixel size maps predictably onto columns x rows.
-	# Without it the cell size follows the browser's default monospace font
-	# and the same window yields a different terminal geometry per machine.
-	# This does NOT stop the user resizing: xterm.js refits on every container
-	# change, so drag-resize, maximise and minimise all still work.
-	list client_option 'fontSize=12'
-UCIEOF
-                    fi
-
-                    /etc/init.d/ttyd enable
-                    /etc/init.d/ttyd restart >/dev/null 2>&1
-
-                fi
-               
-                # UI Injection 
-                print_info "Patching Web-UI..."
-                printf "\n"
-                TARGET_JS="${TARGET_GZ%.gz}"
-                cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
-                zcat "$TARGET_GZ" > "$TARGET_JS"
-
-                # JS Patch logic
-                cat << 'EOF' >> "$TARGET_JS"
+# _inject_terminal_into <app.js.gz> [proto] [from_rom]
+# Appends the Web-UI terminal button to the app bundle. Guarded against a
+# double injection, so it is safe to call unconditionally.
+#
+# from_rom=1 starts from a pristine ROM copy - the enable path wants a clean
+# base. from_rom=0 appends to the CURRENT file, so the button can be restored
+# on top of another feature's edits to the SAME bundle. That matters because
+# the fan feature also rewrites app.*.js.gz; restoring it from ROM (which both
+# a fan reset and every fan setpoint change do) would otherwise silently wipe
+# this button while the toolkit still reports the terminal as enabled.
+_inject_terminal_into() {
+    _iti_gz="$1"; _iti_proto="${2:-http}"; _iti_fromrom="${3:-0}"
+    [ -n "$_iti_gz" ] || return 1
+    if [ "$_iti_fromrom" = 1 ] && [ -f "/rom$_iti_gz" ]; then
+        cp -f "/rom$_iti_gz" "$_iti_gz"
+    fi
+    zcat "$_iti_gz" 2>/dev/null | grep -q "term-wrapper" && return 0
+    _iti_js="${_iti_gz%.gz}"
+    zcat "$_iti_gz" > "$_iti_js"
+    cat << 'EOF' >> "$_iti_js"
 ;(function(){
   // Anchor candidates, most to least specific. GL's admin panel markup differs
   // between firmware builds, so binding to a single class means the button
@@ -4884,10 +4769,173 @@ UCIEOF
   setInterval(() => { try { inject(); } catch(e) {} },1000);
 })();
 EOF
-                [ "$ttyd_proto" = "https" ] && sed -i 's|http://|https://|g' "$TARGET_JS"
-                gzip -c "$TARGET_JS" > "$TARGET_GZ"
-                rm -f "$TARGET_JS"
-                rm -rf /var/lib/nginx/*
+    [ "$_iti_proto" = "https" ] && sed -i 's|http://|https://|g' "$_iti_js"
+    gzip -c "$_iti_js" > "$_iti_gz"
+    rm -f "$_iti_js"
+    rm -rf /var/lib/nginx/*
+}
+
+manage_web_terminal() {
+    while true; do
+        clear
+        print_centered_header "Web-UI Terminal Interface"
+        
+        TARGET_GZ=$(ls /www/js/app.*.js.gz | head -n 1)
+        if [ -z "$TARGET_GZ" ]; then
+            print_error "Cannot find target JS file for patching. Exiting..."
+            press_any_key
+            return
+        fi
+        
+        # Check Service Status via Procd
+        if pgrep ttyd >/dev/null; then
+            if grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null; then
+                svc_status="${GREEN}RUNNING (HTTPS)${RESET}"
+            else
+                svc_status="${GREEN}RUNNING (HTTP)${RESET}"
+            fi
+        else
+            svc_status="${RED}STOPPED${RESET}"
+        fi
+        
+        zcat "$TARGET_GZ" 2>/dev/null | grep -q "term-wrapper" && inj_status="${GREEN}ENABLED${RESET}" || inj_status="${YELLOW}DISABLED${RESET}"
+
+        # Read the port from config rather than assuming 7681 - it is a uci
+        # option and a user may well have changed it.
+        ttyd_port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${ttyd_port:=7681}"
+        grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_url_proto="https" || ttyd_url_proto="http"
+        ttyd_lan_ip=$(get_lan_ip 2>/dev/null)
+
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        printf "   ttyd Service:   %b\n" "$svc_status"
+        printf "   Web UI Button:  %b\n" "$inj_status"
+        # The button depends on the admin panel's markup, which differs between
+        # firmware builds; the direct URL always works when the service is up, so
+        # show it rather than leaving the terminal unreachable if the button is
+        # missing.
+        if pgrep ttyd >/dev/null 2>&1 && [ -n "$ttyd_lan_ip" ]; then
+            printf "   Direct URL:     %b\n\n" "${CYAN}${ttyd_url_proto}://${ttyd_lan_ip}:${ttyd_port}${RESET}"
+        else
+            printf "   Direct URL:     %b\n\n" "${GREY}(service not running)${RESET}"
+        fi
+        
+        printf "%s  Enable Web-UI Terminal\n" "$N1"
+        printf "%s  Disable Web-UI Terminal\n" "$N2"
+        printf "%s  Completely Uninstall\n" "$N3"
+        printf "%s  Back\n" "$N0"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-3/0/?]: "
+        read -r term_choice
+        printf "\n"
+        
+        case $term_choice in
+            1)
+                ttyd_proto="http"
+                hash -r
+                if pgrep ttyd >/dev/null; then
+                    if [ "$inj_status" = "${GREEN}ENABLED${RESET}" ]; then
+                         print_warning "Web-UI Terminal is already running and patched."
+                         press_any_key
+                         continue
+                    else
+                         grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_proto="https"
+                         print_warning "Web-UI Terminal service is running but UI is not patched. Re-patching..."
+                    fi
+                else
+                    if ! command -v ttyd >/dev/null 2>&1; then
+                        install_package ttyd
+                    fi
+
+                    print_info "Configuring ttyd service..."
+                    printf "\n"
+
+                    # Detect HTTPS mode and prompt for connection mode
+                    redirect_https=$(uci -q get uhttpd.main.redirect_https 2>/dev/null)
+                    if [ "$redirect_https" = "1" ]; then
+                        print_warning "The GL Admin Panel is set to force HTTPS. ttyd will be installed in HTTPS mode so the\n   embedded terminal loads correctly in your browser.\n"
+                        ttyd_proto="https"
+                    else
+                        print_info "ttyd runs over HTTP by default and will not work when accessing the Admin Panel via HTTPS.\n   ttyd over HTTPS works when accessing the Admin Panel via HTTP or HTTPS but requires a\n   one-time browser cert acceptance."
+                        printf "   Use HTTPS? [y/N]: "
+                        read -r proto_choice
+                        printf "\n"
+                        [ "$proto_choice" = "y" ] || [ "$proto_choice" = "Y" ] && ttyd_proto="https"
+                    fi
+
+                    # Generate cert if HTTPS chosen
+                    if [ "$ttyd_proto" = "https" ]; then
+                        if [ ! -f /etc/ttyd.crt ] || [ ! -f /etc/ttyd.key ]; then
+                            print_info "Generating self-signed certificate for ttyd..."
+                            printf "\n"
+                            openssl req -x509 -nodes -newkey rsa:2048 \
+                                -keyout /etc/ttyd.key \
+                                -out /etc/ttyd.crt \
+                                -days 3650 \
+                                -subj "/CN=gl-router" >/dev/null 2>&1
+                            print_success "Generated /etc/ttyd.crt"
+                            printf "\n"
+                            print_success "Generated /etc/ttyd.key"
+                            printf "\n"
+                        else
+                            print_info "SSL certificates already exist, reusing."
+                            printf "\n"
+                        fi
+                    fi
+
+                    # Write UCI config
+                    if [ "$ttyd_proto" = "https" ]; then
+                        cat << 'UCIEOF' > /etc/config/ttyd
+config ttyd
+	option enable '1'
+	option port '7681'
+	option interface '@lan'
+	option command '/bin/login'
+	option ssl '1'
+	option ssl_cert '/etc/ttyd.crt'
+	option ssl_key '/etc/ttyd.key'
+	list client_option 'scrollback=10000'
+	list client_option 'theme={"background":"#000000"}'
+	list client_option 'titleFixed="Terminal"'
+	# Pinned so the modal's pixel size maps predictably onto columns x rows.
+	# Without it the cell size follows the browser's default monospace font
+	# and the same window yields a different terminal geometry per machine.
+	# This does NOT stop the user resizing: xterm.js refits on every container
+	# change, so drag-resize, maximise and minimise all still work.
+	list client_option 'fontSize=12'
+UCIEOF
+                        lan_ip=$(get_lan_ip)
+                        print_warning "Before using the terminal, open a new tab and visit: ${CYAN}https://${lan_ip}:7681${RESET}"
+                        print_warning "You must accept the certificate warning, then return to the Admin Panel."
+                        print_warning "The terminal will not load until this is done!"
+                        printf "\n"
+                    else
+                        cat << 'UCIEOF' > /etc/config/ttyd
+config ttyd
+	option enable '1'
+	option port '7681'
+	option interface '@lan'
+	option command '/bin/login'
+	list client_option 'scrollback=10000'
+	list client_option 'theme={"background":"#000000"}'
+	list client_option 'titleFixed="Terminal"'
+	# Pinned so the modal's pixel size maps predictably onto columns x rows.
+	# Without it the cell size follows the browser's default monospace font
+	# and the same window yields a different terminal geometry per machine.
+	# This does NOT stop the user resizing: xterm.js refits on every container
+	# change, so drag-resize, maximise and minimise all still work.
+	list client_option 'fontSize=12'
+UCIEOF
+                    fi
+
+                    /etc/init.d/ttyd enable
+                    /etc/init.d/ttyd restart >/dev/null 2>&1
+
+                fi
+               
+                # UI Injection 
+                print_info "Patching Web-UI..."
+                printf "\n"
+                _inject_terminal_into "$TARGET_GZ" "$ttyd_proto" 1
                 print_success "Web-UI Terminal Installed. \n   Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser to see the changes."
                 press_any_key
                 ;;
@@ -4921,6 +4969,17 @@ EOF
                     cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
                     rm -rf /var/lib/nginx/*
                     print_success "Web UI button removed and cache cleared."
+                    # Restoring app.*.js.gz from ROM also drops any fan-slider
+                    # range patch, since both features edit the same file. The
+                    # fan's actual behaviour (uci glfan) is untouched; only the
+                    # web-UI slider range reverts. Tell the user rather than
+                    # silently reverting it.
+                    # Only on devices that actually have a fan - /etc/config/glfan
+                    # is absent on fanless models (e.g. MT1300), so this stays
+                    # quiet there.
+                    if [ -f /etc/config/glfan ]; then
+                        print_info "If you customised Fan settings, re-apply them - the panel was reset to stock here."
+                    fi
                     printf "\n"
                     print_info "Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser."
                 else
@@ -4964,6 +5023,17 @@ EOF
                     cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
                     rm -rf /var/lib/nginx/*
                     print_success "Web UI button removed and cache cleared."
+                    # Restoring app.*.js.gz from ROM also drops any fan-slider
+                    # range patch, since both features edit the same file. The
+                    # fan's actual behaviour (uci glfan) is untouched; only the
+                    # web-UI slider range reverts. Tell the user rather than
+                    # silently reverting it.
+                    # Only on devices that actually have a fan - /etc/config/glfan
+                    # is absent on fanless models (e.g. MT1300), so this stays
+                    # quiet there.
+                    if [ -f /etc/config/glfan ]; then
+                        print_info "If you customised Fan settings, re-apply them - the panel was reset to stock here."
+                    fi
                 else
                     print_error "ROM backup not found. Manual UI restoration required."
                 fi

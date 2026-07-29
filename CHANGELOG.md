@@ -4,6 +4,19 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-28_20:43
+- Fixed: changing a Fan setting no longer removes the Web-UI Terminal button.
+  Both features patch the same admin-panel file, and a fan change restored that
+  file from stock - which silently dropped the terminal button while the toolkit
+  still reported it as enabled. The button is now re-applied automatically after
+  any fan change that had it.
+- Changed: disabling or uninstalling the Web-UI Terminal now notes that custom
+  Fan settings may need re-applying, for the same shared-file reason (only shown
+  on models that have a fan).
+- Changed: after a Fan setting change the toolkit reminds you to hard-refresh the
+  admin panel - a normal reload can show the browser's cached copy and look like
+  the change did not take.
+
 ## 2026-07-28
 - Fixed: text no longer loses its last character in Termius. Lines that mix a
   status glyph with colour were being clipped by one cell per coloured section,

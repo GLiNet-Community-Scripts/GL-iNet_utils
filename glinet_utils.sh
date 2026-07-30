@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-28_20:43
+# Version: 2026-07-30
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -6045,11 +6045,15 @@ mtu_get() { ip link show "$1" 2>/dev/null | sed -n 's/.* mtu \([0-9]*\).*/\1/p' 
 
 # One line per active tunnel: type|role|iface|endpoint|overhead|underlay_family
 mtu_detect() {
-    local iface endpoint role overhead family
-    iface=""; endpoint=""; role=""; overhead=""; family=""
+    local iface endpoint role overhead family _pid _cl _cfg
+    iface=""; endpoint=""; role=""; overhead=""; family=""; _pid=""; _cl=""; _cfg=""
     if command -v wg >/dev/null 2>&1; then
         for iface in $(wg show interfaces 2>/dev/null); do
             endpoint=$(wg show "$iface" endpoints 2>/dev/null | awk 'NF>1{print $2; exit}')
+            # A peer that has never connected reports the literal string "(none)"
+            # - passing that through would have the probe DF-ping a hostname
+            # called "(none)". Treat it as no endpoint.
+            [ "$endpoint" = "(none)" ] && endpoint=""
             endpoint=$(printf '%s' "$endpoint" | sed 's/^\[//; s/\]:[0-9]*$//; s/:[0-9]*$//')
             case "$iface" in
                 *server*) role=Server ;;
@@ -6063,6 +6067,21 @@ mtu_detect() {
     for iface in $(ls /sys/class/net 2>/dev/null | grep -E '^(tun|ovpn)'); do
         [ "$(ip -4 addr show dev "$iface" 2>/dev/null | grep -c 'inet ')" -eq 0 ] && continue
         endpoint=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*peer \([0-9.]*\).*#\1#p' | head -1)
+        # GL uses `topology subnet`, so there is normally NO kernel peer field
+        # and endpoint comes up empty. Read the `remote` line from the running
+        # instance's config instead - that is the server's public address, which
+        # the active probe wants. The right process is matched to THIS interface
+        # by the --dev argument GL always passes (verified live on 4.3.25).
+        if [ -z "$endpoint" ]; then
+            for _pid in $(pgrep openvpn 2>/dev/null); do
+                _cl=$(tr '\0' ' ' < "/proc/$_pid/cmdline" 2>/dev/null)
+                case " $_cl" in *" --dev $iface "*) ;; *) continue ;; esac
+                _cfg=$(printf '%s' "$_cl" | sed -n 's/.*--config  *\([^ ]*\).*/\1/p')
+                [ -n "$_cfg" ] && [ -f "$_cfg" ] && \
+                    endpoint=$(sed -n 's/^remote[ \t][ \t]*\([^ \t]*\).*/\1/p' "$_cfg" | head -1)
+                break
+            done
+        fi
         case "$iface" in *server*) role=Server ;; *) role=Client ;; esac
         overhead=$(mtu_ovpn_overhead "$iface" 2>/dev/null)
         [ -z "$overhead" ] && overhead=69          # undecidable: keep the safe estimate
@@ -6159,39 +6178,155 @@ mtu_apply() {
     fi
 }
 
-# Active probe: temporarily raise the tunnel, DF-search the peer tunnel IP, restore.
+# ---- probe persistence ------------------------------------------------------
+# A credible probe result is worth keeping: the menu can then say VERIFIED
+# rather than calculated, and Optimize applies the measured value. Stored beside
+# Remote LAN Access's keys in /etc/config/glutils. The base link MTU and the
+# target ride along so staleness is detectable - if either changes, the stored
+# number no longer describes this path and mtu_v_get reports it STALE.
+mtu_v_store() { # iface value kind(public|tunnel) target base-underlay-mtu
+    uci -q get glutils >/dev/null 2>&1 || touch /etc/config/glutils
+    uci -q get "glutils.vpn_$1" >/dev/null 2>&1 || uci set "glutils.vpn_$1=vpn"
+    uci set "glutils.vpn_$1.mtu_probe=$2"
+    uci set "glutils.vpn_$1.mtu_probe_kind=$3"
+    uci set "glutils.vpn_$1.mtu_probe_target=$4"
+    uci set "glutils.vpn_$1.mtu_probe_base=$5"
+    uci set "glutils.vpn_$1.mtu_probe_date=$(date '+%Y-%m-%d')"
+    uci commit glutils
+}
+
+# iface current-underlay-mtu current-endpoint ->
+#   "OK|value|kind|target|date"     fresh - outranks the calculation
+#   "STALE|value|kind|target|date"  link or endpoint changed since the probe
+#   nothing (rc 1)                  never probed
+mtu_v_get() {
+    _mv=$(uci -q get "glutils.vpn_$1.mtu_probe")
+    [ -z "$_mv" ] && return 1
+    _mk=$(uci -q get "glutils.vpn_$1.mtu_probe_kind")
+    _mt=$(uci -q get "glutils.vpn_$1.mtu_probe_target")
+    _mb=$(uci -q get "glutils.vpn_$1.mtu_probe_base")
+    _md=$(uci -q get "glutils.vpn_$1.mtu_probe_date")
+    if [ -n "$2" ] && [ -n "$_mb" ] && [ "$_mb" != "$2" ]; then
+        echo "STALE|$_mv|$_mk|$_mt|$_md"; return 0
+    fi
+    if [ "$_mk" = public ] && [ -n "$3" ] && [ -n "$_mt" ] && [ "$_mt" != "$3" ]; then
+        echo "STALE|$_mv|$_mk|$_mt|$_md"; return 0
+    fi
+    echo "OK|$_mv|$_mk|$_mt|$_md"
+}
+
+# Render the probe's Test result block + verdict + follow-up, so the public and
+# through-tunnel paths word the outcome identically. Everything shown maps to a
+# page-1 field (Current MTU / Recommended / Basis). outcome is one of:
+#   confirm - probe agrees with the Calculated value (recorded)
+#   revise  - probe found a lower real limit (recorded)
+#   frag    - DF ignored, reading unusable (nothing recorded)
+#   noreply - no answer, inconclusive (nothing recorded)
+mtu_probe_render() {
+    local ttype trole tiface cur old_rec new_rec outcome vinfo basis_was applyval
+    ttype="$1"; trole="$2"; tiface="$3"; cur="$4"; old_rec="$5"; new_rec="$6"
+    outcome="$7"; vinfo="$8"; basis_was="$9"
+    printf " %bTest result%b\n" "$CYAN" "$RESET"
+    printf "   %-18s %b%s%b\n" "Current MTU:" "$GREEN" "${cur:-N/A}" "$RESET"
+    printf "   %-18s %b%s%b\n" "Old Recommended:" "$GREEN" "${old_rec:-N/A}" "$RESET"
+    case "$outcome" in
+        confirm|revise) printf "   %-18s %b%s%b\n" "New Recommended:" "$GREEN" "$new_rec" "$RESET" ;;
+        *)              printf "   %-18s %bno new recommendation%b\n" "New Recommended:" "$GREY" "$RESET" ;;
+    esac
+    # The rows above are a reviewable data block (design-note 1: its own region),
+    # so one blank separates them from the verdict + follow-up status lines, which
+    # are grouped together below.
+    printf "\n"
+    case "$outcome" in
+        confirm) if [ -n "$old_rec" ]; then print_success "The probe confirmed the Calculated $new_rec is optimal."
+                 else print_success "The probe verified an MTU of $new_rec."; fi ;;
+        revise)  print_warning "The probe verified the optimal MTU is $new_rec, not $old_rec." ;;
+        frag)    print_info "DF flag was ignored, causing test packets to exceed the tunnel's max possible size." ;;
+        noreply) print_info "No test packet got a reply, so there is nothing to measure." ;;
+    esac
+    case "$outcome" in
+        confirm|revise) applyval="$new_rec"; print_info "Basis is now: $vinfo ($basis_was)." ;;
+        *)              applyval="$old_rec"; print_info "Recommended stays at the Calculated ${old_rec:-N/A}." ;;
+    esac
+    if [ -n "$applyval" ] && [ -n "$cur" ] && [ "$cur" != "$applyval" ]; then
+        print_info "To apply $applyval, choose Optimize a tunnel → $ttype $trole ($tiface)."
+    elif [ -n "$applyval" ] && [ "$cur" = "$applyval" ] && { [ "$outcome" = confirm ] || [ "$outcome" = revise ]; }; then
+        print_info "Current MTU already matches — nothing to change."
+    fi
+}
+
+# Active probe. Public endpoint FIRST: a don't-fragment search straight to the
+# server's public address rides the same wire as the tunnel but outside it, so
+# nothing depends on the DF flag surviving encapsulation - and the tunnel is
+# never touched. The through-tunnel probe to the peer's internal IP is the
+# fallback (typical for servers, whose "endpoint" is a NATed client that will
+# not answer from the internet). Credible results are persisted via mtu_v_store.
 mtu_probe() {
     local type iface endpoint overhead role underlay_mtu
-    local orig own_ip peer_ip lo hi best mid computed answer pinger
+    local own_ip peer_ip lo hi best mid computed answer pinger hdr npeers hs cur prior basis_was outcome new_rec vinfo orig
     type="$1"; iface="$2"; endpoint="$3"; overhead="$4"; role="$5"; underlay_mtu="$6"
-    orig=""; own_ip=""; peer_ip=""; lo=1280; hi=1500; best=0; mid=0; computed=""; answer=""; pinger=""
+    own_ip=""; peer_ip=""; lo=1280; hi=1500; best=0; mid=0; computed=""
+    answer=""; pinger=""; hdr=28; npeers=""; hs=""; cur=""; prior=""; basis_was=""; outcome=""; new_rec=""; vinfo=""; orig=""
     clear
     print_centered_header "MTU Active Probe"
-    # Work out the peer's tunnel-internal IP first. If there isn't one we can
-    # reach, there's nothing to probe — bail before installing or changing a thing.
+    [ -n "$underlay_mtu" ] && computed=$((underlay_mtu - overhead))
+
+    # Tunnel-internal fallback target.
     own_ip=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*inet \([0-9.]*\)/.*#\1#p' | head -1)
     case "$type" in
         OpenVPN)
-            peer_ip=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*peer \([0-9.]*\).*#\1#p' | head -1) ;;
+            # The kernel peer field is ground truth when present - p2p/net30
+            # topologies put the far end at .5/.9/..., NOT .1, and custom servers
+            # need not sit at .1 either. But GL uses `topology subnet`, where the
+            # interface has NO peer field at all (live 4.3.25: ovpnclient came up
+            # as 10.8.0.2/32 and the old code declared a working tunnel
+            # unprobeable). Guess the conventional gateway .1 only then.
+            peer_ip=$(ip -4 addr show dev "$iface" 2>/dev/null | sed -n 's#.*peer \([0-9.]*\).*#\1#p' | head -1)
+            [ -z "$peer_ip" ] && [ "$role" = Client ] && [ -n "$own_ip" ] && peer_ip="${own_ip%.*}.1"
+            ;;
         *)  if [ "$role" = Client ]; then
                 peer_ip="${own_ip%.*}.1"
             else
-                peer_ip=$(wg show "$iface" allowed-ips 2>/dev/null | grep -oE '[0-9.]+/32' | grep -v "^${own_ip}/" | head -1)
-                peer_ip=${peer_ip%/*}
+                # Only target a peer that has actually completed a handshake. A
+                # configured-but-never-connected peer just eats packets and the
+                # whole probe reads "inconclusive" (live: wgserver with one dead
+                # peer, latest-handshake 0).
+                hs=$(wg show "$iface" latest-handshakes 2>/dev/null | awk '$2>0{print $1; exit}')
+                if [ -n "$hs" ]; then
+                    peer_ip=$(wg show "$iface" allowed-ips 2>/dev/null | awk -v k="$hs" '$1==k{for(i=2;i<=NF;i++) if($i~/^[0-9.]+\/32$/){print $i; exit}}')
+                    peer_ip=${peer_ip%/*}
+                fi
             fi ;;
     esac
-    if [ -z "$peer_ip" ]; then
+
+    if [ -z "$endpoint" ] && [ -z "$peer_ip" ]; then
         printf "\n"
         print_warning "Active probe isn't available for this tunnel."
-        print_info "No peer tunnel IP could be determined to send test packets to."
+        if [ "$type" = WireGuard ] && [ "$role" = Server ]; then
+            npeers=$(wg show "$iface" allowed-ips 2>/dev/null | grep -c .)
+            if [ "${npeers:-0}" -gt 0 ]; then
+                print_info "$npeers peer(s) configured, but none has connected - nothing live to probe."
+            else
+                print_info "No peers are configured on this server."
+            fi
+        else
+            print_info "No public endpoint or peer tunnel IP could be determined."
+        fi
         press_any_key; return
     fi
+
     printf "\n %bWhat this does%b\n" "$CYAN" "$RESET"
-    printf "   Briefly raises %s to 1500, sends don't-fragment test packets to\n" "$iface"
-    printf "   %s over the tunnel to find the largest that survives, then restores\n" "$peer_ip"
-    printf "   your MTU. Best-effort: a fragmenting path can read high.\n\n"
-    printf "Run the probe? [y/N]: "; read -r answer; printf "\n"
+    printf "   Sends test packets to find the biggest size this connection really carries,\n"
+    printf "   then confirms or lowers the Recommended MTU and marks its Basis \"Verified\".\n"
+    printf "   Your Current MTU is not changed. If the probe measured size is bigger, it\n"
+    printf "   means the don't-fragment (DF) flag is being ignored on the path, resulting\n"
+    printf "   in an oversized packet being split into two or more pieces, forwarded, and\n"
+    printf "   reassembled at the receiving end, so it looks like it fit. The probe will\n"
+    printf "   detect this and ignore the probed value, keeping the original Calculated\n"
+    printf "   value as the Recommended value.\n"
+    printf "\nRun the probe? [y/N]: "; read -r answer; printf "\n"
     case "$answer" in y|Y) ;; *) print_info "Cancelled."; press_any_key; return ;; esac
+
     # Find a don't-fragment-capable pinger. Busybox ping lacks -M do and shadows
     # iputils on PATH, so when the PATH ping can't do it, install iputils via the
     # standard helper (a no-op if already present) and call /usr/bin/ping directly.
@@ -6203,8 +6338,47 @@ mtu_probe() {
     if ! "$pinger" -M do -c1 -W1 127.0.0.1 >/dev/null 2>&1; then
         print_warning "Couldn't get a don't-fragment pinger; skipping probe."; press_any_key; return
     fi
+
+    # Old Recommended is always the Calculated value (link MTU - overhead); New
+    # Recommended is what this probe finds. basis_was distinguishes a first
+    # verification from a refresh of an already-verified tunnel.
+    cur=$(mtu_get "$iface")
+    prior=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+    case "$prior" in "OK|"*) basis_was="re-verified today" ;; *) basis_was="was: Calculated" ;; esac
+
+    # ---- Phase 1: the native path, straight to the public endpoint ----------
+    if [ -n "$endpoint" ]; then
+        # 28 = IPv4 20 + ICMP 8; 48 = IPv6 40 + ICMPv6 8. A DNS-name endpoint is
+        # sized as IPv4; if it resolves to IPv6 the search still converges and
+        # the figure is merely conservative by the 20-byte difference.
+        case "$endpoint" in *:*) hdr=48 ;; *) hdr=28 ;; esac
+        printf "\n"; print_action "Probing the connection to $endpoint ..."
+        while [ "$lo" -le "$hi" ]; do
+            mid=$(( (lo + hi) / 2 ))
+            if "$pinger" -M do -s $((mid - hdr)) -c1 -W1 "$endpoint" >/dev/null 2>&1; then best=$mid; lo=$((mid + 1)); else hi=$((mid - 1)); fi
+        done
+        if [ "$best" -gt 0 ]; then
+            new_rec=$((best - overhead))
+            if [ -n "$computed" ] && [ "$new_rec" -lt "$computed" ] 2>/dev/null; then outcome=revise; else outcome=confirm; fi
+            mtu_v_store "$iface" "$new_rec" public "$endpoint" "${underlay_mtu:-}"
+            vinfo="Verified $(date '+%Y-%m-%d') - public probe to $endpoint"
+            printf "\n"
+            mtu_probe_render "$type" "$role" "$iface" "$cur" "$computed" "$new_rec" "$outcome" "$vinfo" "$basis_was"
+            press_any_key; return
+        fi
+        printf "\n"
+        print_warning "No reply from the public endpoint (it may drop ICMP)."
+        if [ -z "$peer_ip" ]; then
+            print_info "No tunnel peer available to fall back to - probe inconclusive."
+            press_any_key; return
+        fi
+        print_info "Falling back to the through-tunnel probe."
+        lo=1280; hi=1500; best=0
+    fi
+
+    # ---- Phase 2: through the tunnel to the internal peer -------------------
     orig=$(mtu_get "$iface")
-    print_action "Probing over $iface to $peer_ip ..."
+    printf "\n"; print_action "Probing through the tunnel to $peer_ip ..."
     [ "${orig:-0}" -lt 1500 ] && ip link set "$iface" mtu 1500 2>/dev/null
     while [ "$lo" -le "$hi" ]; do
         mid=$(( (lo + hi) / 2 ))
@@ -6213,25 +6387,22 @@ mtu_probe() {
     [ -n "$orig" ] && ip link set "$iface" mtu "$orig" 2>/dev/null
     printf "\n"
     if [ "$best" -eq 0 ]; then
-        print_warning "No test packet got a reply over the tunnel — probe inconclusive."
-        print_info "The peer may not answer ICMP, or the tunnel is idle. Trust the computed value."
-        press_any_key; return
+        outcome=noreply; new_rec=""
+    elif [ -n "$computed" ] && [ "$best" -gt "$computed" ] 2>/dev/null; then
+        outcome=frag; new_rec=""
+    elif [ -n "$computed" ] && [ "$best" -lt "$computed" ] 2>/dev/null; then
+        outcome=revise; new_rec="$best"
+    else
+        outcome=confirm; new_rec="$best"
     fi
-    [ -n "$underlay_mtu" ] && computed=$((underlay_mtu - overhead))
-    printf "   Largest tunnel MTU that survived: %b%s%b\n" "$GREEN" "$best" "$RESET"
-    if [ -n "$computed" ]; then
-        printf "   Computed recommendation:          %s\n" "$computed"
-        if [ "$best" -lt "$computed" ] 2>/dev/null; then
-            print_warning "Probe is lower than computed — a real path limit; consider $best."
-        elif [ "$best" -gt "$computed" ] 2>/dev/null; then
-            print_info "Probe read higher — likely fragmenting; trust the computed $computed."
-        else
-            print_success "Probe agrees with the computed recommendation."
-        fi
-    fi
+    case "$outcome" in
+        confirm|revise)
+            mtu_v_store "$iface" "$best" tunnel "$peer_ip" "${underlay_mtu:-}"
+            vinfo="Verified $(date '+%Y-%m-%d') - tunnel probe to $peer_ip" ;;
+    esac
+    mtu_probe_render "$type" "$role" "$iface" "$cur" "$computed" "$new_rec" "$outcome" "$vinfo" "$basis_was"
     press_any_key
 }
-
 # Remove the toolkit's MTU override from every governing section so the router's
 # own VPN default governs again (and the web UI field returns to Optional).
 mtu_reset() {
@@ -6264,7 +6435,7 @@ mtu_reset() {
 # user through a target selection that lands on a no-op. Returns 0 if at least
 # one tunnel in $2 would change.
 mtu_actionable() {
-    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur sec
+    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur sec v
     pick="$1"; tf="$2"
     type=""; role=""; iface=""; endpoint=""; overhead=""; family=""
     underlay=""; underlay_mtu=""; rec=""; cur=""; sec=""
@@ -6279,6 +6450,8 @@ mtu_actionable() {
             underlay_mtu=$(mtu_get "$underlay")
             [ -z "$underlay_mtu" ] && continue
             rec=$((underlay_mtu - overhead))
+            v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+            case "$v" in "OK|"*) rec=$(printf '%s' "$v" | cut -d'|' -f2) ;; esac
             cur=$(mtu_get "$iface")
             [ "$cur" != "$rec" ] && return 0
         fi
@@ -6290,7 +6463,7 @@ mtu_actionable() {
 # detect file). Each tunnel gets its own computed value / its own reset, with a
 # running per-tunnel summary.
 mtu_batch() {
-    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur answer
+    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur answer v
     pick="$1"; tf="$2"
     type=""; role=""; iface=""; endpoint=""; overhead=""; family=""
     underlay=""; underlay_mtu=""; rec=""; cur=""; answer=""
@@ -6311,6 +6484,8 @@ mtu_batch() {
             [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
             underlay_mtu=$(mtu_get "$underlay")
             [ -n "$underlay_mtu" ] && rec=$((underlay_mtu - overhead)) || rec=""
+            v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+            case "$v" in "OK|"*) rec=$(printf '%s' "$v" | cut -d'|' -f2) ;; esac
             cur=$(mtu_get "$iface")
             if [ -z "$rec" ]; then print_warning "$iface: underlay unresolved — skipped."
             elif [ "$cur" = "$rec" ]; then print_info "$iface: already at recommended $rec."
@@ -6321,7 +6496,7 @@ mtu_batch() {
 }
 
 manage_mtu() {
-    local tf count pick sel line oldifs type role iface endpoint overhead family cur underlay underlay_mtu rec rec_display source_label sec answer val idx token action allow_all
+    local tf count pick sel line oldifs type role iface endpoint overhead family cur underlay underlay_mtu rec rec_display source_label sec answer val idx token action allow_all v vline vkind vtgt vdate
     tf="/tmp/.gl-mtu.$$"
     while true; do
         clear
@@ -6339,6 +6514,22 @@ manage_mtu() {
             [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
             underlay_mtu=$(mtu_get "$underlay")
             if [ -n "$underlay_mtu" ]; then rec=$((underlay_mtu - overhead)); else rec=""; fi
+            # A fresh probe-verified value outranks the calculation - it measured
+            # the actual path. mtu_v_get reports STALE when the link or endpoint
+            # changed since the probe, and the display drops back to calculated.
+            vline=""; v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+            case "$v" in
+                "OK|"*)
+                    rec=$(printf '%s' "$v" | cut -d'|' -f2)
+                    vkind=$(printf '%s' "$v" | cut -d'|' -f3)
+                    vtgt=$(printf '%s' "$v" | cut -d'|' -f4)
+                    vdate=$(printf '%s' "$v" | cut -d'|' -f5)
+                    vline="${GREEN}Verified ${vdate} - ${vkind} probe to ${vtgt}${RESET}" ;;
+                "STALE|"*)
+                    vline="${YELLOW}Calculated - earlier probe is stale (link changed); re-verify: opt 3${RESET}" ;;
+                *)
+                    vline="${GREY}Calculated from link MTU - verify with an active probe: opt 3${RESET}" ;;
+            esac
             if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then
                 rec_display="${GREEN}${rec}${RESET}   (optimal)"
             elif [ -n "$rec" ]; then
@@ -6355,6 +6546,7 @@ manage_mtu() {
             printf "   Underlay:     %b%s (MTU %s)%b\n" "$GREEN" "${underlay:-N/A}" "${underlay_mtu:-N/A}" "$RESET"
             printf "   Overhead:     %b-%s (%s / %s)%b\n" "$GREEN" "$overhead" "$type" "$family" "$RESET"
             printf "   Recommended:  %b\n" "$rec_display"
+            printf "   Basis:        %b\n" "$vline"
             printf "\n"
         done < "$tf"
         printf "%s  Optimize a tunnel (apply recommended)\n" "$N1"
@@ -6414,6 +6606,8 @@ manage_mtu() {
         [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
         underlay_mtu=$(mtu_get "$underlay")
         [ -n "$underlay_mtu" ] && rec=$((underlay_mtu - overhead)) || rec=""
+        v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+        case "$v" in "OK|"*) rec=$(printf '%s' "$v" | cut -d'|' -f2) ;; esac
         case "$pick" in
             1)
                 if [ -z "$rec" ]; then print_error "No recommendation (underlay unresolved)."; sleep 2; continue; fi

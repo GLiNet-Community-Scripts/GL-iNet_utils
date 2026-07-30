@@ -159,6 +159,7 @@ WireGuard Server: wgserver
    Underlay:     eth2 (MTU 1500)
    Overhead:     -60 (WireGuard / IPv4)
    Recommended:  1440   (can raise)
+   Basis:        Calculated from link MTU - verify with an active probe: opt 3
 
 1️⃣  Optimize a tunnel (apply recommended)
 2️⃣  Set MTU manually

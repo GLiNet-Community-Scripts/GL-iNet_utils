@@ -4,6 +4,30 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-07-30
+- Fixed: the VPN MTU active probe now works on OpenVPN clients. GL uses OpenVPN's
+  `topology subnet`, so the tunnel interface has no kernel peer address and a
+  working tunnel previously read as "not probeable". It now finds the far end
+  correctly and reads the server's public address from the running config.
+- Fixed: a WireGuard server with a configured-but-never-connected peer no longer
+  reports a bogus probe. It targets only a peer that has completed a handshake,
+  and says plainly when there is no connected peer to test.
+- Changed: the active probe measures the path to the server's public address
+  first, outside the tunnel, so the result does not depend on the don't-fragment
+  flag surviving encapsulation; it falls back to a through-tunnel probe only when
+  the public endpoint cannot be reached.
+- Added: each tunnel on the MTU screen now shows a "Basis" line - whether the
+  Recommended MTU is Calculated from the link or Verified by an active probe (with
+  the date and target). A verified result is remembered and used as the
+  recommendation, and is marked stale (back to Calculated) if the underlying link
+  or the server address later changes.
+- Changed: the probe result screen now speaks the status screen's language - it
+  shows Current MTU, Old Recommended (the Calculated value) and New Recommended
+  (what the probe found), a plain-language verdict, and reports that the tunnel's
+  Basis is now Verified. Network jargon is explained in plain terms, including the
+  don't-fragment (DF) edge case where a fragmenting path makes the probe read too
+  high (the probe detects that and keeps the Calculated value).
+
 ## 2026-07-28_20:43
 - Fixed: changing a Fan setting no longer removes the Web-UI Terminal button.
   Both features patch the same admin-panel file, and a fan change restored that

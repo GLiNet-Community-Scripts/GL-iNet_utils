@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-07-30
+# Version: 2026-08-14
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -151,9 +151,20 @@
 #     blank - callers MUST NOT emit a blank immediately before calling it.
 #
 # Help screens
-#   Navigation menus get a [?] Help entry; pickers / numbered-selection /
-#   binary-state / action screens do NOT (out of scope by rule). Help content is
-#   generic and idempotent (no option numbers).
+#   Navigation menus AND numbered action/selection menus get a [?] Help entry
+#   (rule broadened 2026-07-31 - MTU/RLA/VPN Tools were numbered action screens
+#   with no help; they now have it). Pure pickers, binary-state toggles and
+#   confirm dialogs still do NOT. [?] is dispatched as `\?|h|H|❓` (not the words
+#   "help"/"HELP"), advertised as `printf "%s Help\n" "$NQ"` - ONE space at the call
+#   site, because NQ carries its own trailing space so Help aligns with the
+#   two-space numbered rows above it. `?` is added to
+#   the Choose prompt.
+#   Help content is generic and idempotent (NO option numbers - describe actions
+#   by name), body opens with the title line "<Feature> - Quick Help", uses
+#   `Section\n────` headers with `──` box-drawing dividers and `•` bullets. The
+#   universal keys ([0]/[?]) are explained ONCE, in the main-menu help - inner
+#   screens don't repeat them. A body needing the router's LAN IP uses an
+#   unquoted heredoc + $(get_lan_ip), never a hardcoded address.
 #
 # Menu & picker input
 #   Input mode is decided at the FUNCTIONAL-GROUP level, by constraint:
@@ -244,6 +255,7 @@ YELLOW="\033[33m"
 GREY="\033[90m"
 BOLD="\033[1m"
 BLUE="\033[38;5;153m"
+HDR2="\033[38;5;148m"   # L2 sub-heading (chartreuse) — one rung below the CYAN L1
 
 SPLASH="
    _____ _          _ _   _      _   
@@ -277,14 +289,15 @@ STARTUP_NOTICE=0      # Set by the install-skip so the update-check spinner runs
 INSTALL_PATH="/usr/sbin/glinet_utils"
 OUTPUT_PREF="auto"    # "auto"|"full"|"compat" — saved in script; "auto" = detect each run
 OUTPUT_MODE="full"    # Runtime: "full"|"compat"; set by detect_output_mode
-_TERM_PROFILE="mac"   # Runtime: "mac"|"wt"|"ttyd"; set by detect_output_mode (full mode only)
+_TERM_PROFILE="mac"   # Runtime: mac|wt|ttyd|termius|putty|compat; set by detect_output_mode
+NSEP="  "             # keycap->label separator: 2 cols default, termius narrows to 1; set by detect_output_mode
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Terminal Output Mode Detection
 #
 # OUTPUT_PREF   "auto"|"full"|"compat"  — persisted in script
 # OUTPUT_MODE   "full"|"compat"         — runtime mode
-# _TERM_PROFILE "mac"|"wt"|"ttyd"       — full-mode sub-profile (internal)
+# _TERM_PROFILE mac|wt|ttyd|termius|putty|compat — terminal sub-profile (internal)
 #
 # Detection flow (auto mode):
 #   TERM=xterm/screen/linux/vt*/ansi/putty* → compat (legacy/PuTTY terminals)
@@ -350,7 +363,7 @@ ensure_stty() {
     while kill -0 "$pid" 2>/dev/null; do
         c=${spin%"${spin#?}"}                  # first character
         spin=${spin#?}$c                       # rotate frames
-        printf '\rSetting up terminal support... %s' "$c" >/dev/tty
+        printf '\rSetting up terminal support %s' "$c" >/dev/tty
         usleep 100000 2>/dev/null || sleep 1
     done
     wait "$pid"
@@ -368,12 +381,22 @@ probe_da2() {
     # differently. Never consulted on its own: DA2 "0;95" is also emitted by
     # terminals that draw emoji correctly, so callers must pair it with a width
     # check. Returns "Type;Version" or empty.
-    local saved stty_bin tmpf="/tmp/.da2.$$" out
+    local saved stty_bin tmpf="/tmp/.da2.$$" out i
     stty_bin=$(command -v stty 2>/dev/null) || return 1
     saved=$("$stty_bin" -g 2>/dev/null)     || return 1
-    "$stty_bin" raw -echo min 0 time 3 2>/dev/null
+    "$stty_bin" raw -echo min 0 time 1 2>/dev/null
     printf '\033[>c' >/dev/tty
-    dd if=/dev/tty bs=32 count=1 >"$tmpf" 2>/dev/null
+    # Gather the reply in 0.1s slices until the 'c' terminator lands or a ~1.2s
+    # deadline passes. A single fixed-timeout read misdetects on laggy links
+    # (Termius over in-flight wifi) whose round-trip exceeds the window, and it
+    # cannot reassemble a reply split across reads. Responsive terminals answer
+    # on the first slice, so this stays instant for them.
+    : > "$tmpf"; i=0
+    while [ "$i" -lt 12 ]; do
+        dd if=/dev/tty bs=32 count=1 >>"$tmpf" 2>/dev/null
+        case "$(cat "$tmpf" 2>/dev/null)" in *c*) break ;; esac
+        i=$((i + 1))
+    done
     "$stty_bin" "$saved" 2>/dev/null
     out=$(sed 's/.*\[>\([0-9]*\);\([0-9]*\).*/\1;\2/' "$tmpf" 2>/dev/null)
     rm -f "$tmpf"
@@ -381,12 +404,22 @@ probe_da2() {
 }
 
 probe_advance() {
-    local sym="$1" col saved stty_bin tmpf="/tmp/.probe.$$"
+    local sym="$1" col saved stty_bin tmpf="/tmp/.probe.$$" i
     stty_bin=$(command -v stty 2>/dev/null) || { printf '2'; return; }
     saved=$("$stty_bin" -g 2>/dev/null)       || { printf '2'; return; }
-    "$stty_bin" raw -echo min 0 time 2 2>/dev/null
+    "$stty_bin" raw -echo min 0 time 1 2>/dev/null
     printf '\r%s\033[6n' "$sym" >/dev/tty
-    dd if=/dev/tty bs=20 count=1 >"$tmpf" 2>/dev/null
+    # Gather the cursor report in 0.1s slices until the 'R' terminator lands or a
+    # ~1.2s deadline passes. A single fixed-timeout read timed out on laggy links
+    # (Termius over in-flight wifi) and fell back to advance 2 - the Windows
+    # Terminal profile - which mismatched the real glyph widths. Responsive
+    # terminals answer on the first slice, so startup stays instant for them.
+    : > "$tmpf"; i=0
+    while [ "$i" -lt 12 ]; do
+        dd if=/dev/tty bs=20 count=1 >>"$tmpf" 2>/dev/null
+        case "$(cat "$tmpf" 2>/dev/null)" in *R*) break ;; esac
+        i=$((i + 1))
+    done
     "$stty_bin" "$saved" 2>/dev/null
     printf '\r\033[K' >/dev/tty
     col=$(sed 's/.*\[\([0-9]*\);\([0-9]*\)R.*/\2/' "$tmpf" 2>/dev/null)
@@ -399,6 +432,7 @@ probe_advance() {
 
 detect_output_mode() {
     local ambig wide
+    NSEP="  "    # keycap separator default (2 cols); the termius profile narrows it to 1
 
     # ── Step 1: Determine base mode ──────────────────────────────────────────
     if [ "$OUTPUT_PREF" = "compat" ]; then
@@ -418,7 +452,7 @@ detect_output_mode() {
     # ── Step 2: NO_COLOR — strip ANSI colors only, keep symbols/mode ─────────
     if [ "${NO_COLOR+x}" ]; then
         RESET=""; CYAN=""; GREEN=""; RED=""; YELLOW=""
-        GREY=""; BOLD=""; BLUE=""
+        GREY=""; BOLD=""; BLUE=""; HDR2=""
     fi
 
     # ── Step 3: Probe terminal sub-profile (full mode only) ──────────────────
@@ -492,7 +526,7 @@ detect_output_mode() {
                 # These were previously inverted (7/7/6) on the assumption that
                 # xterm.js paints every emoji at one cell - the comment here even
                 # said it was unverified. It is verified now, and it was wrong.
-                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒       "
+                _S_RLA_AC="  🟢    "; _S_RLA_IA="  🔴    "; _S_RLA_RO="  🟡    "
                 ;;
             termius)
                 # Inherits ttyd's symbol set; only the fixed-width status cells
@@ -500,32 +534,43 @@ detect_output_mode() {
                 #   ✅ ❌ paint 2 -> 6sp      🔒 paints 1 (mono text glyph) -> 7sp
                 # Verified by eye at three font sizes; advances are a wcwidth
                 # table lookup and do not vary with font size.
-                # Wide-by-default BMP emoji advance 1 but PAINT 2 here, so the
-                # single trailing space set outside this case is drawn over the
-                # glyph's right half and the message text butts against it.
-                # Two spaces give one visible gap. The ambiguous+VS16 set below
-                # advances 2 and paints 2, so it is correct with one.
+                # Wide-by-default BMP emoji (✅ ❌ ⏳) advance 1 but PAINT 2 here,
+                # so a single trailing space is drawn over the glyph's right half
+                # and the text butts it - they need TWO for one visible gap.
+                # The ambiguous+VS16 set (⚠️ ℹ️ ⚙️) advances 2 AND paints 2, so ONE
+                # space is right. It used to carry two as a sacrificial pad because
+                # Termius clipped the last cell of a colour run - but a current
+                # Termius no longer does (re-measured 2026-08-13 with glyph-test.sh:
+                # one space leaves exactly one clean gap), so drop it back to one.
                 _S_OK="✅  ";   _S_ERR="❌  ";  _S_TIME="⏳  "
                 _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ "
-                # Keycaps advance 3 (digit + VS16 + U+20E3 counted separately)
-                # but PAINT 2, so with the call site's two spaces they land where
-                # the ASCII reference does - no pad needed. NA likewise.
-                # NQ and NCL are printed with ONE space by their call sites, so
-                # each carries one of its own to match the numbered rows.
-                # Measured, not inferred: every glyph paints 2 here except 🔒.
+                # Keycaps PAINT 2 and (re-measured 2026-08-13) ADVANCE 2 in a
+                # current Termius, so ONE space after them leaves one clean gap -
+                # NSEP is narrowed to a single space here for exactly that. Every
+                # numbered-keycap call site reads NSEP, so non-termius profiles keep
+                # two spaces (byte-identical) and only termius narrows to one.
+                NSEP=" "
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
-                NQ="❓ "; NCL="🆑 "; NA="🅰️"
-                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒       "
+                # NQ/NCL (help/clear) are printed with ONE leading space and no NSEP
+                # - their spacing is per-glyph, not the keycap separator - so they
+                # carry NO trailing space to land at one clean gap like the keycaps.
+                NQ="❓"; NCL="🆑"; NA="🅰️"
+                _S_RLA_AC="  🟢    "; _S_RLA_IA="  🔴    "; _S_RLA_RO="  🟡    "
                 ;;
             wt)
                 # Windows Terminal: ambig+VS adv=2 — 1sp sufficient
-                # Keycaps render as □1 — use text numbers
+                # Keycap emoji (1️⃣) and 🅰️ box out here, so numbers use the bold
+                # negative-circled digits ❶..❾ + ⓿ (U+2776 / U+24FF) - single-width
+                # TEXT glyphs that ADVANCE 1 (as the keycaps do on mac), so the label
+                # column lands where the mac profile puts it. The thin circled ①..⓪
+                # rendered too small to read. help/clear keep ❓/🆑; All stays Ⓐ (no
+                # bold circled letter renders reliably).
                 _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ ";  _S_TIME="⏳ "
-                N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
-                N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
-                NQ="[?] "; NCL="[CL]"; NA="[A]"
-                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒      "
+                N1="❶"; N2="❷"; N3="❸"; N4="❹"; N5="❺"
+                N6="❻"; N7="❼"; N8="❽"; N9="❾"; N0="⓿"
+                NQ="❓"; NCL="🆑"; NA="Ⓐ"
+                _S_RLA_AC="  🟢    "; _S_RLA_IA="  🔴    "; _S_RLA_RO="  🟡    "
                 ;;
             *)
                 # macOS Terminal + Linux terminals (default)
@@ -534,22 +579,45 @@ detect_output_mode() {
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
                 NQ="❓"; NCL="🆑"; NA="🅰️"
-                _S_RLA_AC="✅      "; _S_RLA_IA="❌      "; _S_RLA_RO="🔒      "
+                _S_RLA_AC="  🟢    "; _S_RLA_IA="  🔴    "; _S_RLA_RO="  🟡    "
                 ;;
         esac
 
-    else    # compat — PuTTY, legacy, bare vt terminals
-        _S_OK="[√] "
-        _S_ERR="[×] "
-        _S_ON="${GREEN}√${RESET}"; _S_OFF="${RED}×${RESET}"   # status icons (need explicit color)
-        _S_WARN="[!] "
-        _S_INFO="[i] "
-        _S_ACT="[❋] "
-        _S_TIME="[…] "   # all single-width & PuTTY-safe; [√]/[×] mirror on/off √/× and full-mode ✅/❌, [❋]≈gear, […]=wait
-        N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
-        N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
-        NQ="[?] "; NCL="[CL]"; NA="[A]"
-        _S_RLA_AC="[AC]    "; _S_RLA_IA="[IA]    "; _S_RLA_RO="[RO]    "
+    else    # compat — split: PuTTY/xterm render emoji; dumb/serial terminals do not
+        # PuTTY (and real xterm) render EMOJI-DEFAULT codepoints (✅ ❌ ⏳ ❓ 🆑 and the
+        # 🟢🔴🟡 circles) FULL at 2 cells - but monochrome, so print_* paints them via
+        # ANSI.  TEXT-default symbols must be avoided: PuTTY gives ⚠ / info-i / gear one
+        # cell and clips their 2-cell fallback glyph to a HALF (proven on-device), so
+        # warn/info/action use emoji-default stand-ins (❗ 💡 🔧).  Numbered selectors
+        # stay [brackets] (keycaps box, circled digits read poorly); help/clear keep
+        # their emoji, which render full.  Stoplight circles are one identical
+        # monochrome shape here, so the cells MUST be ANSI-painted to be told apart -
+        # baked in with printf so the %s row-render emits real ESC, not a literal
+        # \033 string.  Genuinely limited terminals keep the pure-ASCII set.
+        case "${TERM:-dumb}" in putty*|xterm) _TERM_PROFILE="putty" ;; *) _TERM_PROFILE="compat" ;; esac
+        if [ "$_TERM_PROFILE" = "putty" ]; then
+            _S_OK="✅ ";   _S_ERR="❌ "
+            _S_ON="${GREEN}✅${RESET}"; _S_OFF="${RED}❌${RESET}"
+            _S_WARN="❗ "; _S_INFO="💡 "; _S_ACT="🔧 "; _S_TIME="⏳ "
+            N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
+            N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
+            NQ="[?] "; NCL="[CL]"; NA="[A]"
+            _S_RLA_AC=$(printf '  %b🟢%b    ' "$GREEN"  "$RESET")
+            _S_RLA_IA=$(printf '  %b🔴%b    ' "$RED"    "$RESET")
+            _S_RLA_RO=$(printf '  %b🟡%b    ' "$YELLOW" "$RESET")
+        else
+            _S_OK="[√] "
+            _S_ERR="[×] "
+            _S_ON="${GREEN}√${RESET}"; _S_OFF="${RED}×${RESET}"   # status icons (need explicit color)
+            _S_WARN="[!] "
+            _S_INFO="[i] "
+            _S_ACT="[❋] "
+            _S_TIME="[…] "   # all single-width & PuTTY-safe; [√]/[×] mirror on/off √/× and full-mode ✅/❌, [❋]≈gear, […]=wait
+            N1="[1]"; N2="[2]"; N3="[3]"; N4="[4]"; N5="[5]"
+            N6="[6]"; N7="[7]"; N8="[8]"; N9="[9]"; N0="[0]"
+            NQ="[?] "; NCL="[CL]"; NA="[A]"
+            _S_RLA_AC="  [AC]  "; _S_RLA_IA="  [IA]  "; _S_RLA_RO="  [!]   "
+        fi
     fi
 }
 
@@ -648,7 +716,7 @@ terminal_size_advisory() {
             if [ "$(( $(date +%s) - _tsz_start ))" -ge 1 ]; then
                 _tsz_c=${_tsz_spin%"${_tsz_spin#?}"}
                 _tsz_spin=${_tsz_spin#?}${_tsz_c}
-                printf '\rChecking window size... %s' "$_tsz_c"
+                printf '\rChecking window size %s' "$_tsz_c"
             fi
             # 100ms, not 250: the window between the terminal reflowing scrollback
             # back into view and the caller clearing it is one tick long, and that
@@ -761,6 +829,41 @@ popcount_hex() {
     pc_n=$(( $1 )); pc_c=0
     while [ "$pc_n" -gt 0 ]; do pc_c=$(( pc_c + (pc_n & 1) )); pc_n=$(( pc_n >> 1 )); done
     printf '%s' "$pc_c"
+}
+
+# wifi_protocol <phy> <band>  ->  "802.11<letters>|Wi-Fi <gen>"  (empty gen -> just
+# the standards). Reads the PHY's *capabilities* from `iw phy info` - HT (11n),
+# VHT (11ac), HE (11ax), EHT (11be) - and composes the standards list correct for
+# the BAND. This is band-aware on purpose: 802.11ac (VHT) is defined for 5/6 GHz
+# only, so it is NEVER listed on 2.4 GHz even though some drivers (e.g. MediaTek
+# on the MT1300) advertise a VHT capability block there - that is the
+# vendor 256-QAM rate extension, not real 11ac. 6 GHz has no legacy/HT/VHT floor:
+# HE (ax) is its minimum. Generation disambiguates Wi-Fi 6 vs 6E (both 802.11ax).
+wifi_protocol() {
+    local wp_phy="$1" wp_band="$2" wp_info wp_ht=0 wp_vht=0 wp_he=0 wp_eht=0 wp_std wp_gen=""
+    wp_info=$(iw phy "$wp_phy" info 2>/dev/null)
+    [ -z "$wp_info" ] && { printf 'N/A|'; return; }
+    printf '%s\n' "$wp_info" | grep -qE '^[[:space:]]+Capabilities:' && wp_ht=1
+    printf '%s\n' "$wp_info" | grep -q  'VHT Capabilities'            && wp_vht=1
+    printf '%s\n' "$wp_info" | grep -q  'HE Iftypes'                  && wp_he=1
+    printf '%s\n' "$wp_info" | grep -q  'EHT Iftypes'                 && wp_eht=1
+    case "$wp_band" in
+        2.4GHz)
+            wp_std="b/g"
+            [ "$wp_ht"  = 1 ] && { wp_std="$wp_std/n";  wp_gen="Wi-Fi 4"; }
+            [ "$wp_he"  = 1 ] && { wp_std="$wp_std/ax"; wp_gen="Wi-Fi 6"; }
+            [ "$wp_eht" = 1 ] && { wp_std="$wp_std/be"; wp_gen="Wi-Fi 7"; } ;;
+        6GHz)
+            wp_std="ax"; wp_gen="Wi-Fi 6E"
+            [ "$wp_eht" = 1 ] && { wp_std="ax/be"; wp_gen="Wi-Fi 7"; } ;;
+        *)  # 5 GHz (and any other band that reports the a/n/ac lineage)
+            wp_std="a"
+            [ "$wp_ht"  = 1 ] && { wp_std="$wp_std/n";  wp_gen="Wi-Fi 4"; }
+            [ "$wp_vht" = 1 ] && { wp_std="$wp_std/ac"; wp_gen="Wi-Fi 5"; }
+            [ "$wp_he"  = 1 ] && { wp_std="$wp_std/ax"; wp_gen="Wi-Fi 6"; }
+            [ "$wp_eht" = 1 ] && { wp_std="$wp_std/be"; wp_gen="Wi-Fi 7"; } ;;
+    esac
+    printf '802.11%s|%s' "$wp_std" "$wp_gen"
 }
 
 press_any_key() {
@@ -971,13 +1074,13 @@ apply_update() {
         return 1
     fi
     rm -f "$SPIN_LOG" 2>/dev/null
-    print_action "Updating..."
+    print_action "Updating"
     if ! cp "$TMP_NEW_SCRIPT" "$SCRIPT_PATH.new" || ! chmod +x "$SCRIPT_PATH.new"; then
         print_warning "Could not write ${SCRIPT_PATH}.new (permissions?)."
         rm -f "$TMP_NEW_SCRIPT" 2>/dev/null
         return 1
     fi
-    print_success "Upgrade complete. Restarting..."
+    print_success "Upgrade complete. Restarting"
     stty sane 2>/dev/null </dev/tty   # reset line discipline (a raw-mode keypress triggered us) so the restarted copy can read input
     exec "$SCRIPT_PATH.new" "$@"
 }
@@ -1044,11 +1147,11 @@ spin_run() {
     pid=$!
     while kill -0 "$pid" 2>/dev/null; do
         c=${spin%"${spin#?}"}; spin=${spin#?}$c
-        printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}%s...${RESET} %s" "$label" "$c"
+        printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}%s${RESET} %s" "$label" "$c"
         usleep 100000 2>/dev/null || sleep 1
     done
     wait "$pid"; rc=$?
-    printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}%s...${RESET}\033[K\n" "$label"
+    printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}%s${RESET}\033[K\n" "$label"
     return "$rc"
 }
 
@@ -1062,12 +1165,12 @@ countdown_run() {
     pid=$!
     remain=$total
     while kill -0 "$pid" 2>/dev/null; do
-        printf "\r${BOLD}${CYAN}${_S_TIME}${RESET}${CYAN}%s...${RESET} %ds remaining" "$label" "$remain"
+        printf "\r${BOLD}${CYAN}${_S_TIME}${RESET}${CYAN}%s${RESET} %ds remaining\033[K" "$label" "$remain"
         sleep 1
         [ "$remain" -gt 0 ] && remain=$((remain - 1))
     done
     wait "$pid"; rc=$?
-    printf "\r${BOLD}${CYAN}${_S_TIME}${RESET}${CYAN}%s...${RESET}\033[K\n" "$label"
+    printf "\r${BOLD}${CYAN}${_S_TIME}${RESET}${CYAN}%s${RESET}\033[K\n" "$label"
     return "$rc"
 }
 
@@ -1249,12 +1352,30 @@ get_cpu_freq_mhz() {
 
     # Last resort: known fixed clocks for legacy SoCs with no programmatic source.
     case "$(get_cpu_vendor_model)" in
+        *MT7988*)  printf '1800' ;; # Flint 4 (BE14000)
         *MT7986*)  printf '2000' ;; # Flint 2
         *MT7981*)  printf '1300' ;; # Beryl AX
         *MT7621*)  printf '880'  ;; # Beryl
         *SF19A28*) printf '1000' ;; # Opal
         *IPQ4018*) printf '717'  ;; # Slate Plus
     esac
+}
+
+# CPU topology, portable across the fleet's MIPS + ARM. Emits "<logical> <physical>":
+#   logical  = grep -c ^processor        - every thread (what the stress test loads)
+#   physical = distinct core_id in /sys  - real cores; equals logical on non-SMT parts
+# Falls back to logical when /sys exposes no topology, so a plain multi-core chip reads
+# "N cores" and only multithreaded parts (e.g. MT7621: 2 cores / 4 threads) differ.
+# Verified on the fleet: MT7621 -> "4 2", ARM quad -> "4 4", ARM dual -> "2 2".
+cpu_counts() {
+    local _l _p
+    _l=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
+    case "$_l" in ''|*[!0-9]*) _l=1 ;; esac
+    [ "$_l" -lt 1 ] && _l=1
+    _p=$(cat /sys/devices/system/cpu/cpu*/topology/core_id 2>/dev/null | sort -u | grep -c .)
+    case "$_p" in ''|*[!0-9]*) _p=0 ;; esac
+    { [ "$_p" -lt 1 ] || [ "$_p" -gt "$_l" ]; } && _p="$_l"
+    printf '%s %s' "$_l" "$_p"
 }
 
 get_mem_stats() {
@@ -1360,7 +1481,7 @@ agh_apply_and_restart() {
         return 0
     fi
     if [ -n "$backup" ] && [ -n "$target" ]; then
-        print_error "AdGuardHome failed to start! Reverting..."
+        print_error "AdGuardHome failed to start! Reverting"
         cp "$target" "${target}.error.$(date +%Y%m%d%H%M%S)" 2>/dev/null
         cp "$backup" "$target"
         $AGH_INIT start >/dev/null 2>&1; sleep 2
@@ -1420,6 +1541,233 @@ mask_keep_tail() {
 # -----------------------------
 # Hardware Information Display
 # -----------------------------
+# ---- Hardware Info page 3: physical port panel (data-driven) -----------------
+# Reads GL's port map (eth_ports_config_map) when present, else swconfig, else raw
+# netdevs; renders a column grid grouped by fabric with an accurate "Maps to" (the
+# real ifconfig netdev). Nothing model-specific is hardcoded - silk labels, chip
+# names, roles and speeds all come from the device at runtime.
+hwnet_spd() { case "$1" in 10000)echo 10G;; 5000)echo 5G;; 2500)echo 2.5G;; 1000)echo 1G;; 100)echo 100M;; 10)echo 10M;; ""|-1|0)echo "-";; *)echo "${1}M";; esac; }
+hwnet_lc() { printf '%s' "$1" | tr 'A-Z' 'a-z'; }
+hwnet_mac() { hwnet_lc "$(cat "/sys/class/net/$1/address" 2>/dev/null)"; }
+hwnet_dev_by_mac() {                    # mac -> first netdev carrying it
+    _m=$(hwnet_lc "$1"); [ -z "$_m" ] && return 1
+    for _p in /sys/class/net/*; do
+        [ "$(hwnet_lc "$(cat "$_p/address" 2>/dev/null)")" = "$_m" ] && { echo "${_p##*/}"; return 0; }
+    done; return 1
+}
+hwnet_bridge() {                        # -> primary LAN bridge (br-lan, else first br-*)
+    [ -e /sys/class/net/br-lan ] && { echo br-lan; return; }
+    for _p in /sys/class/net/br-*; do [ -e "$_p" ] && { echo "${_p##*/}"; return; }; done
+}
+hwnet_conduit() { ip -o link show "$1" 2>/dev/null | sed -n 's/^[0-9]*: [^@]*@\([^:]*\):.*/\1/p' | head -1; }
+hwnet_lan_vlandev() {                   # main_if -> the VLAN sub-netdev whose MAC == bridge MAC
+    _mif="$1"; _bm=$(hwnet_mac "$(hwnet_bridge)"); [ -z "$_bm" ] && return 1
+    for _p in /sys/class/net/"$_mif".*; do [ -e "$_p" ] || continue
+        [ "$(hwnet_mac "${_p##*/}")" = "$_bm" ] && { echo "${_p##*/}"; return 0; }
+    done; return 1
+}
+hwnet_state() {                         # rs -> up|mbps / down| / na|
+    case "$1" in
+        sw:*) _r=${1#sw:}; _sw=${_r%%:*}; _pt=${_r#*:}
+            _raw=$(swconfig dev "$_sw" port "$_pt" show 2>/dev/null | grep 'link:')
+            if echo "$_raw" | grep -q 'link:up'; then echo "up|$(echo "$_raw" | sed -n 's/.*speed:\([0-9]*\)base.*/\1/p')"
+            elif echo "$_raw" | grep -q 'link:down'; then echo "down|"; else echo "na|"; fi ;;
+        nd:*) _nd=${1#nd:}
+            _st=$(ubus call network.device status "{\"name\":\"$_nd\"}" </dev/null 2>/dev/null)
+            if [ -n "$_st" ]; then
+                _sp=$(echo "$_st" | sed -n 's/.*"speed": "\(-\{0,1\}[0-9]*\)[FH]".*/\1/p')
+                _car=$(echo "$_st" | sed -n 's/.*"carrier": \(true\|false\).*/\1/p' | head -1)
+                [ "$_car" = true ] && echo "up|$_sp" || echo "down|"; return
+            fi
+            _car=$(cat "/sys/class/net/$_nd/carrier" 2>/dev/null); _sp=$(cat "/sys/class/net/$_nd/speed" 2>/dev/null)
+            [ "$_car" = 1 ] && echo "up|$_sp" || echo "down|" ;;
+    esac
+}
+hwnet_grp_meta() {                      # grp label uplink -> record group once (with uplink speed)
+    grep -q "^$1$TAB" "$NG" 2>/dev/null && return
+    _us=""; [ -n "$3" ] && _us=$(hwnet_spd "$(cat "/sys/class/net/$3/speed" 2>/dev/null)")
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$_us" >> "$NG"
+}
+hwnet_collect() {
+    NT="/tmp/.glnet-net.$$"; NG="$NT.g"; TAB=$(printf '\t'); SRC=""
+    : > "$NT"; : > "$NG"
+    if [ -f /etc/config/eth_ports_config_map ]; then
+        SRC="GL port map"
+        for _s in $(uci -q show eth_ports_config_map 2>/dev/null | sed -n 's/^eth_ports_config_map\.\([^.=]*\)=port$/\1/p'); do
+            silk=$(uci -q get "eth_ports_config_map.$_s.silk"); [ -z "$silk" ] && silk=$(uci -q get "eth_ports_config_map.$_s.name")
+            mode=$(uci -q get "eth_ports_config_map.$_s.mode"); [ -z "$mode" ] && mode=$(uci -q get "eth_ports_config_map.$_s.default_mode")
+            role=$(printf '%s' "$mode" | tr 'a-z' 'A-Z'); [ -z "$role" ] && role="-"
+            typ=$(uci -q get "eth_ports_config_map.$_s.type")
+            prt=$(uci -q get "eth_ports_config_map.$_s.port")
+            sw=$(uci -q get "eth_ports_config_map.$_s.switch")
+            mif=$(uci -q get "eth_ports_config_map.$_s.main_interface")
+            dmac=$(uci -q get "eth_ports_config_map.$_s.default_mac")
+            case "$typ" in
+                gsw) grp="${sw:-switch0}"; rs="sw:$grp:$prt"
+                     md=$(hwnet_dev_by_mac "$dmac" 2>/dev/null)
+                     if   [ -n "$md" ]; then mapsto="$md"
+                     elif [ "$role" = LAN ]; then mapsto=$(hwnet_lan_vlandev "$mif" 2>/dev/null); [ -z "$mapsto" ] && mapsto="${mif:-?}"
+                     else mapsto="${mif:-?}"; fi
+                     chip=$(swconfig list 2>/dev/null | sed -n "s/^Found: $grp - \(.*\)$/\1/p")
+                     hwnet_grp_meta "$grp" "${grp}${chip:+ · $chip}" "$mif" ;;
+                dsa) rs="nd:$prt"; mapsto="$prt"; _con=$(hwnet_conduit "$prt")
+                     if [ -n "$_con" ]; then grp="socsw"; hwnet_grp_meta socsw "SoC switch (DSA)" "$_con"
+                     else grp="direct"; hwnet_grp_meta direct "Direct SoC" ""; fi ;;
+                *)   rs="nd:$prt"; mapsto="$prt"; grp="direct"; hwnet_grp_meta direct "Direct SoC" "" ;;
+            esac
+            printf '%s\t%s\t%s\t%s\t%s\n' "$grp" "$silk" "$role" "$rs" "$mapsto" >> "$NT"
+        done
+    elif [ -n "$(swconfig list 2>/dev/null)" ]; then
+        # No GL port map, but there IS a switch: derive the CHASSIS ports from the
+        # network config, not by dumping every swconfig port (which includes CPU and
+        # inter-switch trunks that aren't physical ports).
+        SRC="network config"
+        # WAN: each wan* interface's device, when it's a real netdev port.
+        for _wi in wan wan2 wan3; do
+            _wd=$(uci -q get "network.$_wi.device"); [ -z "$_wd" ] && continue
+            case "$_wd" in br-*|@*) continue ;; esac
+            [ -e "/sys/class/net/$_wd" ] || continue
+            hwnet_grp_meta wan "WAN" ""
+            _wl=WAN; [ "$_wi" != wan ] && _wl=$(printf '%s' "$_wi" | tr a-z A-Z)
+            printf 'wan\t%s\tWAN\tnd:%s\t%s\n' "$_wl" "$_wd" "$_wd" >> "$NT"
+        done
+        # LAN: untagged port numbers in a *lan* switch_vlan are real ports; the "Nt"
+        # tag is the CPU/uplink (== the switch's cpu port), excluded. The owning switch
+        # is the one whose cpu port matches that tag.
+        _brdev=$(ls /sys/class/net/"$(hwnet_bridge)"/brif/ 2>/dev/null | grep -E '^(eth|lan)' | head -1)
+        [ -z "$_brdev" ] && _brdev=$(hwnet_bridge)
+        _lann=0
+        for _v in $(uci -q show network 2>/dev/null | sed -n 's/^network\.\([^.=]*\)=switch_vlan$/\1/p'); do
+            case "$_v" in *lan*) ;; *) continue ;; esac
+            _pl=$(uci -q get "network.$_v.ports"); [ -z "$_pl" ] && continue
+            _cpu=""; for _t in $_pl; do case "$_t" in *t) _cpu=${_t%t} ;; esac; done
+            _sw=""
+            for _s2 in $(swconfig list 2>/dev/null | awk '{print $2}'); do
+                [ "$(swconfig dev "$_s2" help 2>&1 | sed -n 's/.*cpu @ \([0-9]*\).*/\1/p')" = "$_cpu" ] && { _sw="$_s2"; break; }
+            done
+            [ -z "$_sw" ] && _sw=$(swconfig list 2>/dev/null | awk 'NR==1{print $2}')
+            _chip=$(swconfig list 2>/dev/null | sed -n "s/^Found: $_sw - \(.*\)$/\1/p")
+            hwnet_grp_meta lan "LAN  ($_sw${_chip:+ · $_chip})" ""
+            for _t in $_pl; do
+                case "$_t" in *t) continue ;; esac
+                _lann=$((_lann+1))
+                printf 'lan\tLAN%s\tLAN\tsw:%s:%s\t%s\n' "$_lann" "$_sw" "$_t" "$_brdev" >> "$NT"
+            done
+        done
+    else
+        SRC="netdev"
+        hwnet_grp_meta soc "SoC ports" ""
+        bwan=$(jsonfilter -e '@.network.wan.device' -i /etc/board.json </dev/null 2>/dev/null)
+        blan=$(jsonfilter -e '@.network.lan.device' -i /etc/board.json </dev/null 2>/dev/null)
+        [ -z "$bwan" ] && bwan=$(uci -q get network.wan.device)
+        [ -z "$bwan" ] && bwan=$(uci -q get network.wan.ifname)
+        [ -z "$blan" ] && blan=$(uci -q get network.lan.device)
+        blan="$blan $(ls "/sys/class/net/$(hwnet_bridge)/brif/" 2>/dev/null | tr '\n' ' ')"
+        _cand=""
+        for _p in /sys/class/net/*; do _n=${_p##*/}
+            case "$_n" in lo|br-*|wlan*|wg*|ovpn*|apcli*|ra|rai|rax|ra[0-9]*|rai[0-9]*|rax[0-9]*|*.*|ifb*|tailscale*|teql*|wds*|mesh*|sit*|ip6*|gre*) continue ;; esac
+            [ "$(cat "$_p/type" 2>/dev/null)" = 1 ] || continue
+            [ -e "$_p/carrier" ] || continue
+            _cand="$_cand $_n"
+        done
+        _haslw=0; for _n in $_cand; do case "$_n" in lan[0-9]*|wan|wan[0-9]*) _haslw=1 ;; esac; done
+        for _n in $_cand; do
+            [ "$_haslw" = 1 ] && case "$_n" in eth[0-9]*) continue ;; esac
+            case " $bwan " in
+                *" $_n "*) silk=WAN; role=WAN ;;
+                *) case " $blan " in
+                    *" $_n "*) case "$_n" in lan[0-9]*) silk=$(printf '%s' "$_n" | tr a-z A-Z) ;; *) silk=LAN ;; esac; role=LAN ;;
+                    *) case "$_n" in
+                        wan*) silk=$(printf '%s' "$_n" | tr a-z A-Z); role=WAN ;;
+                        lan*) silk=$(printf '%s' "$_n" | tr a-z A-Z); role=LAN ;;
+                        *)    silk=$(printf '%s' "$_n" | tr a-z A-Z); role="-" ;;
+                    esac ;;
+                esac ;;
+            esac
+            printf 'soc\t%s\t%s\tnd:%s\t%s\n' "$silk" "$role" "$_n" "$_n" >> "$NT"
+        done
+    fi
+}
+hwnet_render() {
+    # Colour rule: cyan = section labels; green = UP, grey = DOWN (state ONLY, so
+    # nothing else is grey or it reads as "down"); everything structural is plain.
+    printf ' %bPhysical Ports%b\n' "$CYAN" "$RESET"
+    printf '   %b%-11s %-4s  %-6s  %-6s  %s%b\n' "$CYAN" "Port" "Role" "Status" "Link" "Maps to" "$RESET"
+    printf '   ────────────────────────────────────────────\n'
+    while IFS="$TAB" read grp glabel uplink uspeed; do
+        _u=""; [ -n "$uplink" ] && _u="   uplink $uplink${uspeed:+ ($uspeed to SoC)}"
+        printf ' %b%s%b%s\n' "$HDR2" "$glabel" "$RESET" "$_u"
+        grep "^$grp$TAB" "$NT" 2>/dev/null | while IFS="$TAB" read g silk role rs mapsto; do
+            st=$(hwnet_state "$rs"); state=${st%%|*}; mb=${st#*|}; link=$(hwnet_spd "$mb")
+            case "$state" in
+                up) statc=$GREEN; stat=UP;   linkc=$GREEN ;;
+                *)  statc=$GREY;  stat=DOWN; linkc=$GREY; link="-" ;;
+            esac
+            printf '   %-11s %-4s  %b%-6s%b  %b%-6s%b  %s\n' \
+                "$silk" "$role" "$statc" "$stat" "$RESET" "$linkc" "$link" "$RESET" "$mapsto"
+        done
+    done < "$NG"
+    printf '\n'
+    _wandev=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
+    _wanip=$(ip -4 -o addr show "$_wandev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    [ -n "$_wanip" ] && printf ' %bWAN address:%b %s%s\n' "$CYAN" "$RESET" "$_wanip" "${_wandev:+ ($_wandev)}"
+    _br=$(hwnet_bridge)
+    if [ -n "$_br" ]; then
+        _ip=$(ip -4 -o addr show "$_br" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+        _mem=$(ls "/sys/class/net/$_br/brif/" 2>/dev/null | grep -E '^(eth|lan|wan)' | tr '\n' ' ' | sed 's/ *$//')
+        printf ' %bLAN bridge:%b  %s%s%s\n' "$CYAN" "$RESET" "$_br" "${_ip:+ ($_ip)}" "${_mem:+ = $_mem}"
+    fi
+    printf '\n %bLegend:%b %bUP%b link   %bDOWN%b no-link\n' "$BOLD" "$RESET" "$GREEN" "$RESET" "$GREY" "$RESET"
+    rm -f "$NT" "$NG"
+}
+
+# Per-page quick help for the Hardware Information viewer. $1 = the page on screen.
+show_hardware_help() {
+    clear
+    print_centered_header "Hardware Information - Help"
+    case "$1" in
+        2) cat << 'HELPEOF'
+
+ Page 2 - Hardware Crypto Acceleration
+   Whether the CPU accelerates the ciphers your VPNs use. AES-GCM
+   (OpenVPN / IPsec) needs PMULL; ChaCha20 (WireGuard) needs NEON/SIMD.
+   Green means the hardware fast path is available.
+HELPEOF
+        ;;
+        3) cat << 'HELPEOF'
+
+ Page 3 - Network Interfaces
+   Every physical port, grouped by the chip it hangs off.
+
+     Role     WAN or LAN - a WAN/LAN port shows its current job.
+     Link     the speed it negotiated ( - when down ).
+     Maps to  the Linux interface it appears as (as in ifconfig).
+              Switch ports share one VLAN netdev; DSA ports each get
+              their own, so LAN6 can map to lan5.
+     uplink   the switch-to-SoC link and its speed - the pipe OUT of
+              the switch, not a per-port limit. Ports on the same chip
+              switch among themselves at full speed.
+HELPEOF
+        ;;
+        4) cat << 'HELPEOF'
+
+ Page 4 - Wireless Interfaces
+   Each Wi-Fi radio: band, protocol (Wi-Fi 4/5/6/7), channel width,
+   MIMO streams and the current channel.
+HELPEOF
+        ;;
+        *) cat << 'HELPEOF'
+
+ Page 1 - System Overview
+   Device model, CPU, memory, storage and uptime. This page refreshes
+   live once a second. Press * to reveal or hide the serial and MAC.
+HELPEOF
+        ;;
+    esac
+    printf "\n [P]/[N] or [1-4] move between pages   [0] exits.\n"
+    press_any_key
+}
+
 show_hardware_info() {
     page=1
     reveal_ids=0
@@ -1452,10 +1800,13 @@ show_hardware_info() {
 
     cpu_vendor_model=$(get_cpu_vendor_model)
 
-    if command -v lscpu >/dev/null 2>&1; then
-        cpu_cores=$(lscpu 2>/dev/null | grep "^CPU(s):" | awk '{print $2}')
+    # "Cores: N" normally; "P (L threads)" only when the chip is multithreaded (SMT),
+    # e.g. MT7621 = 2 cores / 4 threads. cpu_counts() emits "<logical> <physical>".
+    _cc=$(cpu_counts); cpu_logical=${_cc% *}; cpu_phys=${_cc#* }
+    if [ "$cpu_phys" -lt "$cpu_logical" ]; then
+        cpu_cores="$cpu_phys ($cpu_logical threads)"
     else
-        cpu_cores=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
+        cpu_cores="$cpu_logical"
     fi
 
     cpu_freq=$(get_cpu_freq_mhz)
@@ -1676,80 +2027,8 @@ show_hardware_info() {
                 
             3)
                 printf " %b%bPage 3 of $total_pages: Network Interfaces%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
-                
-                # --- 1. Map Discovery ---
-                port_map="|"
-                sw_list=$(swconfig list 2>/dev/null)
-                if [ -n "$sw_list" ] && [ -f "/etc/board.json" ]; then
-                    lan_ports=$(grep -B 1 '"role": "lan"' /etc/board.json | grep '"num":' | grep -oE '[0-9]+' | tr '\n' ' ')
-                    current_label=1
-                    for p in $(echo "$lan_ports" | tr ' ' '\n' | sort -rn); do
-                        port_map="${port_map}P${p}:LAN${current_label}|"
-                        current_label=$((current_label + 1))
-                    done
-                    wan_p=$(grep -B 1 '"role": "wan"' /etc/board.json | grep '"num":' | grep -oE '[0-9]+' | head -n 1)
-                    [ -n "$wan_p" ] && port_map="${port_map}P${wan_p}:WAN|"
-                fi
-
-                # --- 2. Logical Interfaces ---
-                printf " %b\n" "${CYAN}Network Interfaces (Logical/DSA):${RESET}"
-                ip -br link show 2>/dev/null | grep -E "eth|lan|wan|br-" | grep -v "wlan" | while read iface state rest; do
-                    base_iface=$(echo "$iface" | cut -d'@' -f1 | cut -d. -f1)
-                    speed_raw=$(cat "/sys/class/net/$base_iface/speed" 2>/dev/null)
-                    
-                    # Format Speed string safely
-                    if [ "$speed_raw" = "10000" ]; then spd="10Gbps"
-                    elif [ -n "$speed_raw" ] && [ "$speed_raw" != "-1" ]; then spd="${speed_raw}Mbps"
-                    else spd=""; fi
-
-                    # Use printf with variables outside the format string to prevent escape char errors
-                    if [ -n "$spd" ] && [ "$speed_raw" -ge 5000 ]; then
-                        printf "   %-17s: %b%-5s%b %-12s %b%s%b\n" "$iface" "${GREEN}" "$state" "${RESET}" "$spd" "${CYAN}" "[Internal Trunk]" "${RESET}"
-                    elif [ -n "$spd" ]; then
-                        printf "   %-17s: %b%-5s%b %-12s\n" "$iface" "${GREEN}" "$state" "${RESET}" "$spd"
-                    else
-                        printf "   %-17s: %b%-5s%b\n" "$iface" "${GREEN}" "$state" "${RESET}"
-                    fi
-                done
-                
-                # --- 3. Physical Switch ---
-                if [ -n "$sw_list" ]; then
-                    printf "\n %b\n" "${CYAN}Physical Chassis Ports:${RESET}"
-                    echo "$sw_list" | awk '{print $2}' | while read sw; do
-                        sw_model=$(echo "$sw_list" | grep "$sw" | awk -F' - ' '{print $2}')
-                        p_count=$(swconfig dev "$sw" help 2>&1 | grep -oE "ports: [0-9]+" | awk '{print $2}')
-                        
-                        printf "   %b%s (%s)%b\n" "${YELLOW}" "$sw" "$sw_model" "${RESET}"
-                        printf "     Map: [ "
-                        for i in $(seq 0 $((p_count - 1))); do
-                            if swconfig dev "$sw" port "$i" get link 2>/dev/null | grep -q "link:up"; then
-                                printf "%b$i%b " "${GREEN}" "${RESET}"
-                            else
-                                printf "%b$i%b " "${RED}" "${RESET}"
-                            fi
-                        done
-                        printf "]\n"
-
-                        for i in $(seq 0 $((p_count - 1))); do
-                            link_info=$(swconfig dev "$sw" port "$i" get link 2>/dev/null)
-                            if echo "$link_info" | grep -q "link:up"; then
-                                h_label=$(echo "$port_map" | grep -o "|P$i:[^|]*" | cut -d: -f2)
-                                # Standardize speed labels (remove baseT for cleanliness)
-                                spd=$(echo "$link_info" | grep -oE "[0-9]+(baseT|Mbps|Gbps)" | sed 's/baseT/Mbps/' | sed 's/10000Mbps/10Gbps/' || echo "UP")
-                                
-                                [ -z "$h_label" ] && h_label="Port $i"
-                                full_label="$h_label (P$i)"
-
-                                if [[ "$spd" == *"10G"* ]]; then
-                                    printf "     └─ %b%-12s%b: %bUP%b    %-12s %b(Internal)%b\n" "${YELLOW}" "$full_label" "${RESET}" "${GREEN}" "${RESET}" "$spd" "${CYAN}" "${RESET}"
-                                else
-                                    printf "     └─ %b%-12s%b: %bUP%b    %-12s\n" "${YELLOW}" "$full_label" "${RESET}" "${GREEN}" "${RESET}" "$spd"
-                                fi
-                            fi
-                        done
-                    done
-                    printf "\n %bLegend: %bGreen=UP %bRed=DOWN %bCyan=Internal %bYellow=Chassis Label%b\n" "${BOLD}" "${GREEN}" "${RED}" "${CYAN}" "${YELLOW}" "${RESET}"
-                fi
+                hwnet_collect </dev/null
+                hwnet_render </dev/null
                 ;;
             4)
                 printf " %b%bPage 4 of $total_pages: Wireless Interfaces%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
@@ -1807,9 +2086,26 @@ show_hardware_info() {
                         6g) band="6GHz" ;;
                     esac
 
+                    # 6. Supported standards + Wi-Fi generation (band-aware chip
+                    #    capability). The generation rides the Band line in parens;
+                    #    the 802.11 letters get their own Protocol line below it.
+                    proto="N/A"; wgen=""
+                    if [ -n "$iface" ] && command -v iw >/dev/null 2>&1; then
+                        wphy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null)
+                        if [ -n "$wphy" ]; then
+                            wp=$(wifi_protocol "$wphy" "$band")
+                            proto=${wp%|*}; wgen=${wp#*|}
+                        fi
+                    fi
+
                     printf " %bRadio %d: %s%b\n" "${CYAN}" "$radio_count" "$radio" "${RESET}"
                     printf "   Interface: %b%s%b\n" "${GREEN}" "${iface:-N/A}" "${RESET}"
-                    printf "   Band:      %b%s%b\n" "${GREEN}" "$band" "${RESET}"
+                    if [ -n "$wgen" ]; then
+                        printf "   Band:      %b%s%b  (%s)\n" "${GREEN}" "$band" "${RESET}" "$wgen"
+                    else
+                        printf "   Band:      %b%s%b\n" "${GREEN}" "$band" "${RESET}"
+                    fi
+                    printf "   Protocol:  %b%s%b\n" "${GREEN}" "$proto" "${RESET}"
                     printf "   HT Mode:   %b%s%b\n" "${GREEN}" "${htmode:-N/A}" "${RESET}"
                     printf "   MIMO:      %b%s%b\n" "${GREEN}" "$mimo" "${RESET}"
                     printf "   Channel:   %b%s%b\n" "${GREEN}" "${current_chan:-Auto}" "${RESET}"
@@ -1829,7 +2125,7 @@ show_hardware_info() {
             fi
             i=$((i + 1))
         done
-        printf "  [N] Next   [0] Main menu  "
+        printf "  [N] Next   [0] Main menu   [?] Help  "
         
         if [ "$page" -eq 1 ]; then
             nav_choice=""
@@ -1851,6 +2147,7 @@ show_hardware_info() {
                 fi
                 ;;
             '*') reveal_ids=$((1 - reveal_ids)); clear ;;
+            \?|h|H|❓) show_hardware_help "$page"; clear ;;
             0) return ;;
         esac
     done
@@ -1864,7 +2161,9 @@ show_agh_ui_help() {
     print_centered_header "AdGuardHome UI Updates - Help"
     
     cat << 'HELPEOF'
-What does this setting control?
+AdGuardHome UI Updates - Quick Help
+
+What it does
 ───────────────────────────────
 This option controls whether AdGuardHome is allowed to automatically check for and 
 download new versions of its web interface (UI) directly from the AdGuard servers.
@@ -1959,9 +2258,9 @@ manage_agh_ui_updates() {
             persist_label="Enable update persistence across firmware updates"
         fi
 
-        printf "%s  %s\n" "$N1" "$ui_label"
-        printf "%s  %s\n" "$N2" "$persist_label"
-        printf "%s  Back\n" "$N0"
+        printf "%s%s%s\n" "$N1" "$NSEP" "$ui_label"
+        printf "%s%s%s\n" "$N2" "$NSEP" "$persist_label"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-2/0/?]: "
         read -r agh_choice
@@ -2027,7 +2326,7 @@ show_agh_storage_help() {
     print_centered_header "AdGuardHome Filter Space Limit - Help"
     
     cat << 'HELPEOF'
-AdGuardHome Filter Space Limit – BE3600 & Similar Models
+AdGuardHome Filter Space Limit - Quick Help
 
 Why the limit exists
 ────────────────────
@@ -2094,9 +2393,9 @@ manage_agh_storage() {
             printf "   Filter Space Limit: %bINACTIVE%b\n" "${GREEN}" "${RESET}"
         fi
         
-        printf "\n%s  Remove Filter Space Limitation\n" "$N1"
-        printf "%s  Re-enable Filter Space Limitation\n" "$N2"
-        printf "%s  Back\n" "$N0"
+        printf "\n%s%sRemove Filter Space Limitation\n" "$N1" "$NSEP"
+        printf "%s%sRe-enable Filter Space Limitation\n" "$N2" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-2/0/?]: "
         read -r storage_choice
@@ -2237,7 +2536,9 @@ show_agh_lists_help() {
     print_centered_header "AdGuardHome Lists - Help"
     
     cat << 'HELPEOF'
-What are these lists?
+AdGuardHome Lists - Quick Help
+
+What it does
 ────────────────────────────────────────────────────────────────────────
 This option installs custom DNS filter lists for AdGuardHome to enhance 
 ad blocking and streaming compatibility:
@@ -2480,28 +2781,38 @@ id: $ts"
 # -----------------------------
 
 show_agh_direct_help() {
+    local lan_ip
     clear
-    print_centered_header "Direct Access Help"
-    cat << 'HELPEOF'
+    print_centered_header "AdGuardHome Direct Access - Help"
+    lan_ip=$(get_lan_ip)
+    cat << HELPEOF
 
-1. DIRECT ACCESS:
-   - ON: Access AGH at http://192.168.8.1:3000 bypassing GL.iNet UI.
-   - OFF: Port 3000 redirects to Port 80 (Standard GL.iNet Login).
+AdGuardHome Direct Access - Quick Help
 
-2. WEB UI CREDENTIALS:
-   - Uses 'apache' to generate a secure Bcrypt hash.
-   - This is necessary to prevent open access to your dashboard
-     once you bypass the GL.iNet login gatekeeper.
+What it does
+────────────
+Reach the AdGuardHome dashboard directly, bypassing the GL.iNet admin login.
 
-3. REMOVE PASSWORD:
-   - Sets 'users: []' in the config.yaml. 
-   - Useful if you want the dashboard to be entirely open on LAN.
+  • ON:  the dashboard is served at http://${lan_ip}:3000
+  • OFF: port 3000 redirects to port 80 (the standard GL.iNet login)
 
-NOTES:
-I.  BACKUPS: Automatically creates .backup.YYYYMMDDHHMMSS for
-    both the /etc/init.d script and the config.yaml.
-II. PERSISTENCE: GL.iNet firmware updates will overwrite the
-    init script. Simply run Option 1 again to restore access.
+Web UI credentials
+──────────────────
+Bypassing the GL.iNet login removes its protection, so a username and password
+are set on AdGuardHome itself (a secure bcrypt hash). Set these before leaving
+Direct Access on, or the dashboard is open to anyone on your LAN.
+
+Remove password
+───────────────
+Clears the AdGuardHome credentials, leaving the dashboard fully open on the LAN.
+Use only if you want no login at all.
+
+Notes
+─────
+  • Backups: a timestamped copy of the init script and config.yaml is saved
+    before each change (.backup.YYYYMMDDHHMMSS).
+  • Persistence: a firmware update overwrites the init script - re-enable
+    Direct Access afterwards to restore it.
 
 HELPEOF
     press_any_key
@@ -2622,10 +2933,10 @@ manage_agh_direct_access() {
         printf "   Web UI Username / Password Set: %b\n\n" "$pass_disp"
         local direct_label="Enable Direct Access (Switch to Standalone)"
         [ "$DIRECT_STATUS" = "✅" ] && direct_label="Disable Direct Access (Switch to Integrated)"
-        printf "%s  %s\n" "$N1" "$direct_label"
-        printf "%s  Add/Update Web UI Credentials (Username/Password)\n" "$N2"
-        printf "%s  Remove Web UI Password (Set to Open Access)\n" "$N3"
-        printf "%s  Back\n" "$N0"
+        printf "%s%s%s\n" "$N1" "$NSEP" "$direct_label"
+        printf "%s%sAdd/Update Web UI Credentials (Username/Password)\n" "$N2" "$NSEP"
+        printf "%s%sRemove Web UI Password (Set to Open Access)\n" "$N3" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         
         printf "\nChoose [1-3/0/?]: "
@@ -2737,6 +3048,15 @@ show_agh_help() {
     clear
     print_centered_header "AdGuardHome Hub - Help"
     cat << 'HELPEOF'
+AdGuardHome Control Center - Quick Help
+
+What it does
+────────────
+The hub for AdGuardHome (the router's DNS ad-blocker): control the service,
+manage filter lists, run backups, and reach the dashboard.
+
+What each item does
+───────────────────
 SERVICE: Start, restart or stop the AdGuardHome daemon. Listed first because
    it is the most-used control and answers the STATUS line above the menu.
 
@@ -2805,7 +3125,7 @@ create_agh_backup() {
                 fi
 
                 printf "\n"
-                print_info "Creating Selected Backups..."
+                print_info "Creating Selected Backups"
                 # Atomic Save Logic
                 [ "$b_cfg" = "Y" ] && [ -f "$AGH_CONFIG" ] && cp "$AGH_CONFIG" "$AGH_CONFIG.backup.$ts"
                 [ "$b_bin" = "Y" ] && [ -f "/usr/bin/AdGuardHome" ] && cp "/usr/bin/AdGuardHome" "/usr/bin/AdGuardHome.backup.$ts"
@@ -2929,7 +3249,7 @@ delete_agh_backups() {
         clear
         print_centered_header "AdGuardHome Backup Cleanup"
         printf " %-3s  %-4s  %-18s  %s  %s   %s  %s\n" "Sel" "Idx" "Date / Time" "Conf" "Bin" "Init" "Size"
-        printf " ───────────────────────────────────────────────────────\n"
+        printf " ────────────────────────────────────────────────────────────\n"
 
         while IFS='|' read -r idx ts sel; do
             local p_date="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:8:2}:${ts:10:2}"
@@ -2959,7 +3279,7 @@ delete_agh_backups() {
             printf " %s  %-4s  %-18s  %s  %s   %s  %-6s\n" "$s_box" "$idx." "$p_date" "$c" "$b" "$n" "$p_size"
         done < "$map_file"
 
-        printf " ──────────────────────────────────────────────────────────────\n"
+        printf " ────────────────────────────────────────────────────────────\n"
         printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel\n"
         bk_count=$(wc -l < "$map_file" 2>/dev/null | tr -dc '0-9')
         printf "\n Choose [%s/A/N/C/0]: " "$(picker_range "$bk_count")"
@@ -3012,16 +3332,18 @@ show_agh_setup_help() {
     print_centered_header "AdGuardHome Setup & Access - Help"
 
     cat << 'HELPEOF'
-What is this?
-─────────────
-Configuration for how AdGuardHome stores its filter data, how its Web UI is
-reached, and whether it is allowed to update its own UI. Each item opens its
-own screen with full details and its own help.
+AdGuardHome Setup, Access & UI Updates - Quick Help
 
-Getting around (the same keys work on every screen):
-• Type the number shown beside an item and press Enter to open it.
-• [0] returns to the previous menu.
-• [?] shows the help for the screen you are on.
+What it does
+────────────
+Groups the AdGuardHome settings that aren't day-to-day filtering:
+
+  • Storage / filter-space limit - how much room its filter data may use
+  • Direct Access & Web UI login - reach the dashboard directly, with its own
+    username and password
+  • UI Updates - whether AdGuardHome may update its own web interface
+
+Each item opens its own screen with full details and its own help.
 HELPEOF
 
     press_any_key
@@ -3031,10 +3353,10 @@ sub_setup_config() {
     while true; do
         clear
         print_centered_header "AdGuardHome Setup, Access & UI Updates"
-        printf "%s  Filter Storage Space Limit\n" "$N1"
-        printf "%s  UI Direct Access\n" "$N2"
-        printf "%s  UI Updates\n" "$N3"
-        printf "%s  Back\n" "$N0"
+        printf "%s%sFilter Storage Space Limit\n" "$N1" "$NSEP"
+        printf "%s%sUI Direct Access\n" "$N2" "$NSEP"
+        printf "%s%sUI Updates\n" "$N3" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-3/0/?]: "
         read -r s_opt
@@ -3054,16 +3376,23 @@ show_agh_backup_help() {
     print_centered_header "AdGuardHome Backup & Recovery - Help"
 
     cat << 'HELPEOF'
-What is this?
-─────────────
-Create, restore and manage backups of your AdGuardHome configuration, binary
-and startup script. Backups are timestamped, so you can keep several and roll
-back to any of them if a change goes wrong.
+AdGuardHome Backup & Recovery - Quick Help
 
-Getting around:
-• Type the number shown beside an item and press Enter to open it.
-• [0] returns to the previous menu.
-• [?] shows this help.
+What it does
+────────────
+Create, restore and manage backups of your AdGuardHome setup.
+
+What a backup contains
+──────────────────────
+The configuration (config.yaml), the AdGuardHome binary, and the startup
+script - enough to restore a working install.
+
+Notes
+─────
+  • Backups are timestamped, so you can keep several and roll back to any one
+    if a change goes wrong.
+  • A firmware update can replace the binary and script; restore a backup to
+    recover.
 HELPEOF
 
     press_any_key
@@ -3079,10 +3408,10 @@ sub_backup_recovery() {
         printf " ${CYAN}STORAGE STATUS${RESET}\n"
         printf "   Used: %s  ·  Free: %s\n" "${bk_total_u:-0B}" "${qlog_f:-N/A}"
         printf " ────────────────────────────────────────────────\n\n"
-        printf "%s  Save a New Backup\n" "$N1"
-        printf "%s  Restore from Backup\n" "$N2"
-        printf "%s  Manage/Delete Backups\n" "$N3"
-        printf "%s  Back\n" "$N0"
+        printf "%s%sSave a New Backup\n" "$N1" "$NSEP"
+        printf "%s%sRestore from Backup\n" "$N2" "$NSEP"
+        printf "%s%sManage/Delete Backups\n" "$N3" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-3/0/?]: "
         read -r b_opt
@@ -3102,16 +3431,21 @@ show_agh_service_help() {
     print_centered_header "AdGuardHome Logs & Maintenance - Help"
 
     cat << 'HELPEOF'
-What is this?
-─────────────
-Watch AdGuardHome's live logs and clear its cached filter files. Use this
-screen for diagnostics or after changing filter lists. Starting, stopping and
-restarting the service is the first item on the Control Center.
+AdGuardHome Logs & Maintenance - Quick Help
 
-Getting around:
-• Type the number shown beside an item and press Enter to open it.
-• [0] returns to the previous menu.
-• [?] shows this help.
+What it does
+────────────
+Diagnostics for AdGuardHome: watch its live logs and clear its cached filter
+files.
+
+When to use
+───────────
+  • Live logs - to see what AdGuardHome is doing (queries, blocks, errors),
+    e.g. after changing filter lists.
+  • Clear cache - to force it to re-fetch filter data if a list looks stale.
+
+Note: starting, stopping and restarting the service is on the Control Center,
+not here.
 HELPEOF
 
     press_any_key
@@ -3121,9 +3455,9 @@ sub_service_health() {
     while true; do
         clear
         print_centered_header "AdGuardHome Logs & Maintenance"
-        printf "%s  Watch Live Logs\n" "$N1"
-        printf "%s  Clear Filter Cache\n" "$N2"
-        printf "%s  Back\n" "$N0"
+        printf "%s%sWatch Live Logs\n" "$N1" "$NSEP"
+        printf "%s%sClear Filter Cache\n" "$N2" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-2/0/?]: "
         read -r h_opt
@@ -3133,7 +3467,7 @@ sub_service_health() {
                clear
                print_centered_header "AdGuardHome System Logs (Ctrl+C to exit)"
                sleep 1
-               trap 'printf "\n\n"; print_warning "Stopping log viewing..."' INT
+               trap 'printf "\n\n"; print_warning "Stopping log viewing"' INT
                logread -l 20 -e "AdGuardHome" 2>/dev/null
                logread -f -e "AdGuardHome" 2>/dev/null
                trap - INT
@@ -3180,7 +3514,7 @@ sub_confirm_factory_reset() {
 
     if [ "$was_running" -eq 1 ]; then
         printf "\n"
-        print_info "AdGuardHome is currently running. Stopping service..."
+        print_info "AdGuardHome is currently running. Stopping service"
         [ -f "$L_INIT" ] && $L_INIT stop >/dev/null 2>&1; sleep 1
         sleep 1
         if is_agh_running; then
@@ -3224,14 +3558,14 @@ sub_confirm_factory_reset() {
         
         # Handle operational state (Running)
         if [ "$was_running" -eq 1 ]; then
-            print_info "Automatically restarting service..."
+            print_info "Automatically restarting service"
             $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service restored to running state."
         elif [ "$was_uci_enabled" -eq 1 ]; then
             print_warning "AdGuardHome is enabled but not running."
             printf "Start the service? [y/N]: "; read -r confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 printf "\n"
-                print_info "Starting AdGuardHome..."
+                print_info "Starting AdGuardHome"
                 printf "\n"
                 $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service started successfully."
             fi
@@ -3312,13 +3646,13 @@ agh_control_center() {
         printf " ────────────────────────────────────────────────\n\n"
         local svc_label="Start AdGuardHome"
         is_agh_running && svc_label="Restart / Stop AdGuardHome"
-        printf "%s  %s\n" "$N1" "$svc_label"
-        printf "%s  Manage Allow/Blocklists\n" "$N2"
-        printf "%s  Setup, Access & UI Updates\n" "$N3"
-        printf "%s  Backup & Recovery Suite\n" "$N4"
-        printf "%s  Logs & Maintenance\n" "$N5"
+        printf "%s%s%s\n" "$N1" "$NSEP" "$svc_label"
+        printf "%s%sManage Allow/Blocklists\n" "$N2" "$NSEP"
+        printf "%s%sSetup, Access & UI Updates\n" "$N3" "$NSEP"
+        printf "%s%sBackup & Recovery Suite\n" "$N4" "$NSEP"
+        printf "%s%sLogs & Maintenance\n" "$N5" "$NSEP"
         printf "%s Reset to Factory Settings (Start Over)\n" "$NCL"
-        printf "%s  Main menu\n" "$N0"
+        printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-5/CL/0/?]: "
         read -r choice
@@ -3429,11 +3763,11 @@ manage_zram() {
         
         local zram_persist_label="Enable Persistence"
         [ "$zram_persisting" -eq 1 ] && zram_persist_label="Disable Persistence"
-        printf "%s  Install and Enable\n" "$N1"
-        printf "%s  Disable\n" "$N2"
-        printf "%s  %s\n" "$N3" "$zram_persist_label"
-        printf "%s  Uninstall Package\n" "$N4"
-        printf "%s  Back\n" "$N0"
+        printf "%s%sInstall and Enable\n" "$N1" "$NSEP"
+        printf "%s%sDisable\n" "$N2" "$NSEP"
+        printf "%s%s%s\n" "$N3" "$NSEP" "$zram_persist_label"
+        printf "%s%sUninstall Package\n" "$N4" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-4/0/?]: "
         read -r zram_choice
@@ -3802,17 +4136,17 @@ manage_fan_settings() {
 
         if [ "$has_fan" = "false" ]; then
             print_warning "Fan settings are disabled on fanless hardware.\033[K"
-            printf "%s  Back\033[K\n" "$N0"
+            printf "%s%sBack\033[K\n" "$N0" "$NSEP"
             printf "\nChoose [0/?]: \033[K"
         else
-            printf "%s  Set Static Fan Speed (0-100%%)\033[K\n" "$N1"
-            printf "%s  Enable Dynamic Fan Control\033[K\n" "$N2"
-            printf "%s  Set Minimum Setpoint\033[K\n" "$N3"
-            printf "%s  Set Fan-On Setpoint\033[K\n" "$N4"
-            printf "%s  Set Warning Setpoint\033[K\n" "$N5"
-            printf "%s  Set Maximum Setpoint\033[K\n" "$N6"
-            printf "%s  Reset to Factory Defaults\033[K\n" "$N7"
-            printf "%s  Back\033[K\n" "$N0"
+            printf "%s%sSet Static Fan Speed (0-100%%)\033[K\n" "$N1" "$NSEP"
+            printf "%s%sEnable Dynamic Fan Control\033[K\n" "$N2" "$NSEP"
+            printf "%s%sSet Minimum Setpoint\033[K\n" "$N3" "$NSEP"
+            printf "%s%sSet Fan-On Setpoint\033[K\n" "$N4" "$NSEP"
+            printf "%s%sSet Warning Setpoint\033[K\n" "$N5" "$NSEP"
+            printf "%s%sSet Maximum Setpoint\033[K\n" "$N6" "$NSEP"
+            printf "%s%sReset to Factory Defaults\033[K\n" "$N7" "$NSEP"
+            printf "%s%sBack\033[K\n" "$N0" "$NSEP"
             printf "%s Help\033[K\n" "$NQ"
             printf "\nChoose [1-7/0/?]: \033[K"
         fi
@@ -3829,7 +4163,7 @@ manage_fan_settings() {
             if [ "$has_fan" = "false" ]; then
                 case "$current_choice" in
                     0) return ;;
-                    \?|h|H|help|HELP) show_fan_help; continue ;;
+                    \?|h|H|❓) show_fan_help; continue ;;
                     *) continue ;;
                 esac
             fi
@@ -3919,7 +4253,7 @@ manage_fan_settings() {
                     fi
                     press_any_key; clear ;;
                 7)
-                    print_warning "Restoring to Factory Defaults..."
+                    print_warning "Restoring to Factory Defaults"
                     reset_to_factory
                     printf "\n"
                     print_success "Factory defaults restored."
@@ -4100,7 +4434,7 @@ manage_guest_limiter() {
 
         if [ "$g60" = "0" ] && [ "$g50" = "0" ] && [ "$g24" = "0" ] && [ "$mlo" = "0" ]; then
             printf "\n"
-            print_error "No wireless interfaces found. Exiting..."
+            print_error "No wireless interfaces found. Exiting"
             press_any_key
             return
         fi
@@ -4156,7 +4490,7 @@ manage_guest_limiter() {
         printf " %b\n" "${CYAN}CONFIGURATION STATUS${RESET}"
         printf "   Download Limit:     %b\n" "$dl_status"
         printf "   Upload Limit:       %b\n" "$ul_status"
-        printf "   Guest → GL Web UI: %b\n" "$admin_access" 
+        printf "   Guest → GL Web UI:  %b\n" "$admin_access" 
         printf "   HW Acceleration:    %b %b\n" "$hw_status" "$hw_message"
         printf "   Persistence:        %b\n" "$persist_status"
         printf "\n"
@@ -4166,14 +4500,17 @@ manage_guest_limiter() {
         [ "$admin_access" = "${GREEN}ENABLED${RESET}" ] && g_admin_label="Disable Guest Network to Web UI access"
         local g_hw_label="Enable HW Acceleration"
         case "$hw_status" in *ENABLED*) g_hw_label="Disable HW Acceleration" ;; esac
-        printf " %s  Set Download Limit (Mbps) - 0 to disable\n" "$N1"
-        printf " %s  Set Upload Limit   (Mbps) - 0 to disable\n" "$N2"
-        printf " %s  %s\n" "$N3" "$g_admin_label"
-        printf " %s  %s\n" "$N4" "$g_hw_label"
-        printf " %s  %s\n" "$N5" "$g_persist_label"
-        printf " %s  Reset to Defaults (Clean Uninstall)\n" "$N6"
-        printf " %s  Back\n" "$N0"
-        printf " %s Help\n" "$NQ"
+        printf " %s%sSet Download Limit (Mbps) - 0 to disable\n" "$N1" "$NSEP"
+        printf " %s%sSet Upload Limit   (Mbps) - 0 to disable\n" "$N2" "$NSEP"
+        printf " %s%s%s\n" "$N3" "$NSEP" "$g_admin_label"
+        printf " %s%s%s\n" "$N4" "$NSEP" "$g_hw_label"
+        printf " %s%s%s\n" "$N5" "$NSEP" "$g_persist_label"
+        printf " %s%sReset to Defaults (Clean Uninstall)\n" "$N6" "$NSEP"
+        printf " %s%sBack\n" "$N0" "$NSEP"
+        # Two spaces after the glyph like every other row. $NQ carries a trailing
+        # space on some profiles and not others, so strip it first (${NQ% }) -
+        # otherwise "Help" lands a column short on the profiles without it.
+        printf " %s  Help\n" "${NQ% }"
 
         printf "\n Choose [1-6/0/?]: "; read -r choice
 
@@ -4247,11 +4584,11 @@ manage_guest_limiter() {
                 printf "\n"
                 local hw_state_raw=$(get_hw_accel_info)
                 if echo "$hw_state_raw" | grep -q "ENABLED"; then
-                    print_info "Disabling HW Acceleration..."
+                    print_info "Disabling HW Acceleration"
                     set_hw_accel 0 >/dev/null 2>&1
                     [ -x /etc/init.d/guest_limiter ] && /etc/init.d/guest_limiter restart >/dev/null 2>&1
                 elif echo "$hw_state_raw" | grep -q "DISABLED"; then
-                    print_info "Enabling HW Acceleration..."
+                    print_info "Enabling HW Acceleration"
                     if set_hw_accel 1 >/dev/null 2>&1; then
                         [ -x /etc/init.d/guest_limiter ] && /etc/init.d/guest_limiter stop && /etc/init.d/guest_limiter disable
                     else
@@ -4290,7 +4627,7 @@ manage_guest_limiter() {
                     continue
                 fi
                 printf "\n"
-                print_info "Restoring to factory settings..."
+                print_info "Restoring to factory settings"
                 printf "\n"
                 
                 # 1. Stop the service 
@@ -4782,7 +5119,7 @@ manage_web_terminal() {
         
         TARGET_GZ=$(ls /www/js/app.*.js.gz | head -n 1)
         if [ -z "$TARGET_GZ" ]; then
-            print_error "Cannot find target JS file for patching. Exiting..."
+            print_error "Cannot find target JS file for patching. Exiting"
             press_any_key
             return
         fi
@@ -4819,10 +5156,10 @@ manage_web_terminal() {
             printf "   Direct URL:     %b\n\n" "${GREY}(service not running)${RESET}"
         fi
         
-        printf "%s  Enable Web-UI Terminal\n" "$N1"
-        printf "%s  Disable Web-UI Terminal\n" "$N2"
-        printf "%s  Completely Uninstall\n" "$N3"
-        printf "%s  Back\n" "$N0"
+        printf "%s%sEnable Web-UI Terminal\n" "$N1" "$NSEP"
+        printf "%s%sDisable Web-UI Terminal\n" "$N2" "$NSEP"
+        printf "%s%sCompletely Uninstall\n" "$N3" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-3/0/?]: "
         read -r term_choice
@@ -4839,14 +5176,14 @@ manage_web_terminal() {
                          continue
                     else
                          grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_proto="https"
-                         print_warning "Web-UI Terminal service is running but UI is not patched. Re-patching..."
+                         print_warning "Web-UI Terminal service is running but UI is not patched. Re-patching"
                     fi
                 else
                     if ! command -v ttyd >/dev/null 2>&1; then
                         install_package ttyd
                     fi
 
-                    print_info "Configuring ttyd service..."
+                    print_info "Configuring ttyd service"
                     printf "\n"
 
                     # Detect HTTPS mode and prompt for connection mode
@@ -4865,7 +5202,7 @@ manage_web_terminal() {
                     # Generate cert if HTTPS chosen
                     if [ "$ttyd_proto" = "https" ]; then
                         if [ ! -f /etc/ttyd.crt ] || [ ! -f /etc/ttyd.key ]; then
-                            print_info "Generating self-signed certificate for ttyd..."
+                            print_info "Generating self-signed certificate for ttyd"
                             printf "\n"
                             openssl req -x509 -nodes -newkey rsa:2048 \
                                 -keyout /etc/ttyd.key \
@@ -4933,7 +5270,7 @@ UCIEOF
                 fi
                
                 # UI Injection 
-                print_info "Patching Web-UI..."
+                print_info "Patching Web-UI"
                 printf "\n"
                 _inject_terminal_into "$TARGET_GZ" "$ttyd_proto" 1
                 print_success "Web-UI Terminal Installed. \n   Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser to see the changes."
@@ -4941,14 +5278,14 @@ UCIEOF
                 ;;
 
             2)
-                print_info "Disabling Web Terminal..."
+                print_info "Disabling Web Terminal"
                 printf "\n"
                 
                 # Only attempt to stop/disable if the service script exists
                 
                 if [ -f "/etc/init.d/ttyd" ]; then
                     if pgrep ttyd >/dev/null; then
-                        print_info "Stopping ttyd service..."
+                        print_info "Stopping ttyd service"
                         printf "\n"
                         /etc/init.d/ttyd stop 2>/dev/null
                         /etc/init.d/ttyd disable 2>/dev/null
@@ -4989,13 +5326,13 @@ UCIEOF
                 ;;
 
             3)
-                print_warning "Completely Uninstalling ttyd..."
+                print_warning "Completely Uninstalling ttyd"
                 printf "\n"
                 
                 # Stop service before removal if it exists
                 if command -v ttyd >/dev/null 2>&1 || [ -f "/etc/init.d/ttyd" ]; then
                     if pgrep ttyd >/dev/null; then
-                        print_info "Stopping ttyd service..."
+                        print_info "Stopping ttyd service"
                         printf "\n"
                         /etc/init.d/ttyd stop 2>/dev/null
                         killall ttyd >/dev/null 2>&1
@@ -5008,7 +5345,7 @@ UCIEOF
                     pkg_remove ttyd >/dev/null 2>&1
                     rm -f /etc/config/ttyd
                     if [ -f /etc/ttyd.crt ] || [ -f /etc/ttyd.key ]; then
-                        print_info "Removing ttyd SSL certificates..."
+                        print_info "Removing ttyd SSL certificates"
                         printf "\n"
                         rm -f /etc/ttyd.crt /etc/ttyd.key
                         print_success "SSL certificates removed."
@@ -5383,10 +5720,10 @@ manage_ssh_keys() {
 
         local ssh_persist_label="Enable Persistence"
         [ "$persistence" = "${GREEN}ENABLED${RESET}" ] && ssh_persist_label="Disable Persistence"
-        printf "%s  Add a New SSH Key\n" "$N1"
-        printf "%s  Manage / Delete Keys\n" "$N2"
-        printf "%s  %s\n" "$N3" "$ssh_persist_label"
-        printf "%s  Back\n" "$N0"
+        printf "%s%sAdd a New SSH Key\n" "$N1" "$NSEP"
+        printf "%s%sManage / Delete Keys\n" "$N2" "$NSEP"
+        printf "%s%s%s\n" "$N3" "$NSEP" "$ssh_persist_label"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         
         printf "\nChoose [1-3/0/?]: "
@@ -5627,7 +5964,7 @@ check_install_prompt() {
     [ "$INSTALL_PROMPTED" -eq 1 ] && return
 
     print_info "Installing to $INSTALL_PATH lets you run this program from anywhere as a system command."
-    printf "   Install as a system command? [Y/n]: "
+    printf "Install as a system command? [Y/n]: "
     read -r ip_ans
     printf "\n"
     case "$ip_ans" in
@@ -5644,7 +5981,7 @@ check_install_prompt() {
 
 do_install_to_sbin() {
     local persist_ans
-    print_action "Installing to $INSTALL_PATH..."
+    print_action "Installing to $INSTALL_PATH"
     if ! cp "$SCRIPT_PATH" "$INSTALL_PATH" || ! chmod +x "$INSTALL_PATH"; then
         print_error "Install failed. Check write permissions on /usr/sbin."
         press_any_key
@@ -5663,7 +6000,7 @@ do_install_to_sbin() {
     fi
 
     printf "\n"
-    print_action "Switching to installed copy..."
+    print_action "Switching to installed copy"
     sleep 2
     exec "$INSTALL_PATH" "$@"
 }
@@ -5789,7 +6126,12 @@ manage_display_settings() {
                     *)       detected_desc="macOS/Linux Terminal → Full mode" ;;
                 esac
                 ;;
-            *) detected_desc="Compatible terminal → Compatible mode" ;;
+            *)
+                case "$_TERM_PROFILE" in
+                    putty) detected_desc="PuTTY / xterm → Compatible (colour glyphs)" ;;
+                    *)     detected_desc="Basic terminal → Compatible mode" ;;
+                esac
+                ;;
         esac
 
         _display_settings_screen "$page_num" "$detected_desc"
@@ -5918,11 +6260,11 @@ manage_toolkit() {
         printf "   Version:      %b\n"   "${GREEN}${local_ver}${RESET}"
         printf "   Update:       %b\n\n" "$update_display"
 
-        printf "%s  %s\n" "$N1" "$install_label"
-        printf "%s  %s\n" "$N2" "$persist_label"
-        printf "%s  Display Settings\n"          "$N3"
-        printf "%s  %s\n"                        "$N4" "$update_label"
-        printf "%s  Back\n"                      "$N0"
+        printf "%s%s%s\n" "$N1" "$NSEP" "$install_label"
+        printf "%s%s%s\n" "$N2" "$NSEP" "$persist_label"
+        printf "%s%sDisplay Settings\n"          "$N3" "$NSEP"
+        printf "%s%s%s\n"                        "$N4" "$NSEP" "$update_label"
+        printf "%s%sBack\n"                      "$N0" "$NSEP"
         printf "%s Help\n"                       "$NQ"
         printf "\nChoose [1-4/0/?]: "
         read -r tk_choice
@@ -6195,6 +6537,19 @@ mtu_v_store() { # iface value kind(public|tunnel) target base-underlay-mtu
     uci commit glutils
 }
 
+# Forget any stored probe result so the status drops back to Calculated. Used when
+# a fresh probe comes back inconclusive (frag/noreply): a prior "Verified" badge
+# would otherwise linger even though the path can no longer confirm it - which is
+# itself a change in VPN behaviour the status should reflect.
+mtu_v_clear() {
+    uci -q delete "glutils.vpn_$1.mtu_probe"        2>/dev/null
+    uci -q delete "glutils.vpn_$1.mtu_probe_kind"   2>/dev/null
+    uci -q delete "glutils.vpn_$1.mtu_probe_target" 2>/dev/null
+    uci -q delete "glutils.vpn_$1.mtu_probe_base"   2>/dev/null
+    uci -q delete "glutils.vpn_$1.mtu_probe_date"   2>/dev/null
+    uci -q commit glutils 2>/dev/null
+}
+
 # iface current-underlay-mtu current-endpoint ->
 #   "OK|value|kind|target|date"     fresh - outranks the calculation
 #   "STALE|value|kind|target|date"  link or endpoint changed since the probe
@@ -6228,10 +6583,10 @@ mtu_probe_render() {
     outcome="$7"; vinfo="$8"; basis_was="$9"
     printf " %bTest result%b\n" "$CYAN" "$RESET"
     printf "   %-18s %b%s%b\n" "Current MTU:" "$GREEN" "${cur:-N/A}" "$RESET"
-    printf "   %-18s %b%s%b\n" "Old Recommended:" "$GREEN" "${old_rec:-N/A}" "$RESET"
+    printf "   %-18s %b%s%b\n" "Calculated MTU:" "$GREEN" "${old_rec:-N/A}" "$RESET"
     case "$outcome" in
-        confirm|revise) printf "   %-18s %b%s%b\n" "New Recommended:" "$GREEN" "$new_rec" "$RESET" ;;
-        *)              printf "   %-18s %bno new recommendation%b\n" "New Recommended:" "$GREY" "$RESET" ;;
+        confirm|revise) printf "   %-18s %b%s%b\n" "Verified MTU:" "$GREEN" "$new_rec" "$RESET" ;;
+        *)              printf "   %-18s %bunknown%b\n" "Verified MTU:" "$GREY" "$RESET" ;;
     esac
     # The rows above are a reviewable data block (design-note 1: its own region),
     # so one blank separates them from the verdict + follow-up status lines, which
@@ -6241,18 +6596,35 @@ mtu_probe_render() {
         confirm) if [ -n "$old_rec" ]; then print_success "The probe confirmed the Calculated $new_rec is optimal."
                  else print_success "The probe verified an MTU of $new_rec."; fi ;;
         revise)  print_warning "The probe verified the optimal MTU is $new_rec, not $old_rec." ;;
-        frag)    print_info "DF flag was ignored, causing test packets to exceed the tunnel's max possible size." ;;
-        noreply) print_info "No test packet got a reply, so there is nothing to measure." ;;
+        frag)    print_info "Verification was inconclusive: the DF flag was ignored, so oversized packets slipped through." ;;
+        noreply) print_info "Verification was inconclusive: no reply from the target, so there is nothing to measure." ;;
     esac
     case "$outcome" in
         confirm|revise) applyval="$new_rec"; print_info "Basis is now: $vinfo ($basis_was)." ;;
-        *)              applyval="$old_rec"; print_info "Recommended stays at the Calculated ${old_rec:-N/A}." ;;
+        *)              applyval="$old_rec"; print_info "Falling back to the Calculated ${old_rec:-N/A}; this value was not actively verified." ;;
     esac
     if [ -n "$applyval" ] && [ -n "$cur" ] && [ "$cur" != "$applyval" ]; then
-        print_info "To apply $applyval, choose Optimize a tunnel → $ttype $trole ($tiface)."
+        print_info "To apply $applyval, choose [1] Optimize tunnel."
     elif [ -n "$applyval" ] && [ "$cur" = "$applyval" ] && { [ "$outcome" = confirm ] || [ "$outcome" = revise ]; }; then
         print_info "Current MTU already matches — nothing to change."
     fi
+}
+
+# Binary-search the largest DF-safe packet between 1280..1500. Echoes the best size
+# (0 = no reply). Split out so the search can run under spin_run - a probe takes a
+# few seconds, and the spinner shows it is live rather than frozen.
+mtu_bsearch() {   # pinger hdr target [iface]
+    local pinger="$1" hdr="$2" target="$3" ifc="$4" lo=1280 hi=1500 best=0 mid
+    while [ "$lo" -le "$hi" ]; do
+        mid=$(( (lo + hi) / 2 ))
+        if [ -n "$ifc" ]; then
+            "$pinger" -M do -s $((mid - hdr)) -c1 -W1 -I "$ifc" "$target" >/dev/null 2>&1
+        else
+            "$pinger" -M do -s $((mid - hdr)) -c1 -W1 "$target" >/dev/null 2>&1
+        fi
+        if [ $? -eq 0 ]; then best=$mid; lo=$((mid + 1)); else hi=$((mid - 1)); fi
+    done
+    echo "$best"
 }
 
 # Active probe. Public endpoint FIRST: a don't-fragment search straight to the
@@ -6324,7 +6696,7 @@ mtu_probe() {
     printf "   reassembled at the receiving end, so it looks like it fit. The probe will\n"
     printf "   detect this and ignore the probed value, keeping the original Calculated\n"
     printf "   value as the Recommended value.\n"
-    printf "\nRun the probe? [y/N]: "; read -r answer; printf "\n"
+    printf "\nRun the probe? [y/N]: "; read -r answer
     case "$answer" in y|Y) ;; *) print_info "Cancelled."; press_any_key; return ;; esac
 
     # Find a don't-fragment-capable pinger. Busybox ping lacks -M do and shadows
@@ -6339,9 +6711,10 @@ mtu_probe() {
         print_warning "Couldn't get a don't-fragment pinger; skipping probe."; press_any_key; return
     fi
 
-    # Old Recommended is always the Calculated value (link MTU - overhead); New
-    # Recommended is what this probe finds. basis_was distinguishes a first
-    # verification from a refresh of an already-verified tunnel.
+    # old_rec (shown as "Calculated MTU") is always the Calculated value (link
+    # MTU - overhead); new_rec (shown as "Verified MTU") is what this probe finds.
+    # basis_was distinguishes a first verification from a refresh of an
+    # already-verified tunnel.
     cur=$(mtu_get "$iface")
     prior=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
     case "$prior" in "OK|"*) basis_was="re-verified today" ;; *) basis_was="was: Calculated" ;; esac
@@ -6352,11 +6725,9 @@ mtu_probe() {
         # sized as IPv4; if it resolves to IPv6 the search still converges and
         # the figure is merely conservative by the 20-byte difference.
         case "$endpoint" in *:*) hdr=48 ;; *) hdr=28 ;; esac
-        printf "\n"; print_action "Probing the connection to $endpoint ..."
-        while [ "$lo" -le "$hi" ]; do
-            mid=$(( (lo + hi) / 2 ))
-            if "$pinger" -M do -s $((mid - hdr)) -c1 -W1 "$endpoint" >/dev/null 2>&1; then best=$mid; lo=$((mid + 1)); else hi=$((mid - 1)); fi
-        done
+        printf "\n"
+        spin_run "Probing the connection to $endpoint" mtu_bsearch "$pinger" "$hdr" "$endpoint"
+        best=$(tr -dc '0-9' < "$SPIN_LOG" 2>/dev/null); [ -z "$best" ] && best=0
         if [ "$best" -gt 0 ]; then
             new_rec=$((best - overhead))
             if [ -n "$computed" ] && [ "$new_rec" -lt "$computed" ] 2>/dev/null; then outcome=revise; else outcome=confirm; fi
@@ -6369,6 +6740,7 @@ mtu_probe() {
         printf "\n"
         print_warning "No reply from the public endpoint (it may drop ICMP)."
         if [ -z "$peer_ip" ]; then
+            mtu_v_clear "$iface"   # inconclusive: drop any stale Verified -> Basis returns to Calculated
             print_info "No tunnel peer available to fall back to - probe inconclusive."
             press_any_key; return
         fi
@@ -6378,12 +6750,10 @@ mtu_probe() {
 
     # ---- Phase 2: through the tunnel to the internal peer -------------------
     orig=$(mtu_get "$iface")
-    printf "\n"; print_action "Probing through the tunnel to $peer_ip ..."
+    printf "\n"
     [ "${orig:-0}" -lt 1500 ] && ip link set "$iface" mtu 1500 2>/dev/null
-    while [ "$lo" -le "$hi" ]; do
-        mid=$(( (lo + hi) / 2 ))
-        if "$pinger" -M do -s $((mid - 28)) -c1 -W1 -I "$iface" "$peer_ip" >/dev/null 2>&1; then best=$mid; lo=$((mid + 1)); else hi=$((mid - 1)); fi
-    done
+    spin_run "Probing through the tunnel to $peer_ip" mtu_bsearch "$pinger" 28 "$peer_ip" "$iface"
+    best=$(tr -dc '0-9' < "$SPIN_LOG" 2>/dev/null); [ -z "$best" ] && best=0
     [ -n "$orig" ] && ip link set "$iface" mtu "$orig" 2>/dev/null
     printf "\n"
     if [ "$best" -eq 0 ]; then
@@ -6399,6 +6769,8 @@ mtu_probe() {
         confirm|revise)
             mtu_v_store "$iface" "$best" tunnel "$peer_ip" "${underlay_mtu:-}"
             vinfo="Verified $(date '+%Y-%m-%d') - tunnel probe to $peer_ip" ;;
+        frag|noreply)
+            mtu_v_clear "$iface" ;;   # inconclusive: drop any stale Verified -> Basis returns to Calculated
     esac
     mtu_probe_render "$type" "$role" "$iface" "$cur" "$computed" "$new_rec" "$outcome" "$vinfo" "$basis_was"
     press_any_key
@@ -6430,203 +6802,121 @@ mtu_reset() {
     fi
 }
 
-# Would this action actually change anything? Design notes item 5 — check before
-# you ask, and warn-and-explain when already satisfied, rather than walking the
-# user through a target selection that lands on a no-op. Returns 0 if at least
-# one tunnel in $2 would change.
-mtu_actionable() {
-    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur sec v
-    pick="$1"; tf="$2"
-    type=""; role=""; iface=""; endpoint=""; overhead=""; family=""
-    underlay=""; underlay_mtu=""; rec=""; cur=""; sec=""
-    while IFS='|' read -r type role iface endpoint overhead family; do
-        [ -z "$iface" ] && continue
-        if [ "$pick" = 4 ]; then
-            sec=$(mtu_gl_targets "$iface" "$type" | head -1)
-            [ -n "$sec" ] && uci -q get "$sec.mtu" >/dev/null 2>&1 && return 0
-        else
-            underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
-            [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
-            underlay_mtu=$(mtu_get "$underlay")
-            [ -z "$underlay_mtu" ] && continue
-            rec=$((underlay_mtu - overhead))
-            v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
-            case "$v" in "OK|"*) rec=$(printf '%s' "$v" | cut -d'|' -f2) ;; esac
-            cur=$(mtu_get "$iface")
-            [ "$cur" != "$rec" ] && return 0
-        fi
-    done < "$tf"
-    return 1
-}
 
-# Apply Optimize (pick 1) or Reset (pick 4) to every detected tunnel in $2 (the
-# detect file). Each tunnel gets its own computed value / its own reset, with a
-# running per-tunnel summary.
-mtu_batch() {
-    local pick tf type role iface endpoint overhead family underlay underlay_mtu rec cur answer v
-    pick="$1"; tf="$2"
-    type=""; role=""; iface=""; endpoint=""; overhead=""; family=""
-    underlay=""; underlay_mtu=""; rec=""; cur=""; answer=""
-    case "$pick" in 1|4) ;; *) return ;; esac
-    # Optimize puts every tunnel into its ideal, reversible state — the named
-    # action is the decision, so it doesn't ask. Reset discards a value the user
-    # set, so it does (design notes item 8).
-    if [ "$pick" = 4 ]; then
-        printf "Remove the toolkit's MTU override on all tunnels? [y/N]: "; read -r answer; printf "\n"
-        case "$answer" in y|Y) ;; *) print_info "No change."; press_any_key; return ;; esac
-    fi
-    while IFS='|' read -r type role iface endpoint overhead family; do
-        [ -z "$iface" ] && continue
-        if [ "$pick" = 4 ]; then
-            mtu_reset "$iface" "$type"
-        else
-            underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
-            [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
-            underlay_mtu=$(mtu_get "$underlay")
-            [ -n "$underlay_mtu" ] && rec=$((underlay_mtu - overhead)) || rec=""
-            v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
-            case "$v" in "OK|"*) rec=$(printf '%s' "$v" | cut -d'|' -f2) ;; esac
-            cur=$(mtu_get "$iface")
-            if [ -z "$rec" ]; then print_warning "$iface: underlay unresolved — skipped."
-            elif [ "$cur" = "$rec" ]; then print_info "$iface: already at recommended $rec."
-            else mtu_apply "$iface" "$rec" "$type"; fi
-        fi
-    done < "$tf"
-    press_any_key
-}
-
+# Paginated per-tunnel MTU screen, matching Remote LAN Access: one tunnel per page,
+# [P]/[N] to move between them, and the four actions apply to the tunnel on screen -
+# no "which tunnel?" picker, no all-tunnels batch. After any action the loop
+# re-detects and re-renders, so an applied MTU or a freshly cleared Basis shows at
+# once. Uses literal [n]/[P]/[N] brackets like RLA so the two screens read alike.
 manage_mtu() {
-    local tf count pick sel line oldifs type role iface endpoint overhead family cur underlay underlay_mtu rec rec_display source_label sec answer val idx token action allow_all v vline vkind vtgt vdate
-    tf="/tmp/.gl-mtu.$$"
+    local tf count pg pv nx line oldifs type role iface endpoint overhead family
+    local cur underlay underlay_mtu rec rec_display source_label sec vline vplain v vkind vtgt vdate
+    local _st stcol _idp _navp _w pick val answer hr
+    tf="/tmp/.gl-mtu.$$"; pg=1
     while true; do
-        clear
-        print_centered_header "VPN MTU Optimizer"
-        printf "\n"
         mtu_detect > "$tf"
         if [ ! -s "$tf" ]; then
+            clear; print_centered_header "VPN MTU Optimizer"; printf "\n"
             print_warning "No active WireGuard or OpenVPN tunnels found."
             printf "\n"; rm -f "$tf"; press_any_key; return
         fi
-        # STATUS blocks (read-only, coloured headers, no selection numbers).
-        while IFS='|' read -r type role iface endpoint overhead family; do
-            cur=$(mtu_get "$iface")
-            underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
-            [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
-            underlay_mtu=$(mtu_get "$underlay")
-            if [ -n "$underlay_mtu" ]; then rec=$((underlay_mtu - overhead)); else rec=""; fi
-            # A fresh probe-verified value outranks the calculation - it measured
-            # the actual path. mtu_v_get reports STALE when the link or endpoint
-            # changed since the probe, and the display drops back to calculated.
-            vline=""; v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
-            case "$v" in
-                "OK|"*)
-                    rec=$(printf '%s' "$v" | cut -d'|' -f2)
-                    vkind=$(printf '%s' "$v" | cut -d'|' -f3)
-                    vtgt=$(printf '%s' "$v" | cut -d'|' -f4)
-                    vdate=$(printf '%s' "$v" | cut -d'|' -f5)
-                    vline="${GREEN}Verified ${vdate} - ${vkind} probe to ${vtgt}${RESET}" ;;
-                "STALE|"*)
-                    vline="${YELLOW}Calculated - earlier probe is stale (link changed); re-verify: opt 3${RESET}" ;;
-                *)
-                    vline="${GREY}Calculated from link MTU - verify with an active probe: opt 3${RESET}" ;;
-            esac
-            if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then
-                rec_display="${GREEN}${rec}${RESET}   (optimal)"
-            elif [ -n "$rec" ]; then
-                if [ "${cur:-0}" -lt "$rec" ] 2>/dev/null; then rec_display="${YELLOW}${rec}${RESET}   (can raise)"; else rec_display="${YELLOW}${rec}${RESET}   (should lower)"; fi
-            else
-                rec_display="${YELLOW}unknown (endpoint not resolved)${RESET}"
-            fi
-            sec=$(mtu_gl_targets "$iface" "$type" | head -1); source_label=""
-            if [ -n "$sec" ]; then
-                if uci -q get "$sec.mtu" >/dev/null 2>&1; then source_label="   (override)"; else source_label="   (default)"; fi
-            fi
-            printf " %b%s %s: %s%b\n" "$CYAN" "$type" "$role" "$iface" "$RESET"
-            printf "   Current MTU:  %b%s%b%s\n" "$GREEN" "${cur:-N/A}" "$RESET" "$source_label"
-            printf "   Underlay:     %b%s (MTU %s)%b\n" "$GREEN" "${underlay:-N/A}" "${underlay_mtu:-N/A}" "$RESET"
-            printf "   Overhead:     %b-%s (%s / %s)%b\n" "$GREEN" "$overhead" "$type" "$family" "$RESET"
-            printf "   Recommended:  %b\n" "$rec_display"
-            printf "   Basis:        %b\n" "$vline"
-            printf "\n"
-        done < "$tf"
-        printf "%s  Optimize a tunnel (apply recommended)\n" "$N1"
-        printf "%s  Set MTU manually\n" "$N2"
-        printf "%s  Verify with an active probe\n" "$N3"
-        printf "%s  Reset MTU (remove override)\n" "$N4"
-        printf "%s  Back\n" "$N0"
-        printf "\nChoose [1-4/0]: "
-        read -r pick; printf "\n"
-        case "$pick" in
-            1|2|3|4) ;;
-            0) rm -f "$tf"; return ;;
-            *) print_error "Invalid option"; sleep 1; continue ;;
-        esac
-        count=$(wc -l < "$tf")
-        # Optimize and Reset can act on every tunnel at once; Set and Probe can't.
-        case "$pick" in 1|4) allow_all=1 ;; *) allow_all="" ;; esac
-        case "$pick" in 1) action="Optimize" ;; 2) action="Set MTU on" ;; 3) action="Probe" ;; 4) action="Reset" ;; esac
-        # Refuse a no-op before asking which tunnel (design notes item 5).
-        case "$pick" in
-            1|4)
-                if ! mtu_actionable "$pick" "$tf"; then
-                    if [ "$pick" = 1 ]; then
-                        print_info "Every tunnel is already at its recommended MTU — nothing to optimize."
-                    else
-                        print_info "No tunnel has an MTU override to remove."
-                    fi
-                    press_any_key; continue
-                fi ;;
-        esac
-        if [ "$count" -eq 1 ]; then
-            sel=1
-        else
-            printf "%s which tunnel?\n\n" "$action"
-            idx=0
-            while IFS='|' read -r type role iface endpoint overhead family; do
-                idx=$((idx + 1))
-                if [ "$idx" -le 9 ]; then eval "token=\$N$idx"; else token="[$idx]"; fi
-                printf "%s  %s %s: %s\n" "$token" "$type" "$role" "$iface"
-            done < "$tf"
-            [ -n "$allow_all" ] && printf "%s  All Tunnels\n" "$NA"
-            printf "%s  Cancel\n" "$N0"
-            if [ -n "$allow_all" ]; then printf "\nChoose [1-%s/A/0]: " "$count"; else printf "\nChoose [1-%s/0]: " "$count"; fi
-            read -r sel; printf "\n"
-            case "$sel" in
-                0) continue ;;
-                [aA]) if [ -n "$allow_all" ]; then mtu_batch "$pick" "$tf"; continue; else print_error "Invalid selection"; sleep 1; continue; fi ;;
-            esac
-        fi
-        case "$sel" in ''|*[!0-9]*) print_error "Invalid selection"; sleep 1; continue ;; esac
-        if [ "$sel" -lt 1 ] || [ "$sel" -gt "$count" ]; then print_error "Invalid selection"; sleep 1; continue; fi
-        line=$(sed -n "${sel}p" "$tf")
+        count=$(wc -l < "$tf" | tr -dc '0-9')
+        [ "$pg" -gt "$count" ] && pg=1
+        [ "$pg" -lt 1 ] && pg="$count"
+        pv=$(( (pg - 2 + count) % count + 1 )); nx=$(( pg % count + 1 ))
+
+        # The tunnel on this page.
+        line=$(sed -n "${pg}p" "$tf")
         oldifs=$IFS; IFS='|'; set -- $line; IFS=$oldifs
         type="$1"; role="$2"; iface="$3"; endpoint="$4"; overhead="$5"; family="$6"
+
         cur=$(mtu_get "$iface")
         underlay=$(ip route get "$endpoint" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
         [ -z "$underlay" ] && underlay=$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')
         underlay_mtu=$(mtu_get "$underlay")
-        [ -n "$underlay_mtu" ] && rec=$((underlay_mtu - overhead)) || rec=""
-        v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
-        case "$v" in "OK|"*) rec=$(printf '%s' "$v" | cut -d'|' -f2) ;; esac
+        if [ -n "$underlay_mtu" ]; then rec=$((underlay_mtu - overhead)); else rec=""; fi
+        # A fresh probe-verified value outranks the calculation - it measured the
+        # actual path. mtu_v_get reports STALE when the link or endpoint changed
+        # since the probe, and the display drops back to Calculated.
+        vline=""; v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+        case "$v" in
+            "OK|"*)
+                rec=$(printf '%s' "$v" | cut -d'|' -f2)
+                vkind=$(printf '%s' "$v" | cut -d'|' -f3)
+                vtgt=$(printf '%s' "$v" | cut -d'|' -f4)
+                vdate=$(printf '%s' "$v" | cut -d'|' -f5)
+                vline="${GREEN}Verified ${vdate} - ${vkind} probe to ${vtgt}${RESET}"; vplain="Verified ${vdate} - ${vkind} probe to ${vtgt}" ;;
+            "STALE|"*)
+                vline="${YELLOW}Calculated - earlier probe is stale (link changed); re-verify: opt 3${RESET}"; vplain="Calculated - earlier probe is stale (link changed); re-verify: opt 3" ;;
+            *)
+                vline="${GREY}Calculated from link MTU - verify with an active probe: opt 3${RESET}"; vplain="Calculated from link MTU - verify with an active probe: opt 3" ;;
+        esac
+        if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then
+            rec_display="${GREEN}${rec}${RESET}   (optimal)"
+        elif [ -n "$rec" ]; then
+            if [ "${cur:-0}" -lt "$rec" ] 2>/dev/null; then rec_display="${YELLOW}${rec}${RESET}   (can raise)"; else rec_display="${YELLOW}${rec}${RESET}   (should lower)"; fi
+        else
+            rec_display="${YELLOW}unknown (endpoint not resolved)${RESET}"
+        fi
+        sec=$(mtu_gl_targets "$iface" "$type" | head -1); source_label=""
+        if [ -n "$sec" ]; then
+            if uci -q get "$sec.mtu" >/dev/null 2>&1; then source_label="   (override)"; else source_label="   (default)"; fi
+        fi
+        # Role-aware interface state: connected/disconnected for a client, up/down
+        # for a server, with the WireGuard handshake age carried through.
+        _st=$(vpn_state_label "$iface" "$type" "$role")
+        case "$_st" in CONNECTED*|UP*) stcol="$GREEN" ;; *) stcol="$RED" ;; esac
+        # Divider is drawn to the WIDEST rendered line (identity / Basis / nav footer),
+        # measured from each line's plain text so colour codes don't count.
+        _idp="$type $role: $iface     Status: $_st"
+        _navp="[P] Previous   Page $pg of $count   [N] Next   [1/2/3/4]   [0] Back   [?] Help"
+        _w=$(( 17 + ${#vplain} ))
+        [ $(( ${#_idp} + 1 )) -gt "$_w" ] && _w=$(( ${#_idp} + 1 ))
+        [ $(( ${#_navp} + 1 )) -gt "$_w" ] && _w=$(( ${#_navp} + 1 ))
+        if [ "$OUTPUT_MODE" = compat ]; then hr=$(rla_rep "-" "$_w"); else hr=$(rla_rep "─" "$_w"); fi
+
+        clear
+        print_centered_header "VPN MTU Optimizer"
+        printf "\n"
+        printf " %b%s %s: %s%b     Status: %b%s%b\n" "$CYAN" "$type" "$role" "$iface" "$RESET" "$stcol" "$_st" "$RESET"
+        printf "   Current MTU:  %b%s%b%s\n" "$GREEN" "${cur:-N/A}" "$RESET" "$source_label"
+        printf "   Underlay:     %b%s (MTU %s)%b\n" "$GREEN" "${underlay:-N/A}" "${underlay_mtu:-N/A}" "$RESET"
+        printf "   Overhead:     %b-%s (%s / %s)%b\n" "$GREEN" "$overhead" "$type" "$family" "$RESET"
+        printf "   Recommended:  %b\n" "$rec_display"
+        printf "   Basis:        %b\n" "$vline"
+        printf " %s\n" "$hr"
+        printf " [1] Optimize tunnel (apply recommended)\n"
+        printf " [2] Set MTU manually\n"
+        printf " [3] Verify with an active probe\n"
+        printf " [4] Reset MTU (remove override)\n"
+        # Realtime nav footer, no Choose prompt (matches the other paginated screens):
+        # every valid key is advertised here and read_single_char dispatches at once.
+        # Shown even for a single page (Page 1 of 1) for consistency. No trailing
+        # newline so the cursor rests at the END of the line (UX std for char input).
+        printf "\n [P] Previous   Page %s of %s   [N] Next   [1/2/3/4]   [0] Back   [?] Help  " "$pg" "$count"
+        pick=$(read_single_char); printf "\n\n"
         case "$pick" in
+            p|P) pg=$pv ;;   # single page: pv==pg, so this just refreshes
+            n|N) pg=$nx ;;
+            0) rm -f "$tf"; return ;;
+            \?|h|H|❓) show_mtu_help ;;
             1)
-                if [ -z "$rec" ]; then print_error "No recommendation (underlay unresolved)."; sleep 2; continue; fi
-                if [ "$cur" = "$rec" ]; then print_info "$iface is already at the recommended $rec."; press_any_key; continue; fi
-                mtu_apply "$iface" "$rec" "$type"
-                press_any_key ;;
+                if [ -z "$rec" ]; then print_error "No recommendation (underlay unresolved)."; sleep 2
+                elif [ "$cur" = "$rec" ]; then print_info "$iface is already at the recommended $rec."; press_any_key
+                else mtu_apply "$iface" "$rec" "$type"; press_any_key; fi ;;
             2)
                 printf "Enter MTU for %s (1280-1500, 0 to cancel): " "$iface"; read -r val; printf "\n"
                 case "$val" in
-                    ''|0) continue ;;
-                    *[!0-9]*) print_error "Invalid MTU"; sleep 1; continue ;;
-                esac
-                if [ "$val" -ge 1280 ] && [ "$val" -le 1500 ]; then mtu_apply "$iface" "$val" "$type"; else print_error "MTU must be 1280-1500"; fi
-                press_any_key ;;
+                    ''|0) : ;;
+                    *[!0-9]*) print_error "Invalid MTU"; sleep 1 ;;
+                    *) if [ "$val" -ge 1280 ] && [ "$val" -le 1500 ]; then mtu_apply "$iface" "$val" "$type"; press_any_key
+                       else print_error "MTU must be 1280-1500"; sleep 1; fi ;;
+                esac ;;
             3) mtu_probe "$type" "$iface" "$endpoint" "$overhead" "$role" "$underlay_mtu" ;;
             4)
                 printf "Remove the toolkit's MTU override on %s? [y/N]: " "$iface"; read -r answer; printf "\n"
-                case "$answer" in y|Y) mtu_reset "$iface" "$type" ;; *) print_info "No change." ;; esac
-                press_any_key ;;
+                case "$answer" in y|Y) mtu_reset "$iface" "$type"; press_any_key ;; *) print_info "No change."; sleep 1 ;; esac ;;
+            *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
 }
@@ -7427,41 +7717,112 @@ d_ssh_query() { # peer-ip [user] -> cidr
 }
 
 # ---- rung 3: probe (inferred - guessed candidate, assumed /24) ---------------
-d_can_probe() { # iface -> 0 if traffic to an arbitrary dest would enter this tunnel
-    ip route show dev "$1" 2>/dev/null | grep -q '^default' && return 0
-    ip route show table 1001 2>/dev/null | grep -q "^default dev $1" && return 0
-    ip route show 2>/dev/null | grep -q "^default dev $1" && return 0
+d_can_probe() { # iface -> 0 if we can send -I-bound probes into this tunnel
+    # The scan binds probes to the interface (ping -I / fping -I), which reaches
+    # THROUGH any up tunnel regardless of the routing table - a default route is
+    # NOT required. An OpenVPN client with no pushed LAN route (e.g. a test box's
+    # ovpnclient1) still carries bound probes, and the scan then finds its remote
+    # LAN. So the only requirement is that the tunnel is up. tun/tap/ovpn/wg
+    # interfaces report operstate "unknown" (no carrier concept) when up, "down"
+    # when down.
+    case "$(cat "/sys/class/net/$1/operstate" 2>/dev/null)" in
+        up|unknown) return 0 ;;
+    esac
     return 1
 }
 
-d_candidates() { # iface -> well-known gateways worth probing, minus anything of ours
-    lan=$(guard_lan_cidr); tun=$(guard_tunnel_cidr "$1")
-    for g in 192.168.1.1 192.168.0.1 192.168.2.1 192.168.8.1 192.168.10.1 \
-             192.168.31.1 192.168.50.1 10.0.0.1 172.16.0.1; do
-        [ -n "$lan" ] && guard_cidr_contains "$lan" "$g" && continue   # our own LAN: false positive
-        [ -n "$tun" ] && guard_cidr_contains "$tun" "$g" && continue
-        echo "$g"
-    done
+# ---- tiered remote-LAN scan --------------------------------------------------
+# Find the remote LAN by sweeping candidate gateways THROUGH the tunnel and
+# keeping only those that still answer a TTL-1 ICMP echo - a subnet directly
+# across the tunnel (the peer answers for itself), not one a hop upstream (the
+# peer forwards it and the TTL expires). The old probe pinged ~9
+# gateways and gave up on "several answered", with no hop test to tell a real
+# remote LAN from an upstream one (both answer). Validated on the fleet: fping
+# (tuned, -i0) sweeps the standard tier (~8.7k) in ~1s and all of RFC1918
+# (139,776) in ~25s chunked; shell-parallel is the zero-dependency fallback.
+d_gen() {   # tier(standard|full) -> candidate gateway IPs (.1 and .254)
+    case "$1" in
+        standard)
+            for s in 192.168.0 192.168.1 192.168.2 192.168.8 192.168.10 192.168.11 \
+                     192.168.50 192.168.100 192.168.178 192.168.254 10.0.0 10.0.1 \
+                     10.1.0 10.8.0 10.10.0 10.10.10 172.16.0; do echo "$s.1"; echo "$s.254"; done ;;
+        full)
+            awk 'BEGIN{
+                for(y=0;y<256;y++){print "192.168."y".1";print "192.168."y".254"}
+                for(x=16;x<32;x++)for(y=0;y<256;y++){print "172."x"."y".1";print "172."x"."y".254"}
+                for(x=0;x<256;x++)for(y=0;y<256;y++){print "10."x"."y".1";print "10."x"."y".254"}}' ;;
+    esac
 }
 
-d_probe() { # iface -> cidr (inferred) by pinging well-known gateways through the tunnel
-    ifc="$1"
+d_sweep() { # iface  (candidates on stdin) -> alive IPs. fping if present, else shell.
+    _if="$1"
+    if command -v fping >/dev/null 2>&1; then
+        # chunk so fping RSS stays low (~0.43KB/target) even on tight-RAM devices
+        _cp="/tmp/.dsw.$$"; rm -f "$_cp".*
+        split -l 20000 - "$_cp." 2>/dev/null || cat > "$_cp.aa"
+        for _f in "$_cp".*; do [ -f "$_f" ] && fping -a -q -I "$_if" -r0 -t400 -i0 < "$_f" 2>/dev/null; done
+        rm -f "$_cp".*
+    else
+        _i=0
+        while read -r _g; do
+            ping -c1 -W1 -I "$_if" "$_g" >/dev/null 2>&1 && echo "$_g" &
+            _i=$((_i+1)); [ $((_i%128)) -eq 0 ] && wait
+        done
+        wait
+    fi
+}
+
+d_0hop() {  # iface  (alive IPs on stdin) -> remote-LAN /24s, minus ALL our own subnets
+    _if="$1"
+    # Exclude every /24 THIS router already owns - not just the current tunnel and
+    # the LAN, but every other tunnel too, INCLUDING ones that are configured but
+    # down. A router often terminates several VPNs on overlapping ranges: one test box
+    # has its own WireGuard at 10.1.0.x (down) whose subnet is ALSO reachable
+    # across the OpenVPN client we are scanning, so without this it would offer
+    # 10.1.0.0/24 - a VPN transit subnet, not a real remote LAN. Sources: live
+    # interface addresses + the WireGuard address_v4 keys from UCI (the down
+    # tunnels). Prefixes are wrapped in '|' for a fast substring match below.
+    _own=$({ ip -4 addr show 2>/dev/null | awk '/inet /{print $2}'
+             uci show 2>/dev/null | sed -n "s/.*address_v4='\\([0-9.]*\\).*/\\1/p"
+           } | awk -F/ '{n=$1; sub(/\.[0-9]+$/,"",n); print n}' | sort -u | tr '\n' '|')
+    _own="|$_own"
+    # 0-hop test = a TTL-1 ICMP echo the far side still ANSWERS. The remote LAN
+    # gateway is the tunnel peer's own address (delivered to self -> it replies),
+    # whereas an upstream gateway is forwarded (TTL expires, no echo). Same echo
+    # semantics as the sweep, so it stays reliable where UDP traceroute is flaky,
+    # and it is fast (<=1s each) and parallel-safe. Responders are few.
+    _of="/tmp/.d0h.$$"; : > "$_of"
+    while read -r _ip; do
+        _n=${_ip%.*}
+        case "$_own" in *"|$_n|"*) continue ;; esac
+        # Keep a subnet only if it is 0-hop THROUGH THE TUNNEL *and* NOT reachable
+        # by the normal (default) route. A genuine remote LAN lives only on the far
+        # side of the tunnel; a subnet reachable BOTH ways is a shared/routable
+        # network - e.g. a VPN subnet that is one of the peer's own interfaces
+        # (0-hop across the tunnel) but is also reached upstream over the WAN.
+        ( ping -c1 -W1 -t1 -I "$_if" "$_ip" >/dev/null 2>&1 &&
+          ! ping -c1 -W1 "$_ip" >/dev/null 2>&1 &&
+          echo "${_n}.0/24" >> "$_of" ) &
+    done
+    wait
+    sort -u "$_of" 2>/dev/null; rm -f "$_of"
+}
+
+d_scan() { d_gen "$2" | d_sweep "$1" | d_0hop "$1"; }   # iface tier -> 0-hop cidr(s)
+
+d_probe() { # iface -> first directly-attached remote LAN via the fast standard tier
+    ifc="$1"                                            # (full is user-driven in rla_do_detect)
     if ! d_can_probe "$ifc"; then
         d_trace probe skip "no route sends arbitrary traffic into $ifc - a probe cannot leave"
         return 1
     fi
-    hits=""
-    for g in $(d_candidates "$ifc"); do
-        ping -c1 -W1 -I "$ifc" "$g" >/dev/null 2>&1 && hits="$hits $g"
-    done
-    set -- $hits
-    case $# in
-        0) d_trace probe none "no well-known gateway answered through $ifc"; return 1 ;;
-        1) c=$(d_netof "$1" 24)
-           d_trace probe found "$c (guessed /24 from $1 - mask not verified)"
-           echo "$c"; return 0 ;;
-        *) d_trace probe ambiguous "several answered ($hits) - cannot choose"; return 1 ;;
-    esac
+    _r=$(d_scan "$ifc" standard)
+    if [ -n "$_r" ]; then
+        d_trace probe found "standard scan, hop-0 through $ifc: $(echo $_r | tr '\n' ' ')"
+        echo "$_r" | head -1; return 0
+    fi
+    d_trace probe none "no directly-attached subnet in the standard tier answered through $ifc"
+    return 1
 }
 
 # ---- the cascade -------------------------------------------------------------
@@ -7744,53 +8105,6 @@ pr_ping() { # dest [source-ip] -> 0 reachable
 
 pr_gw_of() { echo "${1%%/*}" | awk -F. '{print $1"."$2"."$3".1"}'; }
 
-# ---- outbound: from this router, both source identities ----------------------
-pr_out() { # iface peer-tunnel-ip remote-lan-cidr -> rows: from|to|result
-    ifc="$1"; peer="$2"; rlan="$3"
-    tun=$(ip -4 addr show "$ifc" 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
-    lan=$(ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1)
-    for dst in "$peer" "$(pr_gw_of "$rlan")"; do
-        [ -z "$dst" ] && continue
-        case "$rlan" in unknown) [ "$dst" = "$(pr_gw_of "$rlan")" ] && continue ;; esac
-        for src in "$tun" "$lan"; do
-            [ -z "$src" ] && continue
-            if pr_ping "$dst" "$src"; then r=reachable; else r=unreachable; fi
-            printf '%s|%s|%s\n' "$src" "$dst" "$r"
-        done
-    done
-}
-
-# ---- inbound: only the far side can answer this ------------------------------
-pr_in_possible() { k_can_auth "$1" 2>/dev/null; }
-
-pr_in() { # peer-tunnel-ip our-tunnel-ip our-lan-cidr -> rows: from|to|result
-    peer="$1"; tun="$2"; lan="$3"
-    if ! pr_in_possible "$peer"; then
-        printf '%s|%s|%s\n' "$peer" "$tun" "untestable"
-        printf '%s|%s|%s\n' "$peer" "$lan" "untestable"
-        return 1
-    fi
-    kf=$(k_key_path 2>/dev/null)
-    for dst in "$tun" "$(pr_gw_of "$lan")"; do
-        [ -z "$dst" ] && continue
-        o=$(timeout 15 ssh -y -i "$kf" "root@$peer" \
-              "ping -c1 -W2 $dst >/dev/null 2>&1 && echo OK || echo NO" </dev/null 2>/dev/null)
-        case "$o" in *OK*) r=reachable ;; *NO*) r=unreachable ;; *) r=untestable ;; esac
-        printf '%s|%s|%s\n' "$peer" "$dst" "$r"
-    done
-}
-
-pr_summary() { # reads rows on stdin -> one word
-    ok=0; bad=0; unk=0
-    while IFS='|' read -r f t r; do
-        case "$r" in reachable) ok=$((ok+1));; unreachable) bad=$((bad+1));; *) unk=$((unk+1));; esac
-    done
-    if [ "$unk" -gt 0 ] && [ "$ok" -eq 0 ] && [ "$bad" -eq 0 ]; then echo untestable
-    elif [ "$bad" -eq 0 ] && [ "$ok" -gt 0 ]; then echo all-reachable
-    elif [ "$ok" -eq 0 ]; then echo none-reachable
-    else echo partial; fi
-}
-
 # Router-to-router SSH trust (OUTBOUND: lets THIS router log in to another).
 # Distinct from the existing SSH Authorized Keys Manager, which governs who may
 # log in TO this router.  Keys are dropbear-format; authorized_keys lives in
@@ -7807,29 +8121,6 @@ k_key_path() { # prefer a key that already exists; else our own
     echo "$K_DIR/id_dropbear"; return 1
 }
 
-k_have_key() { k_key_path >/dev/null 2>&1; }
-
-k_gen_key() { # create a keypair only if none exists; never overwrite silently
-    k=$(k_key_path) && return 0
-    mkdir -p "$K_DIR" && chmod 700 "$K_DIR"
-    dropbearkey -t ed25519 -f "$K_DIR/id_dropbear" >/dev/null 2>&1 || return 1
-    chmod 600 "$K_DIR/id_dropbear"
-    return 0
-}
-
-k_pubkey() { # -> the public key line for whichever private key we hold
-    k=$(k_key_path 2>/dev/null) || return 1
-    [ -s "$k" ] || return 1
-    dropbearkey -y -f "$k" 2>/dev/null | grep -E '^(ssh-|ecdsa-)' | head -1
-}
-
-k_pubkey_tagged() { # replace dropbearkey's own comment with our tag, so revoke is exact
-    p=$(k_pubkey) || return 1
-    set -- $p
-    [ -n "$2" ] || return 1
-    echo "$1 $2 $K_TAG@$(cat /proc/sys/kernel/hostname 2>/dev/null)"
-}
-
 # ---- remote auth -------------------------------------------------------------
 # dropbear's client IGNORES OpenSSH -o options (it prints "Ignoring unknown
 # configuration option"), so BatchMode cannot be used to suppress the password
@@ -7842,35 +8133,6 @@ k_can_auth() { # host [user] -> 0 if keyless login already works
     k=$(k_key_path 2>/dev/null) || return 1
     out=$(timeout 10 ssh -y -i "$k" "$u@$h" 'echo __RLA_OK__' </dev/null 2>/dev/null)
     case "$out" in *__RLA_OK__*) return 0 ;; *) return 1 ;; esac
-}
-
-k_installed_on() { # host [user] -> 0 if OUR tagged key is present remotely
-    h="$1"; u="${2:-root}"
-    k_can_auth "$h" "$u" || return 1
-    k=$(k_key_path 2>/dev/null) || return 1
-    timeout 10 ssh -y -i "$k" "$u@$h" "grep -q '$K_TAG' $K_AUTH 2>/dev/null && echo YES" \
-        </dev/null 2>/dev/null | grep -q YES
-}
-
-# INTERACTIVE: prompts once for the remote password.  Nothing is stored or logged.
-k_install() { # host [user]
-    h="$1"; u="${2:-root}"
-    [ -z "$h" ] && return 1
-    k_gen_key || return 1
-    pub=$(k_pubkey_tagged) || return 1
-    k_can_auth "$h" "$u" && { k_installed_on "$h" "$u" && return 0; }
-    # append idempotently, create the file with sane perms if absent
-    timeout 60 ssh -y "$u@$h" \
-        "mkdir -p $(dirname $K_AUTH); touch $K_AUTH; chmod 600 $K_AUTH;
-         grep -qF '$pub' $K_AUTH || echo '$pub' >> $K_AUTH" 2>/dev/null || return 1
-    k_can_auth "$h" "$u"
-}
-
-k_revoke() { # host [user] - remove ONLY our tagged key, never the user's own
-    h="$1"; u="${2:-root}"
-    k=$(k_key_path 2>/dev/null) || return 1
-    timeout 30 ssh -y -i "$k" "$u@$h" \
-        "sed -i '/$K_TAG/d' $K_AUTH 2>/dev/null" </dev/null 2>/dev/null
 }
 
 # ---- local inbound view (what the existing keys menu governs) -----------------
@@ -7904,6 +8166,27 @@ rla_link_state() {              # iface type [role] -> what we can actually meas
     fi
 }
 
+# Role-aware status label, shared by the MTU and Remote LAN Access screens. A client
+# CONNECTS to a server, so it reads connected/disconnected; a server reports up/down.
+# The WireGuard handshake age (e.g. "58s ago") carries through on either.
+vpn_state_label() {   # iface type role -> label (status values are ALL CAPS per UX std)
+    _vs=$(rla_link_state "$1" "$2" "$3")
+    case "$3" in
+        [Cc]lient)
+            case "$_vs" in
+                down|*"no peer"*) echo "DISCONNECTED" ;;
+                "up  "*)          echo "CONNECTED  ${_vs#up  }" ;;
+                up*)              echo "CONNECTED" ;;
+                *)                echo "$_vs" ;;
+            esac ;;
+        *)  case "$_vs" in
+                up*)   echo "UP${_vs#up}" ;;
+                down*) echo "DOWN${_vs#down}" ;;
+                *)     echo "$_vs" ;;
+            esac ;;
+    esac
+}
+
 rla_ctr() {                     # text width -> text centred in a field of width
     _t="$1"; _w="$2"; _l=${#_t}
     if [ "$_l" -ge "$_w" ]; then printf '%s' "$_t"; return; fi
@@ -7922,45 +8205,13 @@ rla_ctx() {                              # shared lookups for the action handler
     [ -z "$A_RLAN" ] && A_RLAN="unknown"
 }
 
-# ---- [1] reachability --------------------------------------------------------
-rla_do_test() {
-    rla_ctx "$1" "$2" "$3"; _dir="$4"
-    print_info "Testing reachability - this sends a few pings and changes nothing."
-    printf '\n'
-    if [ "$_dir" = out ]; then
-        printf '   %-18s%-18s%s\n' From To Result
-        pr_out "$A_IF" "$A_PEER" "$A_RLAN" | while IFS='|' read -r f t r; do
-            printf '   %-18s%-18s%s\n' "$f" "$t" "$r"
-        done
-        printf '\n'
-        case "$(pr_out "$A_IF" "$A_PEER" "$A_RLAN" | pr_summary)" in
-            all-reachable)  print_success "Everything on the remote side answered." ;;
-            none-reachable) print_warning "Nothing answered. Check options 2 and 4." ;;
-            partial)        print_warning "Some destinations answered and some did not." ;;
-            *)              print_info "Not enough information to judge." ;;
-        esac
-    else
-        if pr_in_possible "$A_PEER"; then
-            printf '   %-18s%-18s%s\n' From To Result
-            pr_in "$A_PEER" "$A_TUN" "$A_LAN" | while IFS='|' read -r f t r; do
-                printf '   %-18s%-18s%s\n' "$f" "$t" "$r"
-            done
-        else
-            print_warning "Inbound cannot be tested from this router."
-            print_info "Only the remote router can prove it can reach us. Set up key"
-            print_info "trust with it (option 3) and this test becomes available."
-        fi
-    fi
-    printf '\n'; press_any_key
-}
-
 # ---- [2] outbound: route+authorise | inbound: access -------------------------
 rla_do_lever2() {
     rla_ctx "$1" "$2" "$3"; _dir="$4"
     if [ "$_dir" = out ]; then
         if [ "$A_RLAN" = unknown ]; then
             print_warning "The remote LAN subnet is not known yet."
-            print_info "Use option 4 first - a route needs a destination."
+            print_info "Use option 2 first - a route needs a destination."
             press_any_key; return
         fi
         if guard_overlap "$A_LAN" "$A_RLAN"; then
@@ -7983,7 +8234,7 @@ rla_do_lever2() {
                 [ -n "$_pid" ] && az_grant "$A_IF" "$_pid" "$A_RLAN" >/dev/null 2>&1
             fi
             print_success "This router now routes $A_RLAN over $A_IF."
-            print_info "Use option 1 to confirm it actually answers."
+            print_info "The status table re-checks reachability automatically."
         fi
     else
         _cur=$(w_get_access "$A_IF")
@@ -8019,105 +8270,174 @@ rla_do_lever2() {
     press_any_key
 }
 
-# ---- [3] outbound: masquerade | inbound: remote-side setup -------------------
+# ---- [3] outbound only: masquerade toggle ------------------------------------
+# Inbound has no remote-side action - the remote router's route/masquerade can
+# only be set on the remote router itself (that guidance now lives in the Help),
+# so [3] is outbound-only and this is only ever called with _dir=out.
 rla_do_lever3() {
     rla_ctx "$1" "$2" "$3"; _dir="$4"
-    if [ "$_dir" = out ]; then
-        _cur=$(w_get_masq "$A_IF"); _new=$( [ "$_cur" = 1 ] && echo 0 || echo 1 )
-        if ! w_zone_enabled "$A_IF"; then
-            # w_set_masq refuses this too (rc 3); checked here as well so the
-            # user gets an explanation instead of a silently skipped action.
-            print_error "The firewall zone for $A_IF is disabled."
-            print_info "This setting would have no effect until the VPN is enabled properly."
-            press_any_key; return
-        fi
-        _risk=$(guard_at_risk "$A_IF")
-        if [ -n "$_risk" ]; then
-            print_warning "This changes how traffic is addressed and can interrupt sessions:"
-            lv_risk_report "$A_IF"
-            printf '\n Apply anyway? It reverts automatically in 30s unless confirmed [y/N]: '
-            read -r _yn; printf '\n'
-            case "$_yn" in y|Y) ;; *) print_info "Cancelled - nothing changed."; press_any_key; return ;; esac
-        fi
-        lv_apply "$A_IF" masq "$_new" 30
-        if lv_verify "$A_IF" masq "$_new"; then
-            lv_confirm "$A_IF" masq
-            if [ "$_new" = 0 ]; then print_success "Your devices now show their real addresses to the remote side."
-            else print_success "Your devices are now hidden behind $A_TUN."; fi
-        else
-            print_error "The firewall did not follow the setting - it will revert."
-        fi
+    [ "$_dir" = out ] || return
+    _cur=$(w_get_masq "$A_IF"); _new=$( [ "$_cur" = 1 ] && echo 0 || echo 1 )
+    if ! w_zone_enabled "$A_IF"; then
+        # w_set_masq refuses this too (rc 3); checked here as well so the
+        # user gets an explanation instead of a silently skipped action.
+        print_error "The firewall zone for $A_IF is disabled."
+        print_info "This setting would have no effect until the VPN is enabled properly."
+        press_any_key; return
+    fi
+    _risk=$(guard_at_risk "$A_IF")
+    if [ -n "$_risk" ]; then
+        print_warning "This changes how traffic is addressed and can interrupt sessions:"
+        lv_risk_report "$A_IF"
+        printf '\n Apply anyway? It reverts automatically in 30s unless confirmed [y/N]: '
+        read -r _yn; printf '\n'
+        case "$_yn" in y|Y) ;; *) print_info "Cancelled - nothing changed."; press_any_key; return ;; esac
+    fi
+    lv_apply "$A_IF" masq "$_new" 30
+    if lv_verify "$A_IF" masq "$_new"; then
+        lv_confirm "$A_IF" masq
+        if [ "$_new" = 0 ]; then print_success "Your devices now show their real addresses to the remote side."
+        else print_success "Your devices are now hidden behind $A_TUN."; fi
     else
-        print_info "Only the remote router can allow traffic back to your LAN."
-        printf '\n'
-        if k_can_auth "$A_PEER" 2>/dev/null; then
-            print_success "Key trust with $A_PEER already exists."
-            print_info "Inbound testing (option 1) is available."
-        else
-            print_warning "There is no key trust with $A_PEER yet."
-            print_info "Installing a key lets this router query and test the remote side"
-            print_info "without a password each time. The remote router will trust this"
-            print_info "one until you revoke it."
-            printf '\n Install a key on %s now? [y/N]: ' "$A_PEER"
-            read -r _yn; printf '\n'
-            case "$_yn" in
-                y|Y) if k_install "$A_PEER"; then print_success "Key installed - $A_PEER now trusts this router."
-                     else print_error "Could not install the key. Is $A_PEER reachable on port 22?"; fi ;;
-                *)   print_info "Skipped." ;;
-            esac
-        fi
-        printf '\n'
-        print_info "On the remote router, allow its LAN to be reached over the tunnel"
-        print_info "and make sure it is not masquerading traffic toward you."
+        print_error "The firewall did not follow the setting - it will revert."
     fi
     press_any_key
 }
 
-# ---- [4] detect or set the remote LAN subnet ---------------------------------
+# Quiet auto-detect, run once when ENTERING the feature (never from the menu).
+# Tries the authoritative source (the tunnel's own AllowedIPs), else a standard
+# tunnel scan, and sets the remote LAN ONLY when the answer is a single eligible
+# subnet. No countdown, no prompts, no "press any key" - it just flows into the
+# screen. The ambiguous, multi-result and manual cases are left for the explicit
+# [2] "Detect or set the remote LAN subnet" action, which stays interactive.
+rla_autodetect() {
+    rla_ctx "$1" "$2" "$3"; _ad_if="$A_IF"
+    _ad_v=$(d_config "$_ad_if" "$A_TY" 2>/dev/null)
+    [ -n "$_ad_v" ] && { d_store "$_ad_if" "$_ad_v" config >/dev/null 2>&1; return; }
+    d_can_probe "$_ad_if" || return
+    # Show a spinner so entry doesn't look frozen during the scan - the duration is
+    # network-dependent, so a countdown estimate only drifts out of sync. No "press
+    # any key" afterwards; it flows straight in.
+    spin_run "Scanning $_ad_if for the remote LAN" d_scan "$_ad_if" standard
+    _ad_hits=$(grep '/' "$SPIN_LOG" 2>/dev/null)
+    [ "$(printf '%s\n' "$_ad_hits" | grep -c '/')" = 1 ] && {
+        d_store "$_ad_if" "$_ad_hits" probe >/dev/null 2>&1
+        print_success "Remote LAN on $_ad_if set to $_ad_hits."
+    }
+}
+
+# ---- [2] detect or set the remote LAN subnet ---------------------------------
+# SSH probe for the remote LAN, echoed (not returned in a var) so it can run under
+# a spinner - spin_run backgrounds its command, where a var assignment would be
+# lost. Emits "RLASRC|<cidr>" only when keyless SSH to the peer answers.
+rla_ssh_lookup() {   # peer -> "RLASRC|cidr" | (nothing)
+    _slp="$1"; [ -z "$_slp" ] && return 1
+    if k_can_auth "$_slp" 2>/dev/null && _slv=$(d_ssh_query "$_slp" 2>/dev/null) && [ -n "$_slv" ]; then
+        printf 'RLASRC|%s\n' "$_slv"
+    fi
+}
+
 rla_do_detect() {
     rla_ctx "$1" "$2" "$3"
-    print_info "Looking for the remote LAN subnet..."
-    printf '\n'
-    _want_ssh=0
-    k_can_auth "$A_PEER" 2>/dev/null && _want_ssh=1
-    _res=$(d_cascade "$A_IF" "$A_TY" "$A_RO" "$_want_ssh" "$A_PEER" 2>/dev/null)
-    # A REPORT of what was attempted, not a list of choices. Previously this was
-    # a keyword+description list indented directly above a prompt - the same
-    # shape as every menu in the program - and read as four selectable options.
-    # The heading and the "- " separator make it a log; the verdict is a
-    # sentence rather than a fourth row.
-    printf '   Checked:\n'
-    d_trace_show | while IFS='|' read -r rung result detail; do
-        [ "$rung" = manual ] && continue
-        printf '     %-8s - %s\n' "$rung" "$detail"
-    done
-    printf '\n'
-    if [ -n "$_res" ]; then
-        print_success "Remote LAN: ${_res%%|*}  (learned from: ${_res##*|})"
-        [ "${_res##*|}" = probe ] && print_warning "Inferred by probing - the mask is a guess. Correct it below if wrong."
-    else
-        print_info "Nothing found automatically - enter the subnet below."
+    ifc="$A_IF"; d_trace_reset 2>/dev/null
+
+    # 1) Authoritative sources first: an earlier manual set, the tunnel's own
+    #    AllowedIPs, or (only if key-login already works) the remote router.
+    _known=""; _kdisp=""; _ktok=""
+    v=$(d_get "$ifc"); [ -n "$v" ] && { _known="$v"; _kdisp="set earlier"; _ktok=""; }
+    if [ -z "$_known" ] && v=$(d_config "$ifc" "$A_TY" 2>/dev/null) && [ -n "$v" ]; then
+        _known="$v"; _kdisp="the tunnel's AllowedIPs"; _ktok="config"; fi
+    # The SSH probe (k_can_auth) can block up to its 10s timeout when the peer runs
+    # no SSH; run it under a spinner so [2] doesn't sit on a frozen screen. spin_run
+    # backgrounds its command, so the answer comes back via stdout, not a variable.
+    if [ -z "$_known" ] && [ -n "$A_PEER" ]; then
+        spin_run "Checking the tunnel peer over SSH" rla_ssh_lookup "$A_PEER"
+        v=$(grep '^RLASRC|' "$SPIN_LOG" 2>/dev/null | head -1); v=${v#RLASRC|}
+        [ -n "$v" ] && { _known="$v"; _kdisp="the remote router over SSH"; _ktok="ssh"; }
     fi
-    printf '\n'
-    printf ' Enter the remote LAN subnet (e.g. 192.168.2.0/24), or press Enter to keep: '
+    if [ -n "$_known" ]; then
+        print_success "Remote LAN is $_known  (from $_kdisp)."
+        printf 'Keep this? [Y/n]: '; read -r _a; printf '\n'
+        case "$_a" in
+            n|N) _known="" ;;
+            *)   [ -n "$_ktok" ] && d_store "$ifc" "$_known" "$_ktok" >/dev/null 2>&1
+                 print_success "Remote LAN set to $_known."; press_any_key; return ;;
+        esac
+    fi
+
+    # 2) Two-tier scan through the tunnel. Each tier keeps only subnets that are
+    #    0-hop (directly across the tunnel), so an upstream subnet can never be
+    #    mistaken for the remote LAN. Several can be directly attached, so results
+    #    are a pick-list, not a guess.
+    _hits=""; _scanned=0
+    if [ -z "$_known" ] && d_can_probe "$ifc"; then
+        _scanned=1
+        # Standard: ping the common gateways (~2s, NO dependency - works on a plane).
+        # Full is offered only if Standard finds nothing; it installs fping and sweeps
+        # every private /24 in seconds. Scan duration is network-dependent, so a
+        # spinner (not a countdown) tracks the real work.
+        spin_run "Scanning common subnets" d_scan "$ifc" standard
+        _hits=$(grep '/' "$SPIN_LOG" 2>/dev/null)
+        if [ -z "$_hits" ]; then
+            print_warning "No remote LAN answered on the common subnets."
+            printf 'Run a full scan (every private /24, ~30s)? [y/N]: '
+            read -r _a; printf '\n'
+            case "$_a" in
+                y|Y)
+                    command -v fping >/dev/null 2>&1 || spin_run "Installing fping" install_package fping
+                    if command -v fping >/dev/null 2>&1; then
+                        spin_run "Scanning all private subnets" d_scan "$ifc" full
+                        _hits=$(grep '/' "$SPIN_LOG" 2>/dev/null)
+                    else
+                        print_warning "fping is unavailable and the shell fallback would take ~18 minutes - skipped."
+                    fi ;;
+            esac
+        fi
+    elif [ -z "$_known" ]; then
+        print_info "This tunnel isn't up, so a scan can't run - enter the subnet by hand."
+    fi
+
+    # 3) Present scan results: one -> store; several -> pick-list.
+    if [ -n "$_hits" ]; then
+        _n=$(printf '%s\n' "$_hits" | grep -c .)
+        if [ "$_n" -eq 1 ]; then
+            if d_store "$ifc" "$_hits" probe >/dev/null 2>&1; then print_success "Remote LAN set to $_hits."
+            else print_error "Could not store $_hits."; fi
+            press_any_key; return
+        fi
+        print_success "Found $_n subnets directly across the tunnel:"
+        printf '\n'
+        printf '%s\n' "$_hits" | awk '{printf "   [%d] %s\n", NR, $0}'
+        printf '\nWhich is the remote LAN? [1-%s], or Enter to type one instead: ' "$_n"
+        read -r _pick; printf '\n'
+        case "$_pick" in
+            [1-9]|[1-9][0-9])
+                _sel=$(printf '%s\n' "$_hits" | sed -n "${_pick}p")
+                if [ -n "$_sel" ]; then
+                    if d_store "$ifc" "$_sel" probe >/dev/null 2>&1; then print_success "Remote LAN set to $_sel."
+                    else print_error "Could not store $_sel."; fi
+                    press_any_key; return
+                fi ;;
+        esac
+    fi
+
+    # 4) Manual entry - also the path when the user chose to type one above. When we
+    #    just scanned and came up empty, say so first, so the manual prompt has a
+    #    reason (the pick-list "type one" path has hits, so it stays silent).
+    [ "$_scanned" = 1 ] && [ -z "$_hits" ] && print_warning "No remote LAN found automatically."
+    printf 'Enter the remote LAN subnet manually (e.g. 192.168.2.0/24), or press Enter to leave it unknown: '
     read -r _in; printf '\n'
     if [ -n "$_in" ]; then
-        case "$_in" in
-            */*) ;;
-            *) print_error "Needs a prefix length, e.g. 192.168.2.0/24"; press_any_key; return ;;
-        esac
+        case "$_in" in */*) ;; *) print_error "Needs a prefix length, e.g. 192.168.2.0/24"; press_any_key; return ;; esac
         if guard_overlap "$A_LAN" "$_in"; then
             print_error "Refused: $_in overlaps this router's LAN $A_LAN."
             print_info "Remote LAN access cannot work between two identical subnets."
             press_any_key; return
         fi
-        if d_store "$A_IF" "$_in" manual; then print_success "Remote LAN set to $_in."
+        if d_store "$ifc" "$_in" manual; then print_success "Remote LAN set to $_in."
         else print_error "Could not store that subnet."; fi
-    elif [ -z "$_res" ]; then
-        # Only option 2 needs the subnet - it has nowhere to route without one.
-        # Option 1 still works: it tests the peer's tunnel address and simply
-        # omits the remote-LAN destination it cannot name.
-        print_info "Left unknown - option 2 needs a subnet before it can route anywhere."
+    else
+        print_info "Left unknown - routing to the remote LAN needs a subnet first."
     fi
     press_any_key
 }
@@ -8131,103 +8451,146 @@ rla_pages_build() {                     # flat page list: tunnel x direction
     done
 }
 
-rla_navlab() {                          # name whichever axis actually changes
-    _p=$(sed -n "${1}p" /tmp/rla_pages.$$)
-    _i=${_p#*|}; _i=${_i#*|}; _d=${_i#*|}; _i=${_i%%|*}
-    if [ "$_i" != "$2" ]; then printf '%s' "$_i"
-    elif [ "$_d" = out ]; then printf 'OUTBOUND'; else printf 'INBOUND'; fi
+rla_stat() { case "$1" in reachable) echo REACH ;; unreach) echo BLOCK ;; *) echo UNKNOWN ;; esac; }
+
+rla_measure() {   # tun-ip lan-ip peer rgw -> "tp=..; lp=..; tr=..; lr=.." (parallel)
+    _rt="$1"; _rl="$2"; _rp="$3"; _rg="$4"; _b="/tmp/.rlm.$$"
+    ( pr_ping "$_rp" "$_rt" && echo tp=reachable || echo tp=unreach ) >"$_b.1" 2>/dev/null &
+    ( pr_ping "$_rp" "$_rl" && echo lp=reachable || echo lp=unreach ) >"$_b.2" 2>/dev/null &
+    if [ -n "$_rg" ]; then
+        ( pr_ping "$_rg" "$_rt" && echo tr=reachable || echo tr=unreach ) >"$_b.3" 2>/dev/null &
+        ( pr_ping "$_rg" "$_rl" && echo lr=reachable || echo lr=unreach ) >"$_b.4" 2>/dev/null &
+    else printf 'tr=na\n' >"$_b.3"; printf 'lr=na\n' >"$_b.4"; fi
+    wait; cat "$_b".1 "$_b".2 "$_b".3 "$_b".4 2>/dev/null; rm -f "$_b".*
 }
 
-rla_rows() {                            # section|from|as|to|change
+rla_cache_measure() {   # iface type role -> cache this tunnel's OUTBOUND measurement
+    _ci="$1"
+    _ct=$(rla_tunnel_ip "$_ci"); _cp=$(rla_peer_tunnel_ip "$_ci" "$2" "$3")
+    _cl=$(rla_lan_ip); _cr=$(d_get "$_ci"); [ -z "$_cr" ] && _cr=$(rla_remote_lan "$_ci" "$2")
+    _cr="${_cr%†}"; _cg=""; [ -n "$_cr" ] && [ "$_cr" != unknown ] && _cg=$(pr_gw_of "$_cr")
+    rla_measure "$_ct" "$_cl" "$_cp" "$_cg" > "$RLA_MCACHE.$_ci" 2>/dev/null
+}
+
+rla_reverify() {   # iface type role -> a config change happened; drop the stale
+    rm -f "$RLA_MCACHE.$1"                # cache and re-measure THIS tunnel with
+    print_action "Re-checking reachability on $1"   # honest feedback, so the
+    rla_cache_measure "$1" "$2" "$3"     # redraw shows truth instead of hanging.
+}
+
+# Status is MEASURED, never inferred. OUTBOUND rows show a live ping from each
+# source identity (masqueraded = the tunnel IP; real = the LAN IP) to the
+# destination. INBOUND cannot be pinged from here (the remote must initiate), so
+# it shows our firewall's real accept/block policy, and flags the parts that only
+# the remote side controls. Re-runs on every render, so it is fresh after a change.
+rla_rows() {                            # status|from|as|to|change
     _if="$1"; _ty="$2"; _ro="$3"; _dir="$4"
     _zone=$(rla_zone "$_if"); _tun=$(rla_tunnel_ip "$_if")
     _peer=$(rla_peer_tunnel_ip "$_if" "$_ty" "$_ro")
     _lanip=$(rla_lan_ip); _lan=$(rla_lan_cidr)
     _rlan=$(d_get "$_if"); [ -z "$_rlan" ] && _rlan=$(rla_remote_lan "$_if" "$_ty")
     [ -z "$_rlan" ] && _rlan="unknown"
-    [ "$(d_get_src "$_if")" = probe ] && [ "$_rlan" != unknown ] && _rlan="$_rlan*"
+    [ "$(d_get_src "$_if")" = probe ] && [ "$_rlan" != unknown ] && _rlan="$_rlan†"
+    _rbase="${_rlan%†}"; _sfx=""; [ "$_rbase" != "$_rlan" ] && _sfx="†"
     _masq=$(rla_masq "$_zone"); _acc=$(rla_access "$_zone")
-    [ -z "$_peer" ] && _peer="(none)"
+    [ -z "$_peer" ] && { [ "$_ro" = server ] && _peer="no clients" || _peer="no peer"; }
     _lo="${_lanip%.*}.2-254"
     if [ "$_dir" = out ]; then
-        for _d in "$_peer" "$_rlan"; do
-            if [ "$_d" = unknown ]; then
-                echo "INACTIVE|$_lo|$_tun|$_d|Subnet not known yet - opt 4"
-                echo "INACTIVE|$_lanip|$_tun|$_d|Subnet not known yet - opt 4"
-                echo "INACTIVE|$_lo|$_lo|$_d|Subnet not known yet - opt 4"
-                echo "INACTIVE|$_lanip|$_lanip|$_d|Subnet not known yet - opt 4"
+        # Change column keeps the ORIGINAL wording; only the STATUS is now measured
+        # and the opt numbers are renumbered (masq 3->2, route 2->1, detect 4->3).
+        _rgw=""; [ "$_rbase" != unknown ] && _rgw=$(pr_gw_of "$_rbase")
+        tp=na; lp=na; tr=na; lr=na
+        if [ -n "$RLA_MCACHE" ] && [ -f "$RLA_MCACHE.$_if" ]; then eval "$(cat "$RLA_MCACHE.$_if")"
+        else _mm=$(rla_measure "$_tun" "$_lanip" "$_peer" "$_rgw")
+             [ -n "$RLA_MCACHE" ] && echo "$_mm" > "$RLA_MCACHE.$_if"; eval "$_mm"; fi
+        for _d in peer rlan; do
+            if [ "$_d" = peer ]; then _to="$_peer"; _sm="$tp"; _sr="$lp"
+            elif [ "$_rbase" = unknown ]; then
+                echo "UNKNOWN|$_lo|$_tun|unknown|Subnet not known yet - opt 2"
+                echo "UNKNOWN|$_lanip|$_tun|unknown|Subnet not known yet - opt 2"
+                echo "UNKNOWN|$_lo|$_lo|unknown|Subnet not known yet - opt 2"
+                echo "UNKNOWN|$_lanip|$_lanip|unknown|Subnet not known yet - opt 2"
                 continue
-            fi
+            else _to="$_rlan"; _sm="$tr"; _sr="$lr"; fi
             if [ "$_masq" = on ]; then
-                echo "ACTIVE|$_lo|$_tun|$_d|Opt 3 stops masquerading"
-                echo "ACTIVE|$_lanip|$_tun|$_d|Opt 3 stops masquerading"
-                echo "INACTIVE|$_lo|$_lo|$_d|Masquerading is on - opt 3"
-                echo "INACTIVE|$_lanip|$_lanip|$_d|Masquerading is on - opt 3"
+                echo "$(rla_stat "$_sm")|$_lo|$_tun|$_to|Opt 3 stops masquerading"
+                echo "$(rla_stat "$_sm")|$_lanip|$_tun|$_to|Opt 3 stops masquerading"
+                echo "$(rla_stat "$_sr")|$_lo|$_lo|$_to|Masquerading is on - opt 3"
+                echo "$(rla_stat "$_sr")|$_lanip|$_lanip|$_to|Masquerading is on - opt 3"
             else
-                echo "INACTIVE|$_lo|$_tun|$_d|Masquerading is off - opt 3"
-                echo "INACTIVE|$_lanip|$_tun|$_d|Masquerading is off - opt 3"
-                echo "ACTIVE|$_lo|$_lo|$_d|Opt 3 hides devices behind $_tun"
-                echo "ACTIVE|$_lanip|$_lanip|$_d|Opt 3 hides devices behind $_tun"
+                echo "$(rla_stat "$_sm")|$_lo|$_tun|$_to|Masquerading is off - opt 3"
+                echo "$(rla_stat "$_sm")|$_lanip|$_tun|$_to|Masquerading is off - opt 3"
+                echo "$(rla_stat "$_sr")|$_lo|$_lo|$_to|Opt 2 hides devices behind $_tun"
+                echo "$(rla_stat "$_sr")|$_lanip|$_lanip|$_to|Opt 2 hides devices behind $_tun"
             fi
         done
-        echo "REMOTE ONLY|$_tun|$_tun|$_peer|Set on the remote router"
-        if [ "$_rlan" = unknown ]; then
-            echo "INACTIVE|$_tun|$_tun|$_rlan|Subnet not known yet - opt 4"
-        elif rla_routes_via "${_rlan%\*}" "$_if" 2>/dev/null; then
-            echo "ACTIVE|$_tun|$_tun|$_rlan|Opt 2 removes this route"
+        echo "$(rla_stat "$tp")|$_tun|$_tun|$_peer|this router to the tunnel peer"
+        if [ "$_rbase" = unknown ]; then
+            echo "UNKNOWN|$_tun|$_tun|unknown|Subnet not known yet - opt 2"
+        elif rla_routes_via "$_rbase" "$_if" 2>/dev/null; then
+            echo "$(rla_stat "$tr")|$_tun|$_tun|$_rlan|Opt 1 removes this route"
         else
-            echo "INACTIVE|$_tun|$_tun|$_rlan|No route here - opt 2"
+            echo "$(rla_stat "$tr")|$_tun|$_tun|$_rlan|Opt 1 adds the route"
         fi
     else
-        if [ "$_rlan" = unknown ]; then
-            echo "INACTIVE|unknown|$_peer|$_tun|Subnet not known yet - opt 4"
-            echo "INACTIVE|unknown|$_peer|$_lan|Subnet not known yet - opt 4"
-            echo "INACTIVE|unknown|unknown|$_tun|Subnet not known yet - opt 4"
-            echo "INACTIVE|unknown|unknown|$_lan|Subnet not known yet - opt 4"
+        # INBOUND: not pingable from here. Status is our firewall's accept policy;
+        # remote-controlled flows keep the original wording, renumbered.
+        if [ "$_acc" = on ]; then _ai=REACH; _ah="Opt 1 blocks the remote side"
+        else _ai=BLOCK; _ah="Remote access is off - opt 1"; fi
+        if [ "$_rbase" = unknown ]; then
+            echo "UNKNOWN|unknown|$_peer|$_tun|Subnet not known yet - opt 2"
+            echo "UNKNOWN|unknown|$_peer|$_lan|Subnet not known yet - opt 2"
+            echo "UNKNOWN|unknown|unknown|$_tun|Subnet not known yet - opt 2"
+            echo "UNKNOWN|unknown|unknown|$_lan|Subnet not known yet - opt 2"
         else
-            _b="${_rlan%\*}"; _sfx=""; [ "$_b" != "$_rlan" ] && _sfx="*"
-            for _s in "${_b%.*}.2-254$_sfx" "${_b%.*}.1$_sfx"; do
-                if [ "$_acc" = on ]; then
-                    echo "ACTIVE|$_s|$_peer|$_tun|Opt 2 blocks the remote side"
-                    echo "ACTIVE|$_s|$_peer|$_lan|Opt 2 blocks the remote side"
-                else
-                    echo "INACTIVE|$_s|$_peer|$_tun|Remote access is off - opt 2"
-                    echo "INACTIVE|$_s|$_peer|$_lan|Remote access is off - opt 2"
-                fi
-                echo "REMOTE ONLY|$_s|$_s|$_tun|Remote must stop masquerading"
-                echo "REMOTE ONLY|$_s|$_s|$_lan|Remote must route your LAN"
+            for _s in "${_rbase%.*}.2-254$_sfx" "${_rbase%.*}.1$_sfx"; do
+                echo "$_ai|$_s|$_peer|$_tun|$_ah"
+                echo "$_ai|$_s|$_peer|$_lan|$_ah"
+                echo "REMOTE|$_s|$_s|$_tun|Remote must stop masquerading"
+                echo "REMOTE|$_s|$_s|$_lan|Remote must route your LAN"
             done
         fi
-        if [ "$_acc" = on ]; then
-            echo "ACTIVE|$_peer|$_peer|$_tun|Opt 2 blocks the remote side"
-            echo "ACTIVE|$_peer|$_peer|$_lan|Opt 2 blocks the remote side"
-        else
-            echo "INACTIVE|$_peer|$_peer|$_tun|Remote access is off - opt 2"
-            echo "INACTIVE|$_peer|$_peer|$_lan|Remote access is off - opt 2"
-        fi
+        echo "$_ai|$_peer|$_peer|$_tun|$_ah"
+        echo "$_ai|$_peer|$_peer|$_lan|$_ah"
     fi
 }
 
 manage_remote_lan_access() {
     local pg=1
     rla_pages_build
-    local np; np=$(wc -l < /tmp/rla_pages.$$)
+    local np; np=$(wc -l < /tmp/rla_pages.$$ | tr -dc '0-9')
     if [ "${np:-0}" -lt 1 ]; then
         clear; print_centered_header "Remote LAN Access"
         print_warning "No VPN tunnel is up on this router."
         print_info "Start a WireGuard or OpenVPN client or server first."
         press_any_key; rm -f /tmp/rla_pages.$$; return
     fi
+    # Collect ALL data up front, on ENTERING the feature, before any page is drawn:
+    # detect the remote LAN for every scannable tunnel, then measure each tunnel's
+    # reachability into a per-tunnel cache. Page navigation then reads the cache and
+    # is instant; a change action re-measures only the affected tunnel. The tunnel
+    # list is read on FD 3 to keep the loop's own stdin isolated. Entry-time detect
+    # is now the quiet rla_autodetect (no prompts, no "press any key") - the verbose
+    # interactive detect only runs from the [2] menu action.
+    RLA_MCACHE="/tmp/.rlam.$$"; rm -f "$RLA_MCACHE".*
+    awk -F'|' '{print $1"|"$2"|"$3}' /tmp/rla_pages.$$ | sort -u > /tmp/rla_tuns.$$
+    clear; print_centered_header "Remote LAN Access"
+    while IFS='|' read -r _t _r _i <&3; do
+        [ -z "$(d_get "$_i")" ] && rla_autodetect "$_i" "$_t" "$_r"
+        spin_run "Checking reachability on $_i" rla_cache_measure "$_i" "$_t" "$_r"
+    done 3< /tmp/rla_tuns.$$
+    rm -f /tmp/rla_tuns.$$
     # Use the profile-aware cells computed by detect_output_mode - they are padded
     # to exactly 8 columns for THIS terminal's measured glyph widths. Hardcoding
     # the pad here is what made the column ragged on terminals where emoji
     # advance 1 instead of 2.
     S_AC="$_S_RLA_AC"; S_IA="$_S_RLA_IA"; S_RO="$_S_RLA_RO"
-    # The legend must describe the set actually in use, not the output mode -
-    # a profile can fall back to ASCII status cells while still drawing box rules.
+    # Status is measured now: reachable / blocked, plus a WARN cell for rows that
+    # cannot be measured from here - inbound flows the remote must initiate, or a
+    # not-yet-known subnet.
     case "$S_AC" in
-        \[*) DEC="Legend: [AC] Active  [IA] Inactive  [RO] Remote only  * Inferred" ;;
-        *)  DEC="Legend: ✅ Active  ❌ Inactive  🔒 Remote only  * Inferred" ;;
+        \[*) DEC="Legend: [AC] reachable  [IA] blocked  [!] unknown  † inferred subnet" ;;
+        *)  DEC=$(printf 'Legend: %b🟢%b reachable  %b🔴%b blocked  %b🟡%b unknown  † inferred subnet' "$GREEN" "$RESET" "$RED" "$RESET" "$YELLOW" "$RESET") ;;  # painted so PuTTY's monochrome circles stay distinguishable
     esac
     if [ "$OUTPUT_MODE" = "compat" ]; then
         RULE="-"; BAR="|"; TL="|"; TR="|"; LK="===="; WR="--"
@@ -8250,29 +8613,34 @@ manage_remote_lan_access() {
         lan=$(rla_lan_cidr); lanip=$(rla_lan_ip)
         rlan=$(d_get "$iface"); [ -z "$rlan" ] && rlan=$(rla_remote_lan "$iface" "$type")
         [ -z "$rlan" ] && rlan="unknown"
-        [ "$(d_get_src "$iface")" = probe ] && [ "$rlan" != unknown ] && rlan="$rlan*"
-        if [ "$rlan" = unknown ]; then rgw="unknown"; else rgw="${rlan%\*}"; rgw="${rgw%.*}.1"; fi
-        [ -z "$peer" ] && peer="(none)"
+        [ "$(d_get_src "$iface")" = probe ] && [ "$rlan" != unknown ] && rlan="$rlan†"
+        if [ "$rlan" = unknown ]; then rgw="unknown"; else rgw="${rlan%†}"; rgw="${rgw%.*}.1"; fi
+        [ -z "$peer" ] && { [ "$role" = server ] && peer="no clients" || peer="no peer"; }
 
         clear
         print_centered_header "Remote LAN Access"
-        # 17, not 15: "WireGuard Server" is 16 characters and overran the
-        # field, leaving no gap before the divider and shifting the topology.
-        # Values are centred under their own label rather than left-justified,
-        # so each column reads as a unit however long the address is.
-        printf ' %-17s%s%s%s%s%s%s%s%s%s\n' "$type $rt" "$BAR" \
+        # Identity line (cyan): the tunnel and its role-aware state, promoted out of
+        # the topology's first column so the diagram reads cleanly below it. Status
+        # is ALL CAPS (UX std); client=CONNECTED/DISCONNECTED, server=UP/DOWN.
+        _rst=$(vpn_state_label "$iface" "$type" "$role")
+        case "$_rst" in CONNECTED*|UP*) _rsc="$GREEN" ;; *) _rsc="$RED" ;; esac
+        printf ' %b%s %s: %s%b     Status: %b%s%b\n\n' "$CYAN" "$type" "$rt" "$iface" "$RESET" "$_rsc" "$_rst" "$RESET"
+        # Topology diagram (no left rail - the leftmost value left-aligns with the
+        # Status column of the flow table below). Values are centred under their own
+        # label so each column reads as a unit.
+        printf ' %s%s%s%s%s%s%s%s\n' \
             "$(rla_ctr 'this LAN' 18)" "$WR$TL" "$(rla_ctr 'this router' 15)" \
             "$TR$LK$TL" "$(rla_ctr 'remote router' 15)" "$TR$WR" \
             "$(rla_ctr 'remote LAN' 13)" ""
-        printf ' %-17s%s%s%s%s%s%s%s%s\n' "$iface" "$BAR" \
+        printf ' %s%s%s%s%s%s%s\n' \
             "$(rla_ctr "$lan" 18)" "   " "$(rla_ctr "$tun" 15)" \
             "      " "$(rla_ctr "$peer" 15)" "   " "$(rla_ctr "$rlan" 13)"
-        printf ' %-17s%s%s%s%s%s%s\n' "$(rla_link_state "$iface" "$type" "$role")" "$BAR" \
+        printf ' %s%s%s%s%s\n' \
             "$(rla_ctr '' 18)" "   " "$(rla_ctr "$lanip" 15)" \
             "      " "$(rla_ctr "$rgw" 15)"
-        printf ' %s\n' "$(rla_rep "$RULE" $W)"
-        if [ "$dir" = out ]; then printf ' OUTBOUND   From here to the remote side\n'
-        else printf ' INBOUND    From the remote side to here\n'; fi
+        printf '\n'
+        if [ "$dir" = out ]; then printf ' %bOUTBOUND%b   From here to the remote side\n' "$CYAN" "$RESET"
+        else printf ' %bINBOUND%b    From the remote side to here\n' "$CYAN" "$RESET"; fi
         printf '   %-8s%-18s%-18s%-18s%s\n' Status From As To Change
         # Emit in GENERATION order, not sorted by status. The rows are a fixed
         # enumeration whose position never changes - only their Status does - so
@@ -8281,63 +8649,231 @@ manage_remote_lan_access() {
         # headers to explain the reordering; with the Status column carrying that
         # information, sorting only costs spatial stability.
         rla_rows "$iface" "$type" "$role" "$dir" | while IFS='|' read -r k a b c d; do
-            case "$k" in ACTIVE) g="$S_AC";; INACTIVE) g="$S_IA";; *) g="$S_RO";; esac
+            case "$k" in REACH) g="$S_AC";; BLOCK) g="$S_IA";; *) g="$S_RO";; esac
             printf '   %s%-18s%-18s%-18s%s\n' "$g" "$a" "$b" "$c" "$d"
         done
         printf '\n %s\n' "$DEC"
         printf ' %s\n' "$(rla_rep "$RULE" $W)"
-        # [N] at a fixed column so it does not drift with the tunnel name -
-        # lands under "addresses" in option 3 below; [0] stays with [2] and [4].
-        printf ' %-25s%-30s%s\n' "[P] Prev to $(rla_navlab $pv "$iface")" \
-            "[N] Next to $(rla_navlab $nx "$iface")" '[0] Back'
-        # [2] and [3] are toggles: the label must say what pressing them WILL DO
-        # from the current state, not name one fixed direction. Otherwise after
-        # acting the option still advertises what has already happened.
+        # Density-divider rule: this dense page earns a divider between the legend
+        # and the actions. Navigation is a realtime footer BELOW the actions (no
+        # Choose prompt, cursor rests at line end), matching the MTU / Hardware Info
+        # screens; the identity line + topology header name the page.
+        # Toggle labels state what pressing WILL DO from the current state, using
+        # the app-wide Enable/Disable convention (see ui-toggle-label-standard).
+        # [1] reach and [2] detect mean the same on both directions; [3] masquerade
+        # is outbound-only.
         if [ "$dir" = out ]; then
-            if [ "$rlan" != unknown ] && rla_routes_via "${rlan%\*}" "$iface" 2>/dev/null
-            then _o2="[2] Stop routing to the remote LAN"
-            else _o2="[2] Let this router reach the remote LAN"; fi
+            if [ "$rlan" != unknown ] && rla_routes_via "${rlan%†}" "$iface" 2>/dev/null
+            then _o1="[1] Disable routing to the remote LAN"
+            else _o1="[1] Enable routing to the remote LAN"; fi
             if [ "$(rla_masq "$(rla_zone "$iface")")" = on ]
-            then _o3="[3] Show my devices real addresses to the remote side"
-            else _o3="[3] Hide my devices behind $tun"; fi
-            printf ' %-55s%s\n' "[1] Test reachability" "$_o2"
-            printf ' %-55s%s\n' "$_o3" "[4] Detect or set the remote LAN subnet"
+            then _o3="[3] Disable masquerade (show my devices' real addresses)"
+            else _o3="[3] Enable masquerade (hide my devices behind $tun)"; fi
+            printf ' %s\n' "$_o1"
+            printf ' %s\n' "[2] Detect or set the remote LAN subnet"
+            printf ' %s\n' "$_o3"
+            _opts="1-3"
         else
             if [ "$(rla_access "$(rla_zone "$iface")")" = on ]
-            then _o2="[2] Block the remote side from my LAN"
-            else _o2="[2] Let the remote side reach my LAN"; fi
-            printf ' %-55s%s\n' "[1] Test reachability" "$_o2"
-            printf ' %-55s%s\n' "[3] Set up the remote router for LAN access" "[4] Detect or set the remote LAN subnet"
+            then _o1="[1] Disable inbound access from the remote LAN"
+            else _o1="[1] Enable inbound access from the remote LAN"; fi
+            printf ' %s\n' "$_o1"
+            printf ' %s\n' "[2] Detect or set the remote LAN subnet"
+            _opts="1-2"
         fi
-        printf '\nChoose [1-4/P/N/0]: '
-        read -r c; printf '\n'
+        case "$_opts" in 1-3) _keys="1/2/3" ;; *) _keys="1/2" ;; esac
+        printf '\n [P] Previous   Page %s of %s   [N] Next   [%s]   [0] Back   [?] Help  ' "$pg" "$np" "$_keys"
+        c=$(read_single_char); printf '\n\n'
         case "$c" in
-            1) rla_do_test "$iface" "$type" "$role" "$dir" ;;
-            2) rla_do_lever2 "$iface" "$type" "$role" "$dir" ;;
-            3) rla_do_lever3 "$iface" "$type" "$role" "$dir" ;;
-            4) rla_do_detect "$iface" "$type" "$role" ;;
+            1) rla_do_lever2 "$iface" "$type" "$role" "$dir"
+               [ "$dir" = out ] && rla_reverify "$iface" "$type" "$role" ;;
+            2) _pre=$(d_get "$iface"); rla_do_detect "$iface" "$type" "$role"
+               [ "$(d_get "$iface")" != "$_pre" ] && rla_reverify "$iface" "$type" "$role" ;;
+            3) if [ "$dir" = out ]; then
+                   rla_do_lever3 "$iface" "$type" "$role" "$dir"
+                   rla_reverify "$iface" "$type" "$role"
+               else print_error "Invalid option"; sleep 1; fi ;;
             p|P) pg=$pv ;;
             n|N) pg=$nx ;;
-            0) rm -f /tmp/rla_pages.$$; return ;;
+            0) rm -f /tmp/rla_pages.$$ "$RLA_MCACHE".*; return ;;
+            \?|h|H|❓) show_rla_help ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
+}
+
+show_vpntools_help() {
+    clear
+    print_centered_header "VPN Tools - Help"
+    cat << 'HELPEOF'
+
+VPN Tools - Quick Help
+
+What it does
+────────────
+A hub for the toolkit's VPN utilities:
+
+  • VPN MTU Optimizer - tune each tunnel's packet size so tunnelled traffic
+    stops fragmenting and silently losing throughput.
+  • Remote LAN Access - reach the LAN behind the far end of a tunnel (which
+    GL.iNet's own "Allow Remote Access to LAN" toggle does not fully set up).
+
+Getting around
+──────────────
+Type the number beside an item and press Enter. [0] goes back; [?] shows the
+help for whichever screen you are on.
+
+HELPEOF
+    press_any_key
+}
+
+show_mtu_help() {
+    clear
+    print_centered_header "VPN MTU Optimizer - Help"
+    cat << 'HELPEOF'
+
+VPN MTU Optimizer - Quick Help
+
+What it does
+────────────
+Finds each active WireGuard/OpenVPN tunnel and works out the best MTU - the
+largest packet that fits without fragmenting - so tunnelled traffic stops
+silently losing throughput.
+
+The status block
+────────────────
+One tunnel per page; [P]/[N] move between tunnels. For the tunnel on screen:
+  • Status       - Active (carrying traffic) or Inactive (down)
+  • Current MTU  - what is set now
+  • Underlay     - the link the tunnel rides on, and its MTU
+  • Overhead     - the protocol's per-packet cost
+  • Recommended  - the best MTU (Underlay minus Overhead)
+  • Basis        - whether Recommended is Calculated from the link, or Verified
+                   by an active probe (with the date and target)
+
+The actions
+───────────
+Each action applies to the tunnel currently on screen:
+  • Optimize tunnel     - apply the recommended MTU
+  • Set MTU manually    - enter a value by hand
+  • Verify with a probe - test the real path and mark the Basis "Verified"
+  • Reset MTU           - remove the toolkit's override; the router default
+                          governs again
+
+About Verify (the active probe)
+───────────────────────────────
+Verify sends don't-fragment test packets to find the largest that survives - but
+it can be inconclusive without meaning anything is wrong:
+  • A failed ICMP reply does NOT mean the endpoint is down. Many servers (and the
+    WireGuard/OpenVPN UDP port itself) simply don't answer ICMP, even while the
+    tunnel is up and passing traffic.
+  • If something on the path ignores the don't-fragment flag, oversized packets
+    get through anyway and the measured size reads too high to trust.
+Either way the probe result is discarded and the safe Calculated value is kept.
+If the tunnel had a prior Verified value, an inconclusive probe also clears it, so
+the Basis returns to Calculated - the path can no longer confirm it. On the result
+screen this reads "Verified MTU: unknown" and "Falling back to the Calculated <n>;
+this value was not actively verified" - it means "couldn't verify", not "broken".
+
+Notes
+─────
+  • The value is written where GL.iNet expects it, so it appears in the Admin
+    Panel under the tunnel's Options and survives a reboot.
+
+HELPEOF
+    press_any_key
+}
+
+show_rla_help() {
+    clear
+    print_centered_header "Remote LAN Access - Help"
+    cat << 'HELPEOF'
+
+Remote LAN Access - Quick Help
+
+What it does
+────────────
+Lets a device at one end of a VPN reach the LAN behind the other end - which
+GL.iNet's "Allow Remote Access to LAN" toggle does not fully route on its own.
+
+The table
+─────────
+Each row is a traffic flow (outbound or inbound) with its status: whether the
+route, the firewall masquerade and per-peer access are in place. Use [P]/[N] to
+page between tunnels and directions.
+
+The actions
+───────────
+Status is measured live on entry and re-checked after any change, so there is no
+separate "test" step. The toggles state what pressing them will do right now:
+  • Enable / Disable routing to the remote LAN    - outbound.
+  • Enable / Disable masquerade                    - outbound; hide your devices
+                        behind the tunnel address, or show their real addresses.
+  • Enable / Disable inbound access                - let the remote LAN reach you.
+  • Detect or set the remote LAN subnet            - refuses one that overlaps
+                        your own LAN.
+
+Notes
+─────
+  • Changes are applied through GL.iNet's own VPN firewall helpers, so they
+    persist and stay consistent with the Admin Panel.
+  • Inbound access also needs the REMOTE router to route its LAN over the tunnel
+    and to not masquerade traffic toward you. That side can only be configured on
+    the remote router itself - this tool cannot set it for you.
+
+HELPEOF
+    press_any_key
+}
+
+show_package_help() {
+    clear
+    print_centered_header "Package & Persistence Manager - Help"
+    cat << 'HELPEOF'
+
+Package & Persistence Manager - Quick Help
+
+What it does
+────────────
+Installs the optional tools the toolkit can use (speed tests, benchmarks and
+other utilities) and manages whether they survive a reboot.
+
+Install / remove
+────────────────
+  • Toggle a package to mark it for install (or an installed one for removal),
+    then Confirm. The right package manager for your firmware (opkg or apk) is
+    used automatically.
+
+Persistence
+───────────
+Many models wipe added packages on reboot. Persistence re-installs your marked
+tools automatically at boot so they are always there; turn it off to save space
+and install on demand instead.
+
+Notes
+─────
+  • A package with no build for your CPU (e.g. the Ookla speed test on MIPS) is
+    called out up front, with an alternative suggested.
+
+HELPEOF
+    press_any_key
 }
 
 manage_vpn_tools() {
     while true; do
         clear
         print_centered_header "VPN Tools"
-        printf "%s  VPN MTU Optimizer\n" "$N1"
-        printf "%s  Remote LAN Access\n" "$N2"
-        printf "%s  Main menu\n" "$N0"
-        printf "\nChoose [1-2/0]: "
+        printf "%s%sVPN MTU Optimizer\n" "$N1" "$NSEP"
+        printf "%s%sRemote LAN Access\n" "$N2" "$NSEP"
+        printf "%s%sMain menu\n" "$N0" "$NSEP"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-2/0/?]: "
         read -r vpn_choice
         printf "\n"
         case "$vpn_choice" in
             1) manage_mtu ;;
             2) manage_remote_lan_access ;;
             0) return ;;
+            \?|h|H|❓) show_vpntools_help ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
@@ -8347,14 +8883,14 @@ system_tweaks() {
     while true; do
         clear
         print_centered_header "System Tweaks"
-        printf "%s  Device Fan Settings\n" "$N1"
-        printf "%s  Manage Zram Swap\n" "$N2"
-        printf "%s  Guest Network Bandwidth Limiter\n" "$N3"
-        printf "%s  Web-UI Terminal Interface\n" "$N4"
-        printf "%s  Package and Persistence Manager\n" "$N5"
-        printf "%s  SSH Key Management\n" "$N6"
-        printf "%s  Toolkit Management\n" "$N7"
-        printf "%s  Main menu\n" "$N0"
+        printf "%s%sDevice Fan Settings\n" "$N1" "$NSEP"
+        printf "%s%sManage Zram Swap\n" "$N2" "$NSEP"
+        printf "%s%sGuest Network Bandwidth Limiter\n" "$N3" "$NSEP"
+        printf "%s%sWeb-UI Terminal Interface\n" "$N4" "$NSEP"
+        printf "%s%sPackage and Persistence Manager\n" "$N5" "$NSEP"
+        printf "%s%sSSH Key Management\n" "$N6" "$NSEP"
+        printf "%s%sToolkit Management\n" "$N7" "$NSEP"
+        printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-7/0/?]: "
         read -r st_choice
@@ -8394,13 +8930,15 @@ is throttling due to heat or if your storage/RAM is underperforming.
 Benchmark Categories:
 ─────────────────────
 • CPU & Thermal: Options 1 and 2 test the processor. The Stress Test pushes
-  all cores to 100% to test heat soak, while the VPN & Crypto Benchmark ranks
+  all cores/threads to 100% to test heat soak, while the VPN & Crypto Benchmark ranks
   this device against saved routers for WireGuard, OpenVPN and RSA throughput.
 • Storage & Memory: Options 3 and 4 measure I/O speeds. Use these to test 
   the performance of the internal NAND vs. attached USB 3.0 drives or to 
   check if RAM bandwidth is saturated.
 • Connectivity: Options 5 and 6 measure latency and external WAN speeds. 
-  Essential for troubleshooting "slow internet" vs. "slow DNS."
+  Essential for troubleshooting "slow internet" vs. "slow DNS." Option 6 (Ookla)
+  runs on every router - on MIPS, where Ookla ships no binary, it uses speedtest-go
+  against the same speedtest.net servers.
 • Local Servers: Options 7, 8, and 9 turn the router into a speedtest target. 
   These are used to test Wi-Fi/LAN limits without ISP interference.
 
@@ -8518,11 +9056,11 @@ manage_librespeed() {
         
         local ls_persist_label="Enable Persistence"
         [ "$IS_INSTALLED" -eq 1 ] && [ "$persist_ok" -eq 1 ] && ls_persist_label="Disable Persistence"
-        printf "\n%s  Install and Enable\n" "$N1"
-        printf "%s  Disable Service\n" "$N2"
-        printf "%s  %s\n" "$N3" "$ls_persist_label"
-        printf "%s  Uninstall Package\n" "$N4"
-        printf "%s  Back\n" "$N0"
+        printf "\n%s%sInstall and Enable\n" "$N1" "$NSEP"
+        printf "%s%sDisable Service\n" "$N2" "$NSEP"
+        printf "%s%s%s\n" "$N3" "$NSEP" "$ls_persist_label"
+        printf "%s%sUninstall Package\n" "$N4" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-4/0/?]: "
         read -r ls_choice
@@ -8614,16 +9152,16 @@ install_ookla_speedtest() {
             armv8*)  suffix="aarch64" ;;
             x86_64)  suffix="x86_64"  ;;
             mips*)
-                # Ookla ships its own binary rather than a package, and builds
-                # it only for aarch64, armel, armhf, i386 and x86_64 - there is
-                # no MIPS build. Fetching one 404s, so this used to fail only
-                # after the download, with nothing explaining why. No repository
-                # or feed can fix it; say so before spending the user's time.
-                print_error "Ookla Speedtest is not available for this router."
-                print_info "Ookla distributes its own binary and does not build it for MIPS"
-                print_info "($arch). No package repository can provide it either."
+                # Reached only from the package-install flow now - the Ookla Internet
+                # Speedtest menu routes MIPS to speedtest-go (see install_speedtest_go).
+                # Ookla publishes no MIPS binary, and it couldn't be persisted to the
+                # tiny flash here anyway, so explain that and point at the path that works.
+                print_error "Ookla Speedtest can't be installed as a package here."
+                print_info "Ookla ships no MIPS build ($arch), so there's no binary to"
+                print_info "persist to this router's flash."
                 printf "\n"
-                print_info "LibreSpeed and iperf3 both work here and are in the same menu."
+                print_info "System Benchmarks -> \"Ookla Internet Speedtest\" still runs it on"
+                print_info "MIPS: the same speedtest.net test, via speedtest-go, on demand."
                 press_any_key
                 return 1
                 ;;
@@ -8650,6 +9188,49 @@ install_ookla_speedtest() {
             press_any_key
             return 1
         fi
+    fi
+}
+
+STGO_BIN="/tmp/speedtest-go"
+
+# speedtest-go is a maintained, statically-linked Go client that measures against the
+# same speedtest.net servers as Ookla but - unlike Ookla - ships MIPS builds. We use it
+# on MIPS routers, where the official Ookla binary doesn't exist. It installs to /tmp,
+# not /usr/bin: the binary is ~8.8 MB and MIPS boards have ~16 MB of flash, so keeping it
+# would nearly fill the overlay; tmpfs has room and a re-fetch per session is cheap.
+install_speedtest_go() {
+    # Cached and runnable? (--version also proves the download matched this CPU.)
+    if [ -x "$STGO_BIN" ] && "$STGO_BIN" --version >/dev/null 2>&1; then
+        return 0
+    fi
+    # GL's MIPS routers are all little-endian; take 32- vs 64-bit from uname (busybox od
+    # can't reliably read the ELF header). softfloat runs with or without an FPU, and a
+    # wrong guess just fails the --version check below and soft-fails cleanly.
+    case "$(uname -m)" in
+        mips64*) _stgo_arch="mips64le" ;;
+        *)       _stgo_arch="mipsle"   ;;
+    esac
+    _stgo_asset="Linux_${_stgo_arch}_softfloat.tar.gz"
+
+    _stgo_fetch() {
+        local url
+        url=$(wget -qO- "https://api.github.com/repos/showwin/speedtest-go/releases/latest" 2>/dev/null \
+                | grep -oE "https://[^\"]*speedtest-go_[0-9.]+_${_stgo_asset}" | head -n1)
+        [ -z "$url" ] && url="https://github.com/showwin/speedtest-go/releases/download/v1.7.11/speedtest-go_1.7.11_${_stgo_asset}"
+        wget -qO- "$url" | tar xz -C /tmp speedtest-go
+        chmod +x "$STGO_BIN"
+    }
+
+    spin_run "Fetching speedtest-go (Ookla ships no MIPS build)" _stgo_fetch
+    rm -f "$SPIN_LOG" 2>/dev/null
+
+    if [ -x "$STGO_BIN" ] && "$STGO_BIN" --version >/dev/null 2>&1; then
+        print_success "Ready: $("$STGO_BIN" --version 2>&1 | head -n1)"
+    else
+        print_error "Couldn't fetch speedtest-go."
+        check_connectivity
+        press_any_key
+        return 1
     fi
 }
 
@@ -8756,16 +9337,16 @@ benchmark_system() {
     while true; do
         clear
         print_centered_header "System Benchmarks"
-        printf "%s  CPU Thermal Stress Test\n" "$N1"
-        printf "%s  VPN & Crypto Benchmark\n" "$N2"
-        printf "%s  Disk I/O Benchmark\n" "$N3"
-        printf "%s  Memory I/O Benchmark\n" "$N4"
-        printf "%s  DNS Latency Benchmark\n" "$N5"
-        printf "%s  Ookla Internet Speedtest\n" "$N6"
-        printf "%s  LibreSpeed Speed Test Server\n" "$N7"
-        printf "%s  iPerf3 Network Speed Test Server\n" "$N8"
-        printf "%s  OpenSpeedTest Server\n" "$N9"
-        printf "%s  Main menu\n" "$N0"
+        printf "%s%sCPU Thermal Stress Test\n" "$N1" "$NSEP"
+        printf "%s%sVPN & Crypto Benchmark\n" "$N2" "$NSEP"
+        printf "%s%sDisk I/O Benchmark\n" "$N3" "$NSEP"
+        printf "%s%sMemory I/O Benchmark\n" "$N4" "$NSEP"
+        printf "%s%sDNS Latency Benchmark\n" "$N5" "$NSEP"
+        printf "%s%sOokla Internet Speedtest\n" "$N6" "$NSEP"
+        printf "%s%sLibreSpeed Speed Test Server\n" "$N7" "$NSEP"
+        printf "%s%siPerf3 Network Speed Test Server\n" "$N8" "$NSEP"
+        printf "%s%sOpenSpeedTest Server\n" "$N9" "$NSEP"
+        printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-9/0/?]: "
         read -r bench_choice
@@ -8802,8 +9383,16 @@ benchmark_system() {
                     fi
                 }
                 
-                cpu_cores=$(grep -c "^processor" /proc/cpuinfo 2>/dev/null)
-                [ -z "$cpu_cores" ] && cpu_cores=1
+                # stress loads every logical CPU; the label names cores vs threads so a
+                # multithreaded chip (MT7621: 2 cores / 4 threads) reads honestly.
+                _cc=$(cpu_counts); cpu_logical=${_cc% *}; cpu_phys=${_cc#* }
+                [ "$cpu_phys" -eq 1 ] && _cw=core || _cw=cores
+                if [ "$cpu_phys" -lt "$cpu_logical" ]; then
+                    stress_what="$cpu_logical threads ($cpu_phys $_cw)"
+                else
+                    [ "$cpu_logical" -eq 1 ] && _cw=core || _cw=cores
+                    stress_what="$cpu_logical $_cw"
+                fi
                 
                 printf "\nHow many seconds to run stress test? [default: 60]: "
                 read -r duration
@@ -8818,7 +9407,7 @@ benchmark_system() {
                 start_fan_str=$(get_fan_speed)
                 
                 printf "\n"
-                countdown_run "Stress testing $cpu_cores cores" "$duration" stress --cpu "$cpu_cores" --timeout "${duration}s"
+                countdown_run "Stress testing $stress_what" "$duration" stress --cpu "$cpu_logical" --timeout "${duration}s"
 
                 raw_end=$(get_cpu_temp)
                 end_temp_str=$(get_temp)
@@ -8910,7 +9499,8 @@ benchmark_system() {
                 # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
                 # device by appending one line in the same column order:
                 # id|label|cpu|aes64|aes1420|aes16k|cha64|cha1420|cha16k|rsa_sign|rsa_verify
-                bench_ref='mt3600be|Beryl 7|MT7987a|267728|621208|721917|126357|258082|323188|182.9|6850.8
+                bench_ref='be14000|Flint 4|MT7988a|342047|662912|715487|116011|214298|259237|163.5|6140.7
+mt3600be|Beryl 7|MT7987a|267728|621208|721917|126357|258082|323188|182.9|6850.8
 be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5
 mt6000|Flint 2|MT7986a|35969|403625|784938|128188|285938|336125|186.4|6906.5
 mt3000|Beryl AX|MT7981|174738|403199|465470|84051|166484|209360|118.7|4446.3
@@ -9026,7 +9616,8 @@ mt1300|Beryl|MT7621|5522|5944|5759|21915|27148|27613|10.4|397.6'
 
                 # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
                 # device by appending one line: id|label|cpu|write_mbs|read_mbs
-                bench_ref='mt3600be|Beryl 7|MT7987a|124.70|11.00
+                bench_ref='be14000|Flint 4|MT7988a|149.48|165.29
+mt3600be|Beryl 7|MT7987a|124.70|11.00
 be3600|Slate 7|IPQ5332|75.72|51.50
 mt6000|Flint 2|MT7986a|52.72|154.00
 mt3000|Beryl AX|MT7981|82.78|16.21
@@ -9093,7 +9684,8 @@ mt1300|Beryl|MT7621|0.24|12.54'
 
                 # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
                 # device by appending one line: id|label|cpu|mem_mbs
-                bench_ref='mt3600be|Beryl 7|MT7987a|4361.12
+                bench_ref='be14000|Flint 4|MT7988a|5271.48
+mt3600be|Beryl 7|MT7987a|4361.12
 be3600|Slate 7|IPQ5332|3006.13
 mt6000|Flint 2|MT7986a|5401.50
 mt3000|Beryl AX|MT7981|2983.29
@@ -9127,7 +9719,7 @@ mt1300|Beryl|MT7621|179.39'
                 clear
                 print_centered_header "DNS Benchmark"
 
-                print_info "Starting Comprehensive DNS Benchmark..."
+                print_info "Starting Comprehensive DNS Benchmark"
                 printf "\n"
                 
                 # Pre-check: Can we resolve anything at all?
@@ -9203,16 +9795,36 @@ mt1300|Beryl|MT7621|179.39'
             6)
                 clear
                 print_centered_header "Ookla Network Speedtest"
-                install_ookla_speedtest
-                
-                printf "\n%b\n" "${YELLOW}⏳ Running Ookla Speedtest...${RESET}"
-                printf "──────────────────────────────────────────────────────────────────────────────────────────\n"
-
-                speedtest -a --accept-license --accept-gdpr 2>/dev/null
-                
-                printf "\n──────────────────────────────────────────────────────────────────────────────────────────\n"
-                print_success "Ookla Speedtest completed"
-                press_any_key
+                # Ookla ships no MIPS binary, so MIPS routers run speedtest-go instead:
+                # same speedtest.net servers, a real WAN-to-internet measurement. Both
+                # installers explain, wait, then return non-zero if the binary can't be
+                # had (no build, or no internet), so "|| continue" goes back to the menu
+                # instead of "running" a missing binary that no-ops and claims success.
+                _stdiv="──────────────────────────────────────────────────────────────────────────────────────────"
+                case "$(uname -m)" in
+                    mips*)
+                        install_speedtest_go || continue
+                        printf "\n%b\n" "${YELLOW}⏳ Running Internet Speedtest (speedtest.net) ${RESET}"
+                        printf "%s\n" "$_stdiv"
+                        if "$STGO_BIN"; then
+                            printf "\n%s\n" "$_stdiv"
+                            print_success "Speedtest completed"
+                        else
+                            printf "\n%s\n" "$_stdiv"
+                            print_error "Speedtest didn't complete - check your internet connection."
+                        fi
+                        press_any_key
+                        ;;
+                    *)
+                        install_ookla_speedtest || continue
+                        printf "\n%b\n" "${YELLOW}⏳ Running Ookla Speedtest ${RESET}"
+                        printf "%s\n" "$_stdiv"
+                        speedtest -a --accept-license --accept-gdpr 2>/dev/null
+                        printf "\n%s\n" "$_stdiv"
+                        print_success "Ookla Speedtest completed"
+                        press_any_key
+                        ;;
+                esac
                 ;;
             7)  manage_librespeed ;;
             8)  
@@ -9224,7 +9836,7 @@ mt1300|Beryl|MT7621|179.39'
                     install_package iperf3 || { press_any_key; continue; }
                 fi
                 
-                printf "%b\n\n" "${YELLOW}⏳ Starting iperf3 Server on port 5201...${RESET}"
+                printf "%b\n\n" "${YELLOW}⏳ Starting iperf3 Server on port 5201... ${RESET}"
                 print_info "Client usage:"
                 printf "   Download:  %biperf3 -c %s -P 6 -R -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
                 printf "   Upload:    %biperf3 -c %s -P 4 -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
@@ -9254,16 +9866,19 @@ show_uci_help() {
     print_centered_header "System Configuration Viewer - Help"
 
     cat << 'HELPEOF'
-What is this?
-─────────────
-A READ-ONLY viewer for the router's UCI configuration. Choosing a category
-prints its current settings so you can inspect them — nothing is changed,
-saved or committed from this screen.
+System Configuration Viewer - Quick Help
 
-Getting around:
-• Type the number shown beside a category and press Enter to view it.
-• [0] returns to the Main menu.
-• [?] shows this help.
+What it does
+────────────
+A READ-ONLY viewer for the router's UCI configuration - the unified config
+behind wireless, network, firewall, VPN and more. Pick a category to print its
+current settings.
+
+Read-only, on purpose
+─────────────────────
+Nothing is changed, saved or committed from this screen. It's for inspecting
+what the router is actually running - safe to browse, and handy for
+troubleshooting or comparing against the Admin Panel.
 HELPEOF
 
     press_any_key
@@ -9273,12 +9888,12 @@ view_uci_config() {
     while true; do
         clear
         print_centered_header "System Configuration Viewer"
-        printf "%s  Wireless Networks\n" "$N1"
-        printf "%s  Network Configuration\n" "$N2"
-        printf "%s  VPN Configuration\n" "$N3"
-        printf "%s  System Settings\n" "$N4"
-        printf "%s  Cloud Services\n" "$N5"
-        printf "%s  Main menu\n" "$N0"
+        printf "%s%sWireless Networks\n" "$N1" "$NSEP"
+        printf "%s%sNetwork Configuration\n" "$N2" "$NSEP"
+        printf "%s%sVPN Configuration\n" "$N3" "$NSEP"
+        printf "%s%sSystem Settings\n" "$N4" "$NSEP"
+        printf "%s%sCloud Services\n" "$N5" "$NSEP"
+        printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-5/0/?]: "
         read -r config_choice
@@ -9606,7 +10221,7 @@ install_openspeedtest() {
     fi
 
     # Execute the script
-    print_info "Launching installer..."
+    print_info "Launching installer"
     printf "\n"
     sleep 2
     
@@ -9665,8 +10280,10 @@ show_main_help() {
     print_centered_header "GL.iNet Toolkit - Main Menu Help"
 
     cat << 'HELPEOF'
-What is this?
-─────────────
+GL.iNet Toolkit - Quick Help
+
+What it does
+────────────
 The top-level menu of the GL.iNet router toolkit. Each entry opens a dedicated
 area of the toolkit:
 
@@ -9691,13 +10308,13 @@ show_menu() {
         clear
         printf "%b\n" "$SPLASH"
         printf "%b\n" "${CYAN}Please select an option:${RESET}\n"
-        printf "%s  Show Hardware Information\n" "$N1"
-        printf "%s  AdGuardHome Control Center\n" "$N2"
-        printf "%s  System Tweaks\n" "$N3"
-        printf "%s  System Benchmarks\n" "$N4"
-        printf "%s  VPN Tools\n" "$N5"
-        printf "%s  View System Configuration (UCI)\n" "$N6"
-        printf "%s  Exit\n" "$N0"
+        printf "%s%sShow Hardware Information\n" "$N1" "$NSEP"
+        printf "%s%sAdGuardHome Control Center\n" "$N2" "$NSEP"
+        printf "%s%sSystem Tweaks\n" "$N3" "$NSEP"
+        printf "%s%sSystem Benchmarks\n" "$N4" "$NSEP"
+        printf "%s%sVPN Tools\n" "$N5" "$NSEP"
+        printf "%s%sView System Configuration (UCI)\n" "$N6" "$NSEP"
+        printf "%s%sExit\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-6/0/?]: "
         read opt

@@ -4,6 +4,213 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-14
+- Added: the Hardware Info **Network** page (page 3) is now a physical-port panel - a
+  column grid (Port · Role · Status · Link · Maps to) grouped by the chip each port
+  hangs off. It reads GL's port map (`eth_ports_config_map`) when present, with
+  swconfig and raw-netdev fallbacks, so it works on old and new firmware with nothing
+  model-specific hardcoded. Fixes two gaps: 2-port devices (which showed no chassis
+  ports at all) now render, and multi-fabric devices like the BE14000 now match the
+  web UI's silk labels. "Maps to" is the real `ifconfig` interface a port appears as;
+  switch-group headers name the uplink and its speed (the switch→SoC pipe, not a
+  per-port cap).
+- Added: a per-page `[?]` Quick Help for the Hardware Information viewer (it had none)
+  - a light explainer for each of the four pages, with a glossary on the Network page
+  (Role, Link, Maps to, uplink).
+- Changed: Remote LAN Access subnet detection now uses two scan tiers instead of
+  three - a Standard scan that pings the common gateways (no dependency, works
+  offline) and, only if that finds nothing, a Full scan that installs fping and
+  sweeps every private /24 in seconds. The redundant middle tier is gone, so the
+  flow is one scan then at most one prompt.
+- Changed: the subnet-detection prompt is shorter and more precise ("No remote LAN
+  answered on the common subnets. Run a full scan (every private /24, ~30s)?"), the
+  standalone "Detecting…" line (which sat without a spinner) is gone, and the fping
+  install now shows a spinner.
+- Changed: progress spinners no longer print a trailing "…" - the spinner itself
+  shows the operation is running, so labels read cleanly (e.g. "Scanning common
+  subnets" with the spinner beside it).
+- Changed: the Remote LAN Access topology diagram dropped its left rail, so the
+  network column (e.g. `192.168.8.0/24`) lines up with the Status column of the flow
+  table directly below it.
+- Changed: on the paginated screens (MTU Optimizer, Remote LAN Access) a blank line
+  now separates the action list from the [P]/[N] navigation footer, and a blank line
+  precedes any status output, matching Hardware Info / Display.
+- Fixed: the MTU active probe no longer leaves a double blank line after you answer
+  "Run the probe? [y/N]".
+- Changed: progress "…" is retired everywhere, not just on the spinners. Static
+  action lines (Disabling HW Acceleration, Patching Web-UI, Stopping service, and
+  ~25 others) and the two startup spinners drop the trailing dots; when a spinner is
+  present it is the only "working" signal.
+- Changed: Remote LAN Access [2] runs its SSH-to-peer lookup under a spinner, so the
+  up-to-10s probe (a peer with no SSH) shows live progress instead of a frozen
+  screen. A scan that finds nothing now says "No remote LAN found automatically"
+  before the manual-entry prompt, which itself says "manually" so the reason is clear.
+- Changed: prompts sit flush-left (column 0) with the status lines they follow
+  rather than a 3-space indent - one clean left margin - and exactly one blank line
+  follows a y/N answer before the resulting action.
+- Fixed: the Guest Network Bandwidth Limiter's "Guest → GL Web UI:" value now lines
+  up with the other CONFIGURATION STATUS values (the multibyte → left it one column
+  short).
+- Added: the Ookla Internet Speedtest now works on MIPS routers (e.g. the GL-MT1300).
+  Ookla ships no MIPS build, so on MIPS the toolkit fetches speedtest-go - a maintained
+  Go client that measures against the same speedtest.net servers - to /tmp on demand and
+  runs a real WAN-to-internet test (download/upload/ping/jitter). Non-MIPS routers use
+  the official Ookla binary exactly as before.
+- Fixed: on MIPS the Ookla speed test used to print "not available", then fall through
+  and "run" a missing binary that silently did nothing yet reported "completed". It now
+  either runs (via speedtest-go, above) or soft-fails cleanly if the internet is down -
+  the same way a failed package install does. (The earlier message that pointed at
+  LibreSpeed/iperf3 as substitutes was misleading: those are LAN speed-test targets, not
+  a WAN-to-internet measurement.)
+- Changed: Termius glyph spacing corrected after a live re-measure. Menu keycaps
+  (1-9, 0) and the Help/Clear markers now sit at a single space - a profile-aware
+  separator lets Termius narrow to one column while every other terminal (macOS
+  Terminal, Windows Terminal, ttyd, PuTTY) stays byte-for-byte identical - and the
+  warning/info/action icons drop to one space as well (a current Termius no longer
+  clips the trailing cell of a coloured run, so the old sacrificial pad is gone).
+  The success/error/hourglass icons keep two spaces: they paint two cells but the
+  cursor advances one, so a single space would butt the text.
+- Fixed: on Termius the "Running Ookla/Internet Speedtest" and "Starting iperf3
+  Server" headers lost their final character - the leading hourglass made Termius
+  clip the last cell of the coloured run; a sacrificial trailing space restores it.
+- Fixed: the CPU stress-test countdown no longer leaves a ghost digit when the
+  remaining-seconds text shrinks (e.g. "10s" -> "9s"); each redraw clears to end of line.
+- Changed: on the Hardware Info Network page, the "WAN address" and "LAN bridge"
+  values now line up in the same column.
+- Changed: CPU core reporting is topology-aware. Plain multi-core chips still read
+  "Cores: N"; multithreaded parts (e.g. MT7621) read "Cores: 2 (4 threads)" and the
+  stress test says "Stress testing 4 threads (2 cores)". Physical cores come from the
+  kernel's /sys CPU topology, logical from /proc/cpuinfo - no per-model table.
+
+## 2026-08-08
+- Added: PuTTY (and other bare `xterm` / `putty` terminals) now get coloured status
+  glyphs in Compatible mode instead of the plain ASCII markers. It uses the emoji
+  PuTTY actually renders - ✅ ❌ ⏳ and the 🟢🔴🟡 traffic-light dots - and, because
+  PuTTY draws emoji in monochrome, paints them via ANSI so the Remote LAN Access
+  stoplights stay distinguishable. Warning/info/action use emoji-default stand-ins
+  (❗ 💡 🔧) rather than ⚠️/ℹ️/⚙️, which PuTTY clips to half-glyphs (those are
+  text-default codepoints it draws in a single cell). Menu keys - numbers, All,
+  help and clear - stay in [brackets], which read cleanly there. Detected by TERM;
+  genuinely limited terminals (serial console, TERM=linux/vt100) keep pure ASCII.
+- Changed: Windows Terminal menus now number options with the bold negative-circled
+  digits ❶..❾ + ⓿ (and Ⓐ for "All") instead of [1]..[0] text. The keycap emoji used
+  on other terminals (1️⃣) box out on Windows Terminal, but these render cleanly and
+  are single-width - advancing one cell, like the keycaps do - so the labels line up
+  exactly as they do elsewhere. Help/Clear keep ❓/🆑, which render fine there.
+- Changed: Remote LAN Access subnet detection now shows a spinner during the scan
+  instead of a seconds-remaining countdown. The scan time is network-dependent, so
+  the countdown drifted out of sync; the spinner just shows it is still working.
+- Changed: the VPN MTU Optimizer now uses the same paginated layout as Remote LAN
+  Access - one tunnel per page, [P]/[N] to move between them, and the four actions
+  (Optimize tunnel / Set MTU manually / Verify with an active probe / Reset) act on
+  the tunnel on screen. This replaces the old "which tunnel?" picker and the
+  all-tunnels batch, and fixes the screen overflowing with three or more tunnels.
+  Each page also gains a Status: Active/Inactive line and a Remote-LAN-Access-style
+  navigation row.
+- Fixed: an inconclusive MTU active probe (no reply, or the don't-fragment flag
+  ignored) now clears any prior "Verified" basis, so the status returns to
+  "Calculated from link MTU" instead of keeping a stale Verified value the path can
+  no longer confirm - itself a signal that the tunnel's behaviour changed.
+- Changed: the MTU active probe now shows the standard spinner while it searches
+  for the largest packet size, instead of a static "Probing ..." line that looked
+  frozen during the (few-second) don't-fragment sweep.
+- Changed: the VPN MTU Optimizer and Remote LAN Access now share one paginated
+  layout - a cyan identity line (tunnel + role-aware state: servers UP/DOWN, clients
+  CONNECTED/DISCONNECTED with handshake age, ALL CAPS), a density divider sized to
+  the widest content line, and a single realtime nav footer ("[P] Previous  Page N
+  of M  [N] Next  [1/2/3/4]  [0] Back  [?] Help" - single keypress, cursor at the
+  line end, no Choose prompt, shown even on one page where [P]/[N] just refresh). On
+  Remote LAN Access the tunnel identity is promoted above the network diagram and
+  OUTBOUND/INBOUND is highlighted. Pure-list screens keep no divider.
+- Fixed: the AdGuardHome Backup Cleanup screen's two framing lines were different
+  widths (55 vs 62); both now match at the widest content line (60).
+
+## 2026-08-07
+- Added: the Hardware Information wireless page now shows each radio's supported
+  Wi-Fi standards. The Band line carries the marketing generation in parens
+  (e.g. "5GHz (Wi-Fi 6)") and a new Protocol line lists the IEEE standards
+  (e.g. "802.11a/n/ac/ax"). It reads the chip's real capabilities and is
+  band-aware: 802.11ac is 5/6 GHz only, so 2.4 GHz is never labelled "ac" even
+  on chips (some MediaTek parts) that advertise a VHT capability block there for
+  the vendor 256-QAM rate extension. The generation also distinguishes Wi-Fi 6
+  from 6E, which share the 802.11ax standard.
+- Added: Flint 4 (GL-BE14000 / MT7988a) is now a recognised model - it appears by
+  name in the benchmark comparison tables (VPN/crypto, disk, memory), has its CPU
+  clock in the fixed-clock fallback, and is listed among the tested models.
+- Changed: Remote LAN Access now reports MEASURED status, not guesses. Every
+  outbound row shows a live reachability probe (from the tunnel address and from
+  the real LAN address, to the peer and to the remote LAN), so the top table can
+  no longer disagree with a separate test - it IS the test, measured up front on
+  entry and re-measured only after a change that could move it. This retires the
+  misleading padlock and the wrong "no route here" line; rows that genuinely
+  can't be tested from here (inbound flows the remote must start, or an unknown
+  subnet) show a plain reason rather than a false status. Status now uses a
+  traffic-light set - 🟢 reachable / 🔴 blocked / 🟡 not testable from here -
+  which renders at a uniform width across terminals (the earlier ⚠️ mis-sized on
+  macOS Terminal). Empty peers now read "no clients" (server) or "no peer"
+  (client) instead of the ambiguous "(none)".
+- Fixed: on laggy connections (for example Termius over in-flight wifi) the
+  toolkit could misdetect the terminal type on startup and pick the wrong glyph
+  widths, leaving symbols and colour runs misaligned. The terminal probe now
+  waits out the round-trip and reassembles a reply split across reads instead of
+  giving up after a fixed fraction of a second, while still answering instantly on
+  a responsive terminal.
+- Added: Remote LAN Access can now auto-detect the remote LAN subnet instead of
+  making you type it. It sweeps candidate gateways THROUGH the tunnel and keeps
+  only those that answer at zero hops (directly across the tunnel, not one hop
+  upstream), in escalating tiers - Quick (common gateways, instant), Standard
+  (192.168/16 + 172.16/12 + usual 10.x, a couple of seconds), and Full (every
+  RFC1918 /24, 139,776 candidates, offered on demand with a countdown). Uses fping
+  when present, a shell sweep otherwise. When several subnets are directly
+  attached it lists them and lets you pick.
+- Changed: Remote LAN Access menu was tidied up. Options are now one-per-line and
+  use the app-wide Enable/Disable wording; on both directions [1] toggles
+  reachability and [2] detects the subnet, with masquerade as an outbound-only
+  [3]. The inbound "set up the remote router" option was removed - it only ever
+  installed an SSH key and then told you to configure the remote by hand (and hung
+  for a minute when the peer had no sshd); that guidance now lives in [?] Help.
+  Also added "[?] Help" to the navigation row.
+- Fixed: the Guest Network Bandwidth Limiter's "Help" line was indented one column
+  short of the others on some terminals (the help glyph's trailing space differed
+  by profile); it now lines up with the numbered options.
+- Fixed: Remote LAN Access subnet detection now works on a tunnel that has no
+  default route - for example an OpenVPN client with no pushed LAN route. The scan
+  binds its probes to the tunnel interface, so it never actually needed a default
+  route; the guard that required one wrongly refused to scan and sent you to manual
+  entry.
+- Fixed: subnet detection now excludes ALL of this router's own subnets, not just
+  the current tunnel and the LAN - including other VPN tunnels that are configured
+  but down. It was offering a router's own WireGuard range (reachable across a
+  second tunnel) as if it were a remote LAN.
+- Changed: the Remote LAN Access status legend now labels the third state
+  "unknown" (🟡) rather than "not testable from here" - the Change column already
+  says why and what to do, so the shorter word avoids reading as a dead-end when
+  it just needs the subnet detected.
+- Fixed: a few stale references in Remote LAN Access after the menu renumbering -
+  the "route needs a subnet" hint pointed at "option 4", a post-route hint
+  referenced the removed "test" option, and the "left unknown" message was long
+  enough to wrap; all corrected.
+
+## 2026-07-31
+- Added: an in-screen "[?] Help" to the VPN MTU Optimizer, Remote LAN Access and
+  VPN Tools screens (they had none), so every one of those menus can explain
+  itself without leaving. The MTU help also explains that a failed active probe
+  usually just means the server does not answer ICMP (not that the VPN is down),
+  and that the tool keeps the Calculated value when it cannot verify - an
+  inconclusive probe means "couldn't verify", not "broken".
+- Fixed: the Package & Persistence Manager's "[?] Help" pointed at a help screen
+  that was never written, so pressing it errored instead of showing help. The
+  help now exists.
+- Changed: the help screens were made consistent - every one opens with a
+  "<Feature> - Quick Help" title, uses the same layout, and is triggered the same
+  way. The AdGuardHome Direct Access help now shows your router's real LAN address
+  instead of a hard-coded example, and no longer refers to menu items by number.
+- Changed: the VPN MTU active-probe result screen now labels its rows "Calculated
+  MTU" and "Verified MTU" (was "Old/New Recommended"), and when a probe cannot
+  verify it reads "Verified MTU: unknown" and "Falling back to the Calculated
+  <n>; this value was not actively verified" - so an inconclusive probe no longer
+  reads as if the value had been confirmed. (Community feedback.)
+
 ## 2026-07-30
 - Fixed: the VPN MTU active probe now works on OpenVPN clients. GL uses OpenVPN's
   `topology subnet`, so the tunnel interface has no kernel peer address and a

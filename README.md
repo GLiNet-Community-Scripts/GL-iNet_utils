@@ -35,7 +35,7 @@
   - **Toolkit Management:** Install the toolkit as a system command — copies it to `/usr/sbin/glinet_utils` so you can launch it from any directory by just typing `glinet_utils`, with optional `sysupgrade.conf` persistence so it (and its self-updates) survive firmware upgrades.
 - 📊 **Performance Benchmarks**
   - **Cross-Device Leaderboards:** A VPN & Crypto benchmark (WireGuard/ChaCha20, OpenVPN/AES-GCM, and RSA handshake), plus CPU thermal stress and raw Disk/Memory I/O — each ranked against saved reference routers instead of a single baseline — alongside DNS latency.
-  - **Network Probing:** Integrated support for Ookla Speedtest, LibreSpeed, and OpenSpeedTest server environments. (Ookla ships its own binary and publishes no MIPS build, so on MIPS routers use LibreSpeed or iperf3 instead — the toolkit says so up front.)
+  - **Network Probing:** Integrated support for Ookla Speedtest, LibreSpeed, and OpenSpeedTest server environments. (Ookla publishes no MIPS build, so on MIPS routers the Ookla Internet Speedtest transparently uses speedtest-go — a maintained client on the same speedtest.net servers — for a real internet speed test there too.)
 - 🔐 **VPN Tools**
   - **MTU Optimizer:** Finds your active WireGuard and OpenVPN tunnels — client or server — and recommends the right MTU (the underlay link MTU minus that protocol's exact overhead), so tunnelled traffic stops fragmenting and silently losing throughput. Apply it with one keypress, set a value by hand, run an optional active probe, or reset to the router's default. On routers with more than one tunnel, Optimize and Reset can act on all of them at once, each with its own correct value.
   - **Written where the router expects it:** the MTU goes into GL.iNet's own VPN configuration rather than a generic network setting, so it appears in the Admin Panel under that tunnel's Options and survives a reboot. On older firmware, where the web UI can set an MTU but not clear it again, Reset is the only way back to the default.
@@ -50,7 +50,7 @@
 - 🔄 **Native Self-Updater:** Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 **GPL-3.0 Licensed:** Free, open, and community-driven.
 
-Tested on various GL.iNet models (Beryl, Beryl AX, Beryl 7, Slate 7, Flint 3, Flint 3e, etc.) running recent firmware.
+Tested on various GL.iNet models (Beryl, Beryl AX, Beryl 7, Slate 7, Flint 3, Flint 3e, Flint 4, etc.) running recent firmware.
 
 ---
 
@@ -166,6 +166,7 @@ WireGuard Server: wgserver
 3️⃣  Verify with an active probe
 4️⃣  Reset MTU (remove override)
 0️⃣  Back
+❓  Help
 ```
 
 System Configuration Viewer

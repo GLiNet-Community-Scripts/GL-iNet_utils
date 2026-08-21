@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-14
+# Version: 2026-08-21
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -83,6 +83,12 @@
 #    list, table, or change-summary - is its own region: separate it from the
 #    action/prompt with one blank line or a divider (Gestalt common region; the
 #    modal body-vs-footer pattern, same as a menu's options => "Choose").
+#    Exception - a MID-FLOW interruption: when the disclosure+prompt appear AFTER the
+#    user has already answered a DIFFERENT prompt in the same flow (e.g. typed a value,
+#    then a "that requires X - proceed?" surprise), the warning is a NEW component, not
+#    a leading disclosure - give it ONE blank line ABOVE it to detach it from the
+#    finished entry, then hug its own prompt below as usual. (The action that follows
+#    the answer still gets its one blank per rule 10.) See _netlimit_offload_ok.
 # 2. Yes = the action; the capitalized default marks the safe side
 #    (destructive => [y/N], expected/safe => [Y/n]). Never invert (no Yes=no-op).
 # 3. Wording is the behavioral contract. Transition framing ("Enable it?") =>
@@ -126,6 +132,17 @@
 #    A selector must never carry an action verb: "[A] All Tunnels" under an
 #    "Optimize which tunnel?" header, never "[A] Optimize All Tunnels" - a verb
 #    reads as a commit and turns any following prompt into a redundant re-ask.
+#    Status word MATCHES the control verb, positive polarity. A state shown as status
+#    reads in the SAME verb family as the action that changes it: a feature toggled with
+#    Enable/Disable reports ENABLED/DISABLED (not ON/OFF); a device/service switched On/Off
+#    or Start/Stop reports ON/OFF or RUNNING/STOPPED. Never pair an Enable/Disable control
+#    with an ON/OFF readout, and (toggle-label std) the action label states what pressing
+#    does NOW ("[H] Disable HW Acceleration"), never "Toggle". Name the THING in the label,
+#    put the STATE in the value, positive-polarity - never a negated label with a boolean
+#    ("Disabled: TRUE", "Not persisted: FALSE"): that forces a double-negative read. When a
+#    state is desirable on one screen but not intrinsically "good" (HW Acceleration DISABLED
+#    is the READY state on the Bandwidth Limiter), COLOR carries the health (green nominal /
+#    yellow attention), not the word - see manage_netlimit.
 # 9. Dwell mechanism. Match how a screen waits to its information value. User-
 #    paced ("Press any key") for anything the user must READ - help, reports,
 #    status/lists, and action results whose detail won't survive the return to a
@@ -483,10 +500,17 @@ detect_output_mode() {
                 ambig=$(probe_advance '⚠️')
                 [ "$ambig" = "2" ] && _TERM_PROFILE="wt"
             fi
+            # Cell width of the inferred-subnet dagger † (U+2020). It is 3 BYTES but renders
+            # 2 cells on macOS Terminal and 1 cell on termius/ttyd/wt/putty (measured with
+            # glyph-test.sh), so byte-based padding (%-Ns) misaligns any column that holds a
+            # daggered value. Measure it so rla_dispw pads by display width instead.
+            DAG_CELLS=$(probe_advance '†')
         else
             OUTPUT_MODE="compat"               # can't probe without a real stty -> use the consistent Compatible set
         fi
     fi
+    # Default for compat / un-probed terminals: † is 1 cell there (putty measured 1).
+    case "$DAG_CELLS" in 1|2) ;; *) DAG_CELLS=1 ;; esac
 
     # ── Step 4: Set symbol variables ─────────────────────────────────────────
     if [ "$OUTPUT_MODE" = "full" ]; then
@@ -1083,6 +1107,102 @@ apply_update() {
     print_success "Upgrade complete. Restarting"
     stty sane 2>/dev/null </dev/tty   # reset line discipline (a raw-mode keypress triggered us) so the restarted copy can read input
     exec "$SCRIPT_PATH.new" "$@"
+}
+
+# --- Generic paged viewer (shared by every help screen) ----------------------
+# Page-start line numbers for a body file at <plines> lines/page, each break SNAPPED back to
+# the nearest blank line so a page never splits a paragraph; hard-cut only if one block is
+# taller than a page. Pure (no terminal, no globals) so it is unit-testable in isolation.
+_paged_starts() {   # <plines> <file>  -> space-separated 1-based start line numbers
+    awk -v plines="$1" '
+        { blank[NR] = ($0 ~ /^[[:space:]]*$/) ? 1 : 0 }
+        END {
+            total=NR; if (total==0) { print 1; exit }
+            s=1; out=s
+            while (s + plines <= total) {
+                cut = s + plines
+                while (cut > s + 1 && !blank[cut-1]) cut--     # back up to end a page on a blank
+                if (cut <= s + 1) cut = s + plines             # a single block > one page: hard-cut
+                out = out " " cut; s = cut
+            }
+            print out
+        }' "$2"
+}
+# One keypress from the CONTROLLING TERMINAL, not stdin - show_paged's stdin is the heredoc
+# body it just consumed. Returns "0" on EOF/no-tty so a non-interactive caller breaks cleanly.
+# One keypress from the CONTROLLING TERMINAL (show_paged's stdin is the consumed heredoc body).
+# Char-raw for the single read, then restore a SANE line discipline so the next page's newlines
+# carry a carriage return (ONLCR) - a caller that left the tty in raw/char mode (the live Fan /
+# Hardware screens) would otherwise make paged output staircase down the screen. "0" on EOF.
+_pg_key() {
+    local k
+    stty -icanon -echo min 1 time 0 </dev/tty 2>/dev/null
+    k=$(dd bs=1 count=1 2>/dev/null </dev/tty)
+    stty sane </dev/tty 2>/dev/null
+    [ -n "$k" ] && printf '%s' "$k" || printf '0'
+}
+
+# show_paged <title> [exit-label]  - scrollable viewer for pre-formatted text read from STDIN
+# (a heredoc). Reuses the changelog house-pager: [P] Previous / numbered chips or Page X/Y /
+# [N] Next / [0] Back, page breaks snapped to blank lines. Content that fits one screen shows a
+# plain dwell. Non-interactive (a pipe, or no controlling terminal - e.g. the E2E harness):
+# dumps the body once and returns, so nothing hangs.
+show_paged() {
+    local title="$1" exitlbl="${2:-Back}" body rows plines starts pages page start nstart end key i div total
+    body=$(mktemp 2>/dev/null || echo "/tmp/.glpage.$$")
+    cat > "$body"
+    # strip whitespace first: BSD/macOS `wc -l` left-pads its count ("   13"), and the
+    # non-numeric guard would then reset a valid total to 0 -> empty body. busybox does not
+    # pad, so the fleet was unaffected, but keep it portable for the harness + other shells.
+    total=$(wc -l < "$body" 2>/dev/null | tr -d ' \t'); case "$total" in ''|*[!0-9]*) total=0 ;; esac
+    if [ ! -r /dev/tty ] || [ ! -t 1 ]; then      # non-interactive: dump, don't page
+        clear 2>/dev/null; print_centered_header "$title"; sed '/./,$!d' "$body"; rm -f "$body"; return 0
+    fi
+    # A caller (the live Fan / Hardware screens) may hand us a tty still in raw/char mode; force a
+    # sane line discipline so our multi-line rendering does not staircase. Restored + screen
+    # cleared on exit so the caller's in-place redraw starts from a clean slate (not overlaid).
+    stty sane </dev/tty 2>/dev/null
+    rows=$(stty size 2>/dev/null </dev/tty | awk '{print $1}')
+    case "$rows" in ''|*[!0-9]*) plines=22 ;; *) plines=$((rows - 8)); [ "$plines" -lt 12 ] && plines=12 ;; esac
+    starts=$(_paged_starts "$plines" "$body")
+    pages=$(printf '%s' "$starts" | awk '{print NF}'); case "$pages" in ''|*[!0-9]*|0) pages=1 ;; esac
+    div=$(awk 'BEGIN{s="";for(i=0;i<78;i++)s=s"─";print s}')
+    page=1
+    while :; do
+        # awk, not `cut -f`: POSIX cut PASSES THROUGH a single-field line (starts="1" on a
+        # single-page body), so `cut -f2` returned "1" on busybox -> end=0 -> empty body. awk
+        # yields "" for an out-of-range field, so nstart is correctly empty on the last page.
+        start=$(echo "$starts" | awk -v p="$page" '{print $p}')
+        nstart=$(echo "$starts" | awk -v p="$((page+1))" '{print $p}')
+        [ -n "$nstart" ] && end=$((nstart-1)) || end="$total"
+        # print_centered_header already leaves ONE blank line under the box (its trailing \n\n),
+        # which matches every other screen - so no extra printf '\n' here (that was a second gap).
+        # `sed '/./,$!d'` drops any leading blank lines of THIS page's slice (some help bodies, e.g.
+        # the Hardware pages, open with a blank line) so the body starts right under that one gap.
+        clear; print_centered_header "$title"
+        sed -n "${start},${end}p" "$body" | sed '/./,$!d' | sed 's/^/ /'    # indent body 1 col to align with the divider/footer
+        if [ "$pages" -le 1 ]; then
+            printf '\n %b[0] %s   (or any key)%b ' "$GREY" "$exitlbl" "$RESET"; _pg_key >/dev/null; printf '\n'; break
+        fi
+        printf ' %s\n' "$div"
+        printf ' [P] Previous   '
+        if [ "$pages" -le 9 ]; then
+            i=1; while [ "$i" -le "$pages" ]; do
+                [ "$i" -eq "$page" ] && printf '%b[%d]%b ' "$BOLD" "$i" "$RESET" || printf '%b[%d]%b ' "$GREY" "$i" "$RESET"
+                i=$((i+1)); done
+        else printf '%bPage %d of %d%b   ' "$BOLD" "$page" "$pages" "$RESET"; fi
+        printf '  [N] Next   [0] %s  ' "$exitlbl"
+        key=$(_pg_key); printf '\n'
+        case "$key" in
+            p|P) [ "$page" -gt 1 ] && page=$((page-1)) ;;
+            n|N) [ "$page" -lt "$pages" ] && page=$((page+1)) ;;
+            0)   break ;;
+            [1-9]) { [ "$pages" -le 9 ] && [ "$key" -le "$pages" ]; } && page="$key" ;;
+            *)   : ;;
+        esac
+    done
+    stty sane </dev/tty 2>/dev/null; clear    # leave a sane tty + clean screen for the caller
+    rm -f "$body"; return 0
 }
 
 # -----------------------------
@@ -1723,18 +1843,20 @@ hwnet_render() {
 
 # Per-page quick help for the Hardware Information viewer. $1 = the page on screen.
 show_hardware_help() {
-    clear
-    print_centered_header "Hardware Information - Help"
-    case "$1" in
-        2) cat << 'HELPEOF'
+    # Per-page help for the Hardware Information screen (current page in $1); each page's help
+    # is short and shown through the shared paged viewer.
+    case "${1:-1}" in
+        2) show_paged "Hardware Information - Help" <<'HELPEOF'
 
  Page 2 - Hardware Crypto Acceleration
    Whether the CPU accelerates the ciphers your VPNs use. AES-GCM
    (OpenVPN / IPsec) needs PMULL; ChaCha20 (WireGuard) needs NEON/SIMD.
    Green means the hardware fast path is available.
+
+ On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
 HELPEOF
         ;;
-        3) cat << 'HELPEOF'
+        3) show_paged "Hardware Information - Help" <<'HELPEOF'
 
  Page 3 - Network Interfaces
    Every physical port, grouped by the chip it hangs off.
@@ -1747,25 +1869,29 @@ HELPEOF
      uplink   the switch-to-SoC link and its speed - the pipe OUT of
               the switch, not a per-port limit. Ports on the same chip
               switch among themselves at full speed.
+
+ On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
 HELPEOF
         ;;
-        4) cat << 'HELPEOF'
+        4) show_paged "Hardware Information - Help" <<'HELPEOF'
 
  Page 4 - Wireless Interfaces
    Each Wi-Fi radio: band, protocol (Wi-Fi 4/5/6/7), channel width,
    MIMO streams and the current channel.
+
+ On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
 HELPEOF
         ;;
-        *) cat << 'HELPEOF'
+        *) show_paged "Hardware Information - Help" <<'HELPEOF'
 
  Page 1 - System Overview
    Device model, CPU, memory, storage and uptime. This page refreshes
    live once a second. Press * to reveal or hide the serial and MAC.
+
+ On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
 HELPEOF
         ;;
     esac
-    printf "\n [P]/[N] or [1-4] move between pages   [0] exits.\n"
-    press_any_key
 }
 
 show_hardware_info() {
@@ -2157,10 +2283,7 @@ show_hardware_info() {
 # AdGuardHome UI Updates Management
 # -----------------------------
 show_agh_ui_help() {
-    clear
-    print_centered_header "AdGuardHome UI Updates - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "AdGuardHome UI Updates - Help" << 'HELPEOF'
 AdGuardHome UI Updates - Quick Help
 
 What it does
@@ -2198,8 +2321,6 @@ In this menu you can:
 Note: Changing this setting restarts AdGuardHome automatically if already started. 
       Your filtering rules and stats are preserved.
 HELPEOF
-    
-    press_any_key
 }
 
 manage_agh_ui_updates() {
@@ -2322,10 +2443,7 @@ manage_agh_ui_updates() {
 # AdGuardHome Storage Management
 # -----------------------------
 show_agh_storage_help() {
-    clear
-    print_centered_header "AdGuardHome Filter Space Limit - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "AdGuardHome Filter Space Limit - Help" << 'HELPEOF'
 AdGuardHome Filter Space Limit - Quick Help
 
 Why the limit exists
@@ -2350,8 +2468,6 @@ and is safe for most GL.iNet 512MB devices.
 
 Only remove the 10MB limit after zram is active.
 HELPEOF
-    
-    press_any_key
 }
 
 manage_agh_storage() {
@@ -2431,7 +2547,7 @@ WARNEOF
                     print_info "It is strongly recommended to enable zram swap before adding aditional filter lists."
                 fi
                 
-                printf "%b" "${YELLOW}Remove the 10MB limit anyway? [y/N]: ${RESET}"
+                printf "Remove the 10MB limit anyway? [y/N]: "
                 read -r confirm
                 printf "\n"
                 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
@@ -2532,10 +2648,7 @@ WARNEOF
 # AdGuardHome Lists Management
 # -----------------------------
 show_agh_lists_help() {
-    clear
-    print_centered_header "AdGuardHome Lists - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "AdGuardHome Lists - Help" << 'HELPEOF'
 AdGuardHome Lists - Quick Help
 
 What it does
@@ -2573,8 +2686,6 @@ NextDNS, and Pi-hole forums for privacy gains.
 These lists auto-update in AdGuardHome. Install for enhanced blocking—
 monitor for streaming breaks and whitelist via the AdGuardHome UI.
 HELPEOF
-    
-    press_any_key
 }
 
 manage_agh_lists() {
@@ -2782,10 +2893,8 @@ id: $ts"
 
 show_agh_direct_help() {
     local lan_ip
-    clear
-    print_centered_header "AdGuardHome Direct Access - Help"
     lan_ip=$(get_lan_ip)
-    cat << HELPEOF
+    show_paged "AdGuardHome Direct Access - Help" << HELPEOF
 
 AdGuardHome Direct Access - Quick Help
 
@@ -2815,7 +2924,6 @@ Notes
     Direct Access afterwards to restore it.
 
 HELPEOF
-    press_any_key
 }
 
 update_agh_credentials() {
@@ -3045,9 +3153,7 @@ manage_agh_direct_access() {
 # -----------------------------
 
 show_agh_help() {
-    clear
-    print_centered_header "AdGuardHome Hub - Help"
-    cat << 'HELPEOF'
+    show_paged "AdGuardHome Hub - Help" << 'HELPEOF'
 AdGuardHome Control Center - Quick Help
 
 What it does
@@ -3087,7 +3193,6 @@ NOTES:
 - LOGS: Query logs are often in /tmp (RAM). If 'Free Space' is 
   low, the system may become unstable.
 HELPEOF
-    press_any_key
 }
 
 create_agh_backup() {
@@ -3328,10 +3433,7 @@ delete_agh_backups() {
 }
 
 show_agh_setup_help() {
-    clear
-    print_centered_header "AdGuardHome Setup & Access - Help"
-
-    cat << 'HELPEOF'
+    show_paged "AdGuardHome Setup & Access - Help" << 'HELPEOF'
 AdGuardHome Setup, Access & UI Updates - Quick Help
 
 What it does
@@ -3345,8 +3447,6 @@ Groups the AdGuardHome settings that aren't day-to-day filtering:
 
 Each item opens its own screen with full details and its own help.
 HELPEOF
-
-    press_any_key
 }
 
 sub_setup_config() {
@@ -3372,10 +3472,7 @@ sub_setup_config() {
 }
 
 show_agh_backup_help() {
-    clear
-    print_centered_header "AdGuardHome Backup & Recovery - Help"
-
-    cat << 'HELPEOF'
+    show_paged "AdGuardHome Backup & Recovery - Help" << 'HELPEOF'
 AdGuardHome Backup & Recovery - Quick Help
 
 What it does
@@ -3394,8 +3491,6 @@ Notes
   • A firmware update can replace the binary and script; restore a backup to
     recover.
 HELPEOF
-
-    press_any_key
 }
 
 sub_backup_recovery() {
@@ -3427,10 +3522,7 @@ sub_backup_recovery() {
 }
 
 show_agh_service_help() {
-    clear
-    print_centered_header "AdGuardHome Logs & Maintenance - Help"
-
-    cat << 'HELPEOF'
+    show_paged "AdGuardHome Logs & Maintenance - Help" << 'HELPEOF'
 AdGuardHome Logs & Maintenance - Quick Help
 
 What it does
@@ -3447,8 +3539,6 @@ When to use
 Note: starting, stopping and restarting the service is on the Control Center,
 not here.
 HELPEOF
-
-    press_any_key
 }
 
 sub_service_health() {
@@ -3678,10 +3768,7 @@ agh_control_center() {
 # --- Zram Swap Management ---
 
 show_zram_help() {
-    clear
-    print_centered_header "Zram Swap - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "Zram Swap - Help" << 'HELPEOF'
 Zram Swap – Quick Help
 
 What is zram swap?
@@ -3715,8 +3802,6 @@ In this menu you can:
 3. Enable/Disable Persistence - survives firmware updates
 4. Completely uninstall the package
 HELPEOF
-    
-    press_any_key
 }
 
 manage_zram() {
@@ -3830,7 +3915,7 @@ manage_zram() {
                 ;;
             4)
                 if pkg_is_installed zram-swap; then
-                    printf "%b" "${YELLOW}Remove zram-swap package? [y/N]: ${RESET}"
+                    printf "Remove zram-swap package? [y/N]: "
                     read -r confirm
                     printf "\n"
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
@@ -3864,10 +3949,7 @@ manage_zram() {
 # --- Fan Management Module ---
 
 show_fan_help() {
-    clear
-    print_centered_header "Fan Management - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "Fan Management - Help" << 'HELPEOF'
 Fan Management – Quick Help
 
 How the Fan Controller Works:
@@ -3902,8 +3984,6 @@ Extending limits beyond 100°C can lead to hardware throttling or
 emergency shutdowns. Most silicon is rated for ~105°C. Use 110°C+ 
 only if you understand the thermal risks to your specific model.
 HELPEOF
-    
-    press_any_key
 }
 
 manage_fan_settings() {
@@ -4268,412 +4348,6 @@ manage_fan_settings() {
     done
 }
 
-# --- Guest Network Bandwidth Limiter ---
-
-show_guestnetwork_help() {
-    clear
-    print_centered_header "Guest Network Limiter - Help"
-    
-    cat << 'HELPEOF'
-Guest Network Bandwidth Limiter – Quick Help
-
-What is a Bandwidth Limiter?
-───────────────────────────
-This tool allows you to set a "speed ceiling" for your Guest Wi-Fi. 
-Unlike per-client limits, this sets a Global Cap for the entire 
-Guest bridge (br-guest). 
-
-Main Benefits:
-• Congestion Control: Prevents guests from saturating your 10G/1G line.
-• Fair Sharing: Uses 'FQ_CoDel' to ensure one guest's 4K video doesn't 
-  cause "lag" or high ping for another guest's Zoom call.
-• Priority: Protects your "Home" network's performance during heavy use.
-
-How it Works (The Technical Bit):
-────────────────────────────────
-• Upload (Egress): Limits traffic leaving the router via br-guest.
-• Download (Ingress): Redirects incoming traffic to a virtual device 
-  (ifb0) to "shape" the flow before it reaches the guest's device.
-• HW Acceleration: Some high-speed routers bypass the CPU. If your 
-  limits aren't working, you may need to disable "Network Acceleration" 
-  in the GL.iNet Dashboard.
-
-Usage in this Menu:
-───────────────────
-1. Set Download/Upload: Enter the max speed in Mbps (Megabits). 
-   Entering '0' removes the limit for that direction.
-2. Persistence: Ensures your limits are reapplied automatically
-   after a reboot or a firmware sysupgrade.
-3. Reset to Defaults: Cleans all kernel tables, stops the background 
-   service, and offers to uninstall the 'tc' power tools.
-
-Testing your Limits:
-────────────────────
-To verify it's working:
-1. Connect a phone or laptop to the GUEST Wi-Fi SSID.
-2. Run a speed test (e.g., Speedtest.net or your script's tester).
-3. The result should stay slightly below the Mbps you defined.
-
-Note: Setting a limit too low (e.g., < 2 Mbps) may cause some modern 
-apps and websites to time out or feel "broken."
-HELPEOF
-    
-    press_any_key
-}
-
-manage_guest_limiter() {
-    local choice new_dl new_ul
-    
-    mgl_dependency_check() {
-        hash -r
-        if ! command -v tc >/dev/null 2>&1; then
-            install_package tc-full
-            hash -r
-        fi
-    }
-
-    get_hw_accel_info() {
-        # --- 1. Qualcomm Logic (Master) ---
-        if [ -f "/etc/config/ecm" ]; then
-            if [ "$(uci -q get ecm.global.enabled)" = "1" ]; then
-                echo -e "${RED}ENABLED (Qualcomm)${RESET}"
-            else
-                echo -e "${GREEN}DISABLED (Qualcomm)${RESET}"
-            fi
-            return
-        fi
-
-        # --- 2. MediaTek Logic ---
-        if [ -f "/etc/config/mtkhnat" ]; then
-            if [ "$(uci -q get mtkhnat.global.enable)" = "1" ]; then
-                echo -e "${RED}ENABLED (MediaTek)${RESET}"
-            else
-                echo -e "${GREEN}DISABLED (MediaTek)${RESET}"
-            fi
-            return
-        fi
-
-        # --- 3. SFE Fallback (For older/non-offloading specific chips) ---
-        if [ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "1" ]; then
-            echo -e "${RED}ENABLED (SFE/Direct)${RESET}" && return
-        else
-            echo -e "${GREEN}DISABLED (SFE/Direct)${RESET}" && return
-        fi
-    
-        echo -e "${YELLOW}UNKNOWN${RESET}"
-    }
-
-    toggle_admin_access() {
-        local action=$1  # "on" or "off"
-        local rule_name="guest_admin_access"
-        local lan_ip=$(get_lan_ip)
-        [ -z "$lan_ip" ] && lan_ip=$(ip -4 addr show br-lan | grep inet | awk '{print $2}' | cut -d/ -f1)
-        [ -z "$lan_ip" ] && lan_ip="192.168.8.1"
-
-        # 1. Always start by removing the named rule 
-        uci -q delete firewall."$rule_name"
-
-        # 2. Add it back only if we want it ON
-        if [ "$action" = "on" ]; then
-            uci set firewall."$rule_name"=rule
-            uci set firewall."$rule_name".name='Allow-Guest-Admin'
-            uci set firewall."$rule_name".src='guest'
-            uci set firewall."$rule_name".dest_ip="$lan_ip"
-            uci set firewall."$rule_name".target='ACCEPT'
-        fi
-
-        # 3. Commit and Reload
-        uci commit firewall
-        /etc/init.d/firewall reload >/dev/null 2>&1
-    }
-
-    while true; do
-        # 1. Get Guest Radio Status (Detecting 2.4, 5, and 6G)
-        local g24 g50 g60 mlo wstatus dl_status ul_status persist_status
-        wrs="0"
-        if uci -q get wireless.guest2g >/dev/null; then
-            if [ "$(uci -q get wireless.guest2g.disabled)" = "0" ]; then
-                g24="${GREEN}ON${RESET}"
-                wrs="1"
-            else
-                g24="${RED}OFF${RESET}"
-            fi
-        else g24="0"
-        fi
-        if uci -q get wireless.guest5g >/dev/null; then
-            if [ "$(uci -q get wireless.guest5g.disabled)" = "0" ]; then
-                g50="${GREEN}ON${RESET}"
-                wrs="1"
-            else
-                g50="${RED}OFF${RESET}"
-            fi
-        else g50="0"
-        fi
-        if uci -q get wireless.guest6g >/dev/null; then
-            if [ "$(uci -q get wireless.guest6g.disabled)" = "0" ]; then 
-                g60="${GREEN}ON${RESET}"
-                wrs="1"
-            else
-                g60="${RED}OFF${RESET}"
-            fi
-        else
-            g60="0"
-        fi
-        if uci -q get wireless.wlanmldguest2g >/dev/null; then
-            mlo="${RED}OFF${RESET}"
-            # If ANY MLO band is enabled, set the whole MLO status to ON
-            if [ "$(uci -q get wireless.wlanmldguest2g.disabled)" = "0" ] || \
-               [ "$(uci -q get wireless.wlanmldguest5g.disabled)" = "0" ] || \
-               [ "$(uci -q get wireless.wlanmldguest6g.disabled)" = "0" ]; then
-                mlo="${GREEN}ON${RESET}"
-                wrs="1"
-            fi
-        else
-            mlo="0"
-        fi
-
-        if [ "$g60" = "0" ] && [ "$g50" = "0" ] && [ "$g24" = "0" ] && [ "$mlo" = "0" ]; then
-            printf "\n"
-            print_error "No wireless interfaces found. Exiting"
-            press_any_key
-            return
-        fi
-
-        # 2. Get HW acceleration status
-
-        hw_status=$(get_hw_accel_info)
-        case "$hw_status" in
-            *ENABLED*)
-                hw_message="→ Limits Blocked"
-                ;;
-            *)
-                hw_message="→ Limits Ready"
-                ;;
-        esac
-        lan_ipaddr=$(get_lan_ip)
-
-        # 3. Read Current Limits from Init Script
-        local hw_state_raw=$(get_hw_accel_info)
-        cur_dl=""
-        cur_ul=""
-        if echo "$hw_state_raw" | grep -q "DISABLED"; then
-            if [ -f /etc/init.d/guest_limiter ]; then
-                cur_dl=$(grep "LIMIT_DL=" /etc/init.d/guest_limiter 2>/dev/null | cut -d'=' -f2 | tr -d '"')
-                cur_ul=$(grep "LIMIT_UL=" /etc/init.d/guest_limiter 2>/dev/null | cut -d'=' -f2 | tr -d '"')
-            fi
-            [ -z "$cur_dl" ] || [ "$cur_dl" -eq 0 ] && dl_status="${CYAN}UNLIMITED${RESET}" || dl_status="${GREEN}${cur_dl} Mbps${RESET}"
-            [ -z "$cur_ul" ] || [ "$cur_ul" -eq 0 ] && ul_status="${CYAN}UNLIMITED${RESET}" || ul_status="${GREEN}${cur_ul} Mbps${RESET}"
-        else
-            dl_status="${GREY}UNLIMITED (HW Accel Active)${RESET}"
-            ul_status="${GREY}UNLIMITED (HW Accel Active)${RESET}"
-        fi
-
-         
-        # 4. Check Persistence
-        grep -q "/etc/init.d/guest_limiter" /etc/sysupgrade.conf 2>/dev/null && persist_status="${GREEN}ENABLED${RESET}" || persist_status="${RED}DISABLED${RESET}"
-
-        # 5. Get Guest network to GL web-ui access
-        if uci -q get firewall.guest_admin_access >/dev/null; then
-            admin_access="${GREEN}ENABLED${RESET}"
-        else
-            admin_access="${RED}DISABLED${RESET}"
-        fi
-
-        clear
-        print_centered_header "Guest Network Bandwidth Limiter"
-        printf " %b\n" "${CYAN}INTERFACE STATUS${RESET}"
-        [ "$g24" != "0" ] && printf "   Guest Wi-Fi (2.4G): %b\n" "$g24"
-        [ "$g50" != "0" ] && printf "   Guest Wi-Fi (5G):   %b\n" "$g50"
-        [ "$g60" != "0" ] && printf "   Guest Wi-Fi (6G):   %b\n" "$g60"
-        [ "$mlo" != "0" ] && printf "   Guest Wi-Fi (MLO):  %b\n" "$mlo"
-        printf "\n"
-        printf " %b\n" "${CYAN}CONFIGURATION STATUS${RESET}"
-        printf "   Download Limit:     %b\n" "$dl_status"
-        printf "   Upload Limit:       %b\n" "$ul_status"
-        printf "   Guest → GL Web UI:  %b\n" "$admin_access" 
-        printf "   HW Acceleration:    %b %b\n" "$hw_status" "$hw_message"
-        printf "   Persistence:        %b\n" "$persist_status"
-        printf "\n"
-        local g_persist_label="Enable Persistence"
-        [ "$persist_status" = "${GREEN}ENABLED${RESET}" ] && g_persist_label="Disable Persistence"
-        local g_admin_label="Enable Guest Network to Web UI access"
-        [ "$admin_access" = "${GREEN}ENABLED${RESET}" ] && g_admin_label="Disable Guest Network to Web UI access"
-        local g_hw_label="Enable HW Acceleration"
-        case "$hw_status" in *ENABLED*) g_hw_label="Disable HW Acceleration" ;; esac
-        printf " %s%sSet Download Limit (Mbps) - 0 to disable\n" "$N1" "$NSEP"
-        printf " %s%sSet Upload Limit   (Mbps) - 0 to disable\n" "$N2" "$NSEP"
-        printf " %s%s%s\n" "$N3" "$NSEP" "$g_admin_label"
-        printf " %s%s%s\n" "$N4" "$NSEP" "$g_hw_label"
-        printf " %s%s%s\n" "$N5" "$NSEP" "$g_persist_label"
-        printf " %s%sReset to Defaults (Clean Uninstall)\n" "$N6" "$NSEP"
-        printf " %s%sBack\n" "$N0" "$NSEP"
-        # Two spaces after the glyph like every other row. $NQ carries a trailing
-        # space on some profiles and not others, so strip it first (${NQ% }) -
-        # otherwise "Help" lands a column short on the profiles without it.
-        printf " %s  Help\n" "${NQ% }"
-
-        printf "\n Choose [1-6/0/?]: "; read -r choice
-
-        case "$choice" in
-            1) 
-                if [ "$wrs" = "0" ]; then
-                    printf "\n"
-                    print_error "No active wireless guest interfaces found."
-                    press_any_key
-                    continue
-                fi
-                printf "\n"
-                local hw_state_raw=$(get_hw_accel_info)
-                if echo "$hw_state_raw" | grep -q "DISABLED"; then
-                    read -p " Enter Download Limit (0-10000 Mbps): " new_dl
-                    if echo "$new_dl" | grep -qE '^[0-9]+$'; then
-                        mgl_dependency_check
-                        apply_guest_config "$new_dl" "$cur_ul"
-                        press_any_key
-                    else
-                        print_error "Invalid input. Please enter a whole number."
-                        sleep 2
-                    fi
-                else
-                    print_error "HW acceleration must be DISABLED."
-                    press_any_key
-                fi
-                ;;
-            2) 
-                if [ "$wrs" = "0" ]; then
-                    printf "\n"
-                    print_error "No active wireless guest interfaces found."
-                    press_any_key
-                    continue
-                fi
-                printf "\n"
-                local hw_state_raw=$(get_hw_accel_info)
-                if echo "$hw_state_raw" | grep -q "DISABLED"; then
-                    read -p " Enter Upload Limit (0-10000 Mbps): " new_ul
-                    if echo "$new_ul" | grep -qE '^[0-9]+$'; then
-                        mgl_dependency_check
-                        apply_guest_config "$cur_dl" "$new_ul"
-                        press_any_key
-                    else
-                        print_error "Invalid input. Please enter a whole number."
-                        sleep 2
-                    fi
-                else
-                    print_error "HW acceleration must be DISABLED."
-                    press_any_key
-                fi
-                ;;
-            3) 
-                if [ "$wrs" = "0" ]; then
-                    printf "\n"
-                    print_error "No active wireless guest interfaces found."
-                    press_any_key
-                    continue
-                fi
-                printf "\n"
-                if uci -q get firewall.guest_admin_access >/dev/null; then
-                    toggle_admin_access "off"
-                    print_info "Guest → Web UI Access: DISABLED."
-                else
-                    toggle_admin_access "on"
-                    print_info "Guest → Web UI Access: ENABLED."
-                fi
-                press_any_key
-                ;;
-            4)
-                printf "\n"
-                local hw_state_raw=$(get_hw_accel_info)
-                if echo "$hw_state_raw" | grep -q "ENABLED"; then
-                    print_info "Disabling HW Acceleration"
-                    set_hw_accel 0 >/dev/null 2>&1
-                    [ -x /etc/init.d/guest_limiter ] && /etc/init.d/guest_limiter restart >/dev/null 2>&1
-                elif echo "$hw_state_raw" | grep -q "DISABLED"; then
-                    print_info "Enabling HW Acceleration"
-                    if set_hw_accel 1 >/dev/null 2>&1; then
-                        [ -x /etc/init.d/guest_limiter ] && /etc/init.d/guest_limiter stop && /etc/init.d/guest_limiter disable
-                    else
-                        printf "\n"
-                        print_error "Cannot enable Hardware Acceleration. Client speed limits in effect."
-                    fi
-                else
-                    print_error "Unknown hardware engine. Set HW acceleration through Web-UI."
-                fi
-                press_any_key
-                ;;
-            5) 
-                printf "\n"
-                if [ ! -f "/etc/init.d/guest_limiter" ]; then
-                    print_warning "No limits configured. Set a limit (Option 1 or 2) first."
-                    press_any_key
-                    continue
-                fi
-                
-                if [ "$persist_status" = "${GREEN}ENABLED${RESET}" ]; then
-                    sed -i '/\/etc\/init.d\/guest_limiter/d' /etc/sysupgrade.conf
-                    print_info "Persistence Disabled."
-                else
-                    if ! grep -q "/etc/init.d/guest_limiter" /etc/sysupgrade.conf; then
-                        echo "/etc/init.d/guest_limiter" >> /etc/sysupgrade.conf
-                    fi
-                    print_info "Persistence Enabled (saved to sysupgrade.conf)."
-                fi
-                press_any_key
-                ;;
-            6) 
-                if [ "$wrs" = "0" ]; then
-                    printf "\n"
-                    print_error "No active wireless guest interfaces found."
-                    press_any_key
-                    continue
-                fi
-                printf "\n"
-                print_info "Restoring to factory settings"
-                printf "\n"
-                
-                # 1. Stop the service 
-                if [ -f "/etc/init.d/guest_limiter" ]; then
-                    /etc/init.d/guest_limiter stop >/dev/null 2>&1
-                    /etc/init.d/guest_limiter disable >/dev/null 2>&1
-                fi
-                
-                # 2. Hard Cleanup
-                tc qdisc del dev br-guest root >/dev/null 2>&1
-                tc qdisc del dev br-guest clsact >/dev/null 2>&1
-                if [ -d "/sys/class/net/br-guest-ifb" ]; then
-                    ip link set dev br-guest-ifb down >/dev/null 2>&1
-                    ip link del dev br-guest-ifb >/dev/null 2>&1
-                fi
-
-                # 3. Final Hardware Flush (Restore full speed)
-                [ -x /etc/init.d/mtk-hwnat ] && /etc/init.d/mtk-hwnat restart >/dev/null 2>&1
-                [ -x /etc/init.d/mtk-hwnat-post ] && /etc/init.d/mtk-hwnat-post restart >/dev/null 2>&1
-                [ -x /etc/init.d/shortcut-fe ] && /etc/init.d/shortcut-fe restart >/dev/null 2>&1
-                [ -x /etc/init.d/bridger ] && /etc/init.d/bridger restart >/dev/null 2>&1
-
-                # 4. Remove Files and Persistence
-                rm -f /etc/init.d/guest_limiter
-                sed -i '/\/etc\/init.d\/guest_limiter/d' /etc/sysupgrade.conf
-                
-                cur_dl=0
-                cur_ul=0
-
-                # 5. Enable HW Acceleration and Disable Web-UI Access
-                toggle_admin_access "off" >/dev/null 2>&1
-                if set_hw_accel 1 >/dev/null 2>&1; then 
-                    print_success "Guest network limits removed and HW Acceleration restored."
-                else
-                    print_error "Guest network limits removed. HW Acceleration NOT restored. (User QoS rules may exist)"
-                fi
-                press_any_key
-                ;;
-            0) break ;;
-            \?|h|H|❓) show_guestnetwork_help ;;
-            *) print_error "Invalid option"; sleep 1 ;;
-        esac
-    done
-}
-
-
 # Set HW Acceleration
 # To Disable: set_hw_accel 0
 # To Disable and disabled web-UI toggle: set_hw_accel 0 restrict
@@ -4769,109 +4443,610 @@ set_hw_accel() {
     [ -x /usr/bin/gl_eqos ] && /usr/bin/gl_eqos restart >/dev/null 2>&1
 }
 
-# Apply Function (Internal Template Generation)
+# --- Network Bandwidth Limiter (generalized: shapes any discovered LAN/guest/IoT/VLAN/VPN) --
+# One interface-generic engine (extracted + unit-tested as netlimit_engine/service). tc/IFB
+# HTB scheme (2% DL / 4% UL overhead) applied per $iface.
+NETLIMIT_CONF="${NETLIMIT_CONF:-/etc/netlimit.conf}"
+NETLIMIT_INIT="${NETLIMIT_INIT:-/etc/init.d/netlimit}"
+NETLIMIT_GUEST_OLD="${NETLIMIT_GUEST_OLD:-/etc/init.d/guest_limiter}"
+NL_MAP="${NL_MAP:-/tmp/netlimit_map}"
 
-apply_guest_config() {
-    local dl=$1
-    local ul=$2
-    [ -z "$dl" ] && dl=0
-    [ -z "$ul" ] && ul=0
-    
-    # 1. Convert to kbit with overhead (2% DL, 4% UL)
-    local dl_kbit=$(( dl * 1020 ))
-    local ul_kbit=$(( ul * 1040 ))
+_netlimit_hash() {
+    awk 'function ord(c){return index(CH,c)}
+         BEGIN{ for(i=1;i<256;i++) CH=CH sprintf("%c",i);
+                s=ARGV[1]; h=5381;
+                for(i=1;i<=length(s);i++) h=(h*33+ord(substr(s,i,1)))%2000000011;
+                printf "%d", h }' "$1"
+}
+netlimit_ifbname() {
+    local iface="$1" name="${1}-ifb"
+    if [ "${#name}" -le 15 ]; then printf '%s' "$name"; else printf 'ifb%s' "$(_netlimit_hash "$iface")"; fi
+}
+netlimit_tc_apply_cmds() {   # <iface> <dl_mbit> <ul_mbit>
+    local iface="$1" dl="${2:-0}" ul="${3:-0}" ifb; ifb=$(netlimit_ifbname "$iface")
+    case "$dl" in ''|*[!0-9]*) dl=0 ;; esac; case "$ul" in ''|*[!0-9]*) ul=0 ;; esac
+    local dl_kbit=$(( dl * 1020 )) ul_kbit=$(( ul * 1040 ))
+    if [ "$ul" -gt 0 ]; then
+        echo "ip link add dev $ifb type ifb"
+        echo "ip link set dev $ifb up"
+        echo "tc qdisc add dev $ifb root handle 1: htb default 1"
+        echo "tc class add dev $ifb parent 1: classid 1:1 htb rate ${ul_kbit}kbit ceil ${ul_kbit}kbit burst 15k cbuffer 15k"
+        echo "tc qdisc add dev $iface clsact"
+        echo "tc filter add dev $iface ingress protocol ip u32 match u32 0 0 action mirred egress redirect dev $ifb"
+        echo "tc filter add dev $iface ingress protocol ipv6 u32 match u32 0 0 action mirred egress redirect dev $ifb"
+    fi
+    if [ "$dl" -gt 0 ]; then
+        echo "tc qdisc add dev $iface root handle 1: htb default 1"
+        echo "tc class add dev $iface parent 1: classid 1:1 htb rate ${dl_kbit}kbit ceil ${dl_kbit}kbit burst 15k cbuffer 15k"
+    fi
+}
+netlimit_tc_clear_cmds() {   # <iface>
+    local iface="$1" ifb; ifb=$(netlimit_ifbname "$iface")
+    echo "tc qdisc del dev $iface root 2>/dev/null"
+    echo "tc qdisc del dev $iface clsact 2>/dev/null"
+    echo "ip link set dev $ifb down 2>/dev/null"
+    echo "ip link del dev $ifb 2>/dev/null"
+}
+netlimit_zone_of() {   # <network-name> -> firewall zone
+    local net="$1" i=0 zn nets m
+    while true; do
+        zn=$(uci -q get "firewall.@zone[$i].name") || break
+        nets=$(uci -q get "firewall.@zone[$i].network")
+        for m in $nets; do [ "$m" = "$net" ] && { printf '%s' "$zn"; return 0; }; done
+        i=$((i+1))
+    done
+    return 1
+}
+netlimit_discover() {   # emits name|iface|type|zone per shapeable network
+    local dump names name dev up proto type zone
+    # </dev/null: ubus reads stdin and would BLOCK on a real TTY / eat the menu keystroke.
+    dump=$(ubus call network.interface dump 2>/dev/null </dev/null); [ -z "$dump" ] && return 1
+    names=$(printf '%s' "$dump" | jsonfilter -e '@.interface[*].interface' 2>/dev/null); [ -z "$names" ] && return 1
+    printf '%s\n' "$names" | while read -r name; do
+        [ -z "$name" ] && continue
+        case "$name" in loopback|lo|wan|wan6|wan_*|wwan*|modem*) continue ;; esac
+        up=$(printf '%s'  "$dump" | jsonfilter -e "@.interface[@.interface=\"$name\"].up"        2>/dev/null | head -1)
+        [ "$up" != "true" ] && continue
+        dev=$(printf '%s' "$dump" | jsonfilter -e "@.interface[@.interface=\"$name\"].l3_device" 2>/dev/null | head -1)
+        [ -z "$dev" ] && dev=$(printf '%s' "$dump" | jsonfilter -e "@.interface[@.interface=\"$name\"].device" 2>/dev/null | head -1)
+        [ -z "$dev" ] && continue
+        proto=$(printf '%s' "$dump" | jsonfilter -e "@.interface[@.interface=\"$name\"].proto" 2>/dev/null | head -1)
+        type=""
+        case "$proto" in wireguard|openvpn) type=vpn ;; esac
+        case "$dev"   in wg*|tun*|ovpn*|tap*) type=vpn ;; esac
+        [ -z "$type" ] && case "$name" in guest*) type=guest ;; iot*) type=iot ;; lan) type=lan ;; esac
+        [ -z "$type" ] && case "$dev" in br-*) type=bridge ;; *.*) type=vlan ;; *) type=iface ;; esac
+        zone=$(netlimit_zone_of "$name")
+        [ "$zone" = "wan" ] && continue
+        printf '%s|%s|%s|%s\n' "$name" "$dev" "$type" "${zone:-}"
+    done
+}
+netlimit_conf_list()  { [ -f "$NETLIMIT_CONF" ] && grep -vE '^#|^[[:space:]]*$' "$NETLIMIT_CONF"; return 0; }
+netlimit_conf_get()   { netlimit_conf_list | awk -F'|' -v i="$1" '$1==i{print; exit}'; }
+netlimit_conf_field() { netlimit_conf_get "$1" | cut -d'|' -f"$2"; }
+netlimit_conf_put()   { # iface dl ul webui persist
+    local tmp="${NETLIMIT_CONF}.$$"
+    { netlimit_conf_list | awk -F'|' -v i="$1" '$1!=i'
+      printf '%s|%s|%s|%s|%s\n' "$1" "${2:-0}" "${3:-0}" "${4:-0}" "${5:-0}"; } > "$tmp" && mv "$tmp" "$NETLIMIT_CONF"
+}
+netlimit_conf_del()   {
+    local tmp="${NETLIMIT_CONF}.$$"
+    netlimit_conf_list | awk -F'|' -v i="$1" '$1!=i' > "$tmp" && mv "$tmp" "$NETLIMIT_CONF"
+    [ -s "$NETLIMIT_CONF" ] || rm -f "$NETLIMIT_CONF"
+}
+netlimit_any_limited() { netlimit_conf_list | awk -F'|' '($2+0)>0||($3+0)>0{n++} END{exit !n}'; }
+netlimit_service_write() {
+    cat > "$NETLIMIT_INIT" <<'INITEOF'
+#!/bin/sh /etc/rc.common
+# netlimit - per-interface bandwidth limiter (generated by glinet_utils; do not edit).
+START=99
+STOP=10
+CONF=/etc/netlimit.conf
+_ifbname() {
+    local n="${1}-ifb"
+    if [ "${#n}" -le 15 ]; then printf '%s' "$n"; else
+        printf 'ifb%s' "$(awk 'function ord(c){return index(CH,c)} BEGIN{for(i=1;i<256;i++)CH=CH sprintf("%c",i);s=ARGV[1];h=5381;for(i=1;i<=length(s);i++)h=(h*33+ord(substr(s,i,1)))%2000000011;printf "%d",h}' "$1")"
+    fi
+}
+_apply() {
+    local iface="$1" dl="$2" ul="$3" ifb dk uk; ifb=$(_ifbname "$iface"); dk=$((dl*1020)); uk=$((ul*1040))
+    if [ "$ul" -gt 0 ]; then
+        ip link add dev "$ifb" type ifb; ip link set dev "$ifb" up
+        tc qdisc add dev "$ifb" root handle 1: htb default 1
+        tc class add dev "$ifb" parent 1: classid 1:1 htb rate ${uk}kbit ceil ${uk}kbit burst 15k cbuffer 15k
+        tc qdisc add dev "$iface" clsact
+        tc filter add dev "$iface" ingress protocol ip   u32 match u32 0 0 action mirred egress redirect dev "$ifb"
+        tc filter add dev "$iface" ingress protocol ipv6 u32 match u32 0 0 action mirred egress redirect dev "$ifb"
+    fi
+    if [ "$dl" -gt 0 ]; then
+        tc qdisc add dev "$iface" root handle 1: htb default 1
+        tc class add dev "$iface" parent 1: classid 1:1 htb rate ${dk}kbit ceil ${dk}kbit burst 15k cbuffer 15k
+    fi
+}
+_clear() {
+    local iface="$1" ifb; ifb=$(_ifbname "$iface")
+    tc qdisc del dev "$iface" root   2>/dev/null
+    tc qdisc del dev "$iface" clsact 2>/dev/null
+    ip link set dev "$ifb" down 2>/dev/null
+    ip link del dev "$ifb"      2>/dev/null
+}
+_flush() {
+    [ -x /etc/init.d/mtk-hwnat ]   && /etc/init.d/mtk-hwnat   restart 2>/dev/null
+    [ -x /etc/init.d/shortcut-fe ] && /etc/init.d/shortcut-fe restart 2>/dev/null
+    [ -x /etc/init.d/bridger ]     && /etc/init.d/bridger     restart >/dev/null 2>&1
+}
+_rows() { [ -f "$CONF" ] && grep -vE '^#|^[[:space:]]*$' "$CONF"; }
+start() {
+    _rows | while IFS='|' read -r iface dl ul webui persist; do
+        [ -z "$iface" ] && continue
+        case "$dl" in ''|*[!0-9]*) dl=0 ;; esac; case "$ul" in ''|*[!0-9]*) ul=0 ;; esac
+        [ "$dl" -eq 0 ] && [ "$ul" -eq 0 ] && continue
+        i=0; while [ ! -d "/sys/class/net/$iface" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
+        _clear "$iface"; _apply "$iface" "$dl" "$ul"
+    done
+    _flush
+}
+stop() {
+    _rows | while IFS='|' read -r iface rest; do [ -n "$iface" ] && _clear "$iface"; done
+    _flush
+}
+INITEOF
+    chmod +x "$NETLIMIT_INIT"
+}
+netlimit_reload() {
+    [ -f "$NETLIMIT_INIT" ] || netlimit_service_write
+    "$NETLIMIT_INIT" enable  >/dev/null 2>&1
+    "$NETLIMIT_INIT" restart >/dev/null 2>&1
+}
+netlimit_persist_sync() {
+    local sc=/etc/sysupgrade.conf
+    sed -i '\|/etc/init.d/netlimit|d; \|/etc/netlimit.conf|d' "$sc" 2>/dev/null
+    if netlimit_conf_list | awk -F'|' '($5+0)>0{n++} END{exit !n}'; then
+        grep -qxF '/etc/init.d/netlimit' "$sc" 2>/dev/null || echo '/etc/init.d/netlimit' >> "$sc"
+        grep -qxF '/etc/netlimit.conf'   "$sc" 2>/dev/null || echo '/etc/netlimit.conf'   >> "$sc"
+    fi
+}
+# Shaping needs the software path: offload OFF whenever any limit is active, ON when none.
+# Uses the toolkit's set_hw_accel so GL's qos padlock is handled.
+netlimit_offload_sync() {
+    if netlimit_any_limited; then set_hw_accel 0 restrict >/dev/null 2>&1; else set_hw_accel 1 >/dev/null 2>&1; fi
+}
+netlimit_set() {   # iface dl ul  (0/0 removes)
+    local i="$1" dl="${2:-0}" ul="${3:-0}" wb ps
+    wb=$(netlimit_conf_field "$i" 4); ps=$(netlimit_conf_field "$i" 5)
+    # Clear this interface's live shaping FIRST: on removal the row is gone before the service
+    # restarts, so the service's stop() (which only clears rows still in the config) would
+    # otherwise orphan it. On a change/set the reload re-applies from the new config.
+    netlimit_tc_clear_cmds "$i" | sh 2>/dev/null
+    if [ "$dl" -eq 0 ] && [ "$ul" -eq 0 ]; then netlimit_conf_del "$i"
+    else netlimit_conf_put "$i" "$dl" "$ul" "${wb:-0}" "${ps:-0}"; fi
+    netlimit_service_write; netlimit_offload_sync; netlimit_reload; netlimit_persist_sync
+}
+netlimit_lan_ip() { ip -4 addr show br-lan 2>/dev/null | awk '/inet /{print $2}' | cut -d/ -f1 | head -1; }
+# input policy (ACCEPT|REJECT|DROP) of a firewall zone -------------------------------------
+netlimit_zone_input() {   # <zone-name>
+    local zone="$1" i=0 zn
+    [ -z "$zone" ] && return 1
+    while zn=$(uci -q get "firewall.@zone[$i].name"); do
+        [ "$zn" = "$zone" ] && { uci -q get "firewall.@zone[$i].input"; return 0; }
+        i=$((i+1))
+    done
+    return 1
+}
+# MEASURED router reachability from a network's zone -> open|allowed|blocked|na -------------
+# Read from the LIVE firewall, never inferred from our own config (see the "measure, don't
+# prune" rule). A zone whose input is ACCEPT (lan, and often VPN zones) reaches the router by
+# policy - we can't "block" that additively and won't try (blocking the LAN would lock the
+# admin out). A reject/drop zone is blocked unless our Allow-<zone>-Router rule is present.
+# Router-directed ACCEPT rules (name|ports|proto) for <zone>: ENABLED rules with src=zone and
+# NO dest zone (input direction = to the router itself). Parses `uci show firewall` in ONE pass
+# so the grid stays cheap on MIPS. Firewall config <-> nft stay in lockstep (fw4 recompiles on
+# reload; no offload-style divergence), so reading uci here is a faithful measurement.
+netlimit_router_allows() {   # <zone>
+    [ -z "$1" ] && return 1
+    uci show firewall 2>/dev/null | awk -v z="$1" '
+        match($0,/^firewall\.[^.=]+=rule$/){ s=$0; sub(/^firewall\./,"",s); sub(/=rule$/,"",s); ord[++n]=s; next }
+        match($0,/^firewall\.[^.=]+\.[^.=]+=/){
+            eq=index($0,"="); lhs=substr($0,1,eq-1); v=substr($0,eq+1);
+            gsub(/^\047|\047$/,"",v); gsub(/\047 \047/," ",v);            # unquote uci value / list
+            r=substr(lhs,10); d=index(r,"."); s=substr(r,1,d-1); o=substr(r,d+1);
+            if(o=="name")nm[s]=v; else if(o=="src")sr[s]=v; else if(o=="dest")de[s]=v;
+            else if(o=="target")tg[s]=v; else if(o=="enabled")en[s]=v;
+            else if(o=="dest_port")dp[s]=v; else if(o=="proto")pr[s]=v;
+        }
+        END{ for(i=1;i<=n;i++){s=ord[i]; if(sr[s]==z && de[s]=="" && tg[s]=="ACCEPT" && en[s]!="0") printf "%s|%s|%s\n",nm[s],dp[s],pr[s]} }'
+}
+# MEASURED router reachability -> open|full|partial|blocked|na (read from the LIVE firewall):
+#   open    = zone input ACCEPT (reachable by policy; lan + VPN-accept zones - not togglable)
+#   full    = zone rejects, but an all-ports ACCEPT-to-router rule is present (our Allow rule)
+#   partial = only port-restricted ACCEPT-to-router rules (typically DNS/DHCP) - some services
+#   blocked = no ACCEPT-to-router rules at all (rare - even DNS closed)
+#   na      = no firewall zone
+netlimit_router_state() {   # <zone>
+    local zone="$1" pol allows nm dp pr any=0 all=0
+    [ -z "$zone" ] && { echo na; return; }
+    pol=$(netlimit_zone_input "$zone")
+    [ "$pol" = "ACCEPT" ] && { echo open; return; }
+    allows=$(netlimit_router_allows "$zone")
+    [ -z "$allows" ] && { echo blocked; return; }
+    while IFS='|' read -r nm dp pr; do
+        [ -z "$nm" ] && continue
+        any=1; [ -z "$dp" ] && all=1
+    done <<EOF
+$allows
+EOF
+    [ "$all" = 1 ] && echo full || { [ "$any" = 1 ] && echo partial || echo blocked; }
+}
+netlimit_webui() {   # iface zone 0|1  -- allow this network to reach the ROUTER itself
+    # Opens the router's own LAN IP (ALL services: admin UI, speedtest, NTP, SSH, ...) to the
+    # network - NOT the rest of the LAN subnet (other devices; that isolation is the zone's
+    # forwarding policy). DNS/DHCP have their own dedicated zone rules, so blocking this never
+    # breaks name resolution.
+    # NB: compute rule AFTER zone is set - ash expands all `local` RHS before assigning, so a
+    # `rule="...${zone}..."` on the same local line would see the empty outer zone.
+    local iface="$1" zone="$2" on="$3" lan rule
+    rule="netlimit_${zone}_router"; lan=$(netlimit_lan_ip)
+    uci -q delete "firewall.$rule"; uci -q delete "firewall.netlimit_${zone}_webui"   # + legacy name
+    if [ "$on" = "1" ] && [ -n "$zone" ] && [ -n "$lan" ]; then
+        uci set "firewall.$rule=rule"; uci set "firewall.$rule.name=Allow-${zone}-Router"
+        uci set "firewall.$rule.src=$zone"; uci set "firewall.$rule.dest_ip=$lan"; uci set "firewall.$rule.target=ACCEPT"
+    fi
+    uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1
+    # The uci firewall rule IS the persistent source of truth (survives reboot on its own) and
+    # the UI reads it back live via netlimit_router_state - so nothing to record in our conf.
+}
+netlimit_guest_parse() {   # <initscript> -> "dl ul"
+    local f="$1" dl ul
+    dl=$(sed -n 's/^#[[:space:]]*LIMIT_DL=//p' "$f" 2>/dev/null | head -1)
+    ul=$(sed -n 's/^#[[:space:]]*LIMIT_UL=//p' "$f" 2>/dev/null | head -1)
+    case "$dl" in ''|*[!0-9]*) dl=0 ;; esac; case "$ul" in ''|*[!0-9]*) ul=0 ;; esac
+    printf '%s %s' "$dl" "$ul"
+}
+netlimit_migrate_guest() {
+    [ -f "$NETLIMIT_GUEST_OLD" ] || return 0
+    local dl ul ps=0; set -- $(netlimit_guest_parse "$NETLIMIT_GUEST_OLD"); dl="$1"; ul="$2"
+    grep -qxF '/etc/init.d/guest_limiter' /etc/sysupgrade.conf 2>/dev/null && ps=1
+    { [ "$dl" -gt 0 ] || [ "$ul" -gt 0 ]; } && netlimit_conf_put br-guest "$dl" "$ul" 0 "$ps"
+    "$NETLIMIT_GUEST_OLD" stop >/dev/null 2>&1; "$NETLIMIT_GUEST_OLD" disable >/dev/null 2>&1
+    rm -f "$NETLIMIT_GUEST_OLD"; sed -i '\|/etc/init.d/guest_limiter|d' /etc/sysupgrade.conf 2>/dev/null
+    netlimit_service_write; netlimit_offload_sync; netlimit_reload; netlimit_persist_sync
+}
+offload_platform() { [ -f /etc/config/ecm ] && { echo qualcomm-ecm; return; }; [ -f /etc/config/mtkhnat ] || [ -d /sys/kernel/debug/hnat ] && { echo mediatek-hnat; return; }; nft list ruleset 2>/dev/null | grep -q 'flowtable' && { echo flowtable; return; }; echo unknown; }
+# on|off, mechanism-aware: the toggle key differs by platform -
+# ecm.global.enabled (Qualcomm), mtkhnat.global.enable (MediaTek), else the firewall flowtable.
+offload_state() {
+    if [ -f /etc/config/ecm ]; then [ "$(uci -q get ecm.global.enabled)" = "1" ] && echo on || echo off; return; fi
+    if [ -f /etc/config/mtkhnat ]; then [ "$(uci -q get mtkhnat.global.enable)" = "1" ] && echo on || echo off; return; fi
+    [ "$(uci -q get firewall.@defaults[0].flow_offloading)" = "1" ] && echo on || echo off
+}
+# false on any hardware-offload platform - a veth/namespace flow never HW-offloads there.
+offload_namespace_eligible() {
+    [ -f /etc/config/ecm ] && return 1
+    [ -f /etc/config/mtkhnat ] && return 1
+    [ -d /sys/kernel/debug/hnat ] && return 1
+    [ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = "1" ] && return 1
+    return 0
+}
+offload_ref_ceiling() {
+    case "$(sed -n 's/.*machine.*: //p;s/system type.*: //p' /proc/cpuinfo 2>/dev/null | head -1)$(uname -m)" in
+        *MT7621*|*mips*|*mipsel*) echo 700 ;; *) echo 0 ;;
+    esac
+}
 
-    # 2. Uninstall if 0/0
-    if [ "$dl" -eq 0 ] && [ "$ul" -eq 0 ]; then
-        if [ -f "/etc/init.d/guest_limiter" ]; then
-            /etc/init.d/guest_limiter stop >/dev/null 2>&1
-            /etc/init.d/guest_limiter disable >/dev/null 2>&1
-            rm -f /etc/init.d/guest_limiter
+# Full revert: strip every limit + our firewall rules, re-enable HW acceleration, drop
+# persistence, and stop/remove the boot service. Leaves the box as if netlimit never ran.
+netlimit_reset_all() {
+    local iface s changed=0
+    # 1. clear live shaping for every configured interface
+    netlimit_conf_list | while IFS='|' read -r iface s; do
+        [ -n "$iface" ] && netlimit_tc_clear_cmds "$iface" | sh 2>/dev/null
+    done
+    # 2. delete every netlimit_* firewall rule we ever created (router + legacy webui names)
+    for s in $(uci show firewall 2>/dev/null | sed -n 's/^firewall\.\(netlimit_[A-Za-z0-9_]*\)=rule$/\1/p'); do
+        uci -q delete "firewall.$s"; changed=1
+    done
+    [ "$changed" = 1 ] && { uci commit firewall; /etc/init.d/firewall reload >/dev/null 2>&1; }
+    # 3. drop config, boot service, and persistence entries
+    rm -f "$NETLIMIT_CONF"
+    [ -f "$NETLIMIT_INIT" ] && { "$NETLIMIT_INIT" stop >/dev/null 2>&1; "$NETLIMIT_INIT" disable >/dev/null 2>&1; rm -f "$NETLIMIT_INIT"; }
+    sed -i '\|/etc/init.d/netlimit|d; \|/etc/netlimit.conf|d' /etc/sysupgrade.conf 2>/dev/null
+    # 4. restore hardware acceleration
+    set_hw_accel 1 >/dev/null 2>&1
+}
+
+# Raw adaptive reachability glyph, matching the Remote LAN Access screen's status vocabulary
+# (green reachable / red blocked / yellow unknown). Terminal-adaptive via OUTPUT_MODE so PuTTY
+# and dumb terminals get the [AC]/[IA]/[!] compat text the RLA legend uses. For the grid COLUMN
+# use the pre-padded _S_RLA_* cells instead (glyph-width-aware, keep the column aligned).
+_nl_dot() {   # reachable | blocked | unknown
+    if [ "$OUTPUT_MODE" = compat ]; then
+        case "$1" in reachable) printf '[AC]' ;; blocked) printf '[IA]' ;; *) printf '[!]' ;; esac
+    else
+        case "$1" in
+            reachable) printf '%b🟢%b' "$GREEN"  "$RESET" ;;
+            blocked)   printf '%b🔴%b' "$RED"    "$RESET" ;;
+            *)         printf '%b🟡%b' "$YELLOW" "$RESET" ;;
+        esac
+    fi
+}
+
+# best-effort service name for a dest_port spec (empty = "all"; unrecognised = "-")
+_nl_svc() {
+    case " ${1:-} " in
+        "  ")                                     echo "all" ;;
+        *" 53 "*)                                 echo "DNS" ;;
+        *" 67-68 "*|*" 67 "*|*" 68 "*)            echo "DHCP" ;;
+        *" 123 "*)                                echo "NTP" ;;
+        *" 22 "*)                                 echo "SSH" ;;
+        *" 80 "*|*" 443 "*|*" 8080 "*|*" 8443 "*) echo "Web-UI" ;;
+        *)                                        echo "-" ;;
+    esac
+}
+# proto field display: empty firewall proto means "any"; normalise the tcp/udp pair
+_nl_proto() {
+    case "${1:-}" in
+        "")                  echo "any" ;;
+        "tcp udp"|"udp tcp") echo "tcp+udp" ;;
+        *)                   echo "$1" ;;
+    esac
+}
+
+# format a rate in Mbps (0 -> em dash); collapse exact thousands to Gbps so 10000 -> "10 Gbps".
+_nl_rate() {
+    local r="${1:-0}"; case "$r" in ''|0|*[!0-9]*) printf -- '-'; return ;; esac
+    if [ "$r" -ge 1000 ] && [ $(( r % 1000 )) -eq 0 ]; then printf '%s Gbps' "$(( r / 1000 ))"
+    else printf '%s Mbps' "$r"; fi
+}
+
+# Shaping needs the software path, so it can't coexist with HW acceleration. Rather than
+# silently flip offload off, confirm it first (it's a whole-router forwarding change).
+# Returns 0 to proceed; only prompts when offload is currently ON.
+_netlimit_offload_ok() {
+    [ "$(offload_state)" = off ] && return 0
+    printf '\n'                                   # blank line before the warning glyph (UX prompt-flow std)
+    print_warning "Bandwidth shaping requires HW acceleration OFF.\n   Turning it off affects the whole router's forwarding performance."
+    printf "Turn it off and apply the limit? [y/N]: "
+    local a; read -r a; printf '\n'               # blank line after the answer, before the action/gear
+    case "$a" in y|Y) return 0 ;; *) print_info "Cancelled - HW acceleration left on."; sleep 1; return 1 ;; esac
+}
+
+show_netlimit_help() {
+    show_paged "Network Bandwidth Limiter - Help" << 'HELPEOF'
+Network Bandwidth Limiter - Quick Help
+
+Sets a download/upload speed ceiling on any of the router's networks - guest, IoT,
+a LAN, a VLAN, or a VPN tunnel - discovered automatically (a network only appears if
+it exists on this device).
+
+The grid
+--------
+  * Each row is a shapeable network: its Download / Upload limits, whether it can reach
+    the router itself (Router), whether the limit persists across firmware upgrades, and
+    whether a limit is ACTIVE right now (a limit shows BYPASSED if HW acceleration is on,
+    since offload skips the shaper). Router and Status are MEASURED from the live firewall
+    and tc state, not from stored settings.
+  * Pick a number to open that network and set its limits.
+  * [R] Reset reverts everything to defaults: removes every limit and router rule,
+    re-enables HW acceleration, and stops the background service (asks first).
+
+Hardware acceleration
+---------------------
+  * Shaping needs the software forwarding path, so it can't run while HW acceleration is
+    enabled. This is automatic: setting a limit DISABLES acceleration for the whole router,
+    and clearing your last limit re-enables it - you don't normally touch it.
+  * The status line at the top reports it. DISABLED (green) is the normal state while you
+    shape. ENABLED is green when you have no limits (nothing is bypassed) and turns YELLOW
+    if it is on while a limit exists - that limit is then BYPASSED (offload skips the
+    shaper) until acceleration is disabled again.
+  * [H] is a manual override (Enable / Disable) of that automatic behaviour. You rarely
+    need it - it's there to force acceleration on or off independently of your limits.
+  * What it costs (measured): shaping moves forwarding into software, so the CPU does more
+    per packet. On a dual-core MediaTek router pushing ~309 Mbit/s of routed traffic, CPU
+    went from about 8% with offload ON to about 48% with it OFF - and the software path on
+    that class of chip tops out near 700 Mbit/s. So on a 1 Gbps WAN there's comfortable
+    headroom for everyday use; it bites harder on 2.5G/10G links or when you're near that
+    ceiling. Faster CPUs (newer Flint-class routers) pay far less.
+
+Per-network options
+-------------------
+  * Download / Upload: a ceiling in Mbps; 0 removes that direction.
+  * Router access: whether this network can reach the router's OWN services (admin UI,
+    speedtest, NTP, SSH, ...) on its LAN IP - not other devices on the LAN subnet. Measured
+    live from the firewall and shown with a RAG dot (green = reachable, matching the Remote
+    LAN Access screen):
+      - reachable (green)  every port on the router is reachable (all ports)
+      - partial   (yellow) only some ports - typically the DNS/DHCP that GL opens by
+                           default; the detail page lists exactly which (service/port/proto)
+      - blocked   (red)    no router services reachable at all (rare)
+    "Allow full router access" opens all ports; "Block" removes only that and falls back to
+    partial, so DNS/DHCP keep working. Networks whose zone already accepts input (the LAN,
+    and typically VPN zones) are "managed by zone" and not toggled here - that would risk
+    locking you out. (Only ACCEPT rules are counted; hand-written nft rules outside uci are
+    not, and the exact reachable set can differ if custom DROP rules interleave.)
+  * Persistence: a limit ALWAYS survives a reboot (the service is enabled and its config
+    lives on the overlay). This keeps it across a firmware UPGRADE too, by adding it to the
+    sysupgrade backup - so "NO" means reboot-safe but lost on a firmware upgrade.
+  * Disable: remove the limit entirely.
+HELPEOF
+}
+
+_netlimit_edit() {   # <map-line>
+    local idx name iface type zone dl ul wb ps st ans rl
+    IFS='|' read -r idx name iface type zone dl ul wb ps st <<EOF
+$1
+EOF
+    while true; do
+        clear
+        print_centered_header "$name - Bandwidth Limit"
+        dl=$(netlimit_conf_field "$iface" 2); ul=$(netlimit_conf_field "$iface" 3)
+        ps=$(netlimit_conf_field "$iface" 5); wb=$(netlimit_router_state "$zone")   # MEASURED, live
+        : "${dl:=0}"; : "${ul:=0}"; : "${ps:=0}"
+        st="INACTIVE"
+        if tc qdisc show dev "$iface" 2>/dev/null | grep -q htb; then
+            [ "$(offload_state)" = off ] && st="ACTIVE" || st="BYPASSED (HW accel on)"
+        fi
+        # Standard vertical-menu layout (see [[ui-vertical-menu-structure]]): the Status summary
+        # leads, then a blank line, then the detail fields (grid-column order: Network, Interface,
+        # Download, Upload, Router, Persist), then a blank line, then the numbered options. Status
+        # VALUES are ALL CAPS (UX std); identifiers (network name, br-*) stay lowercase.
+        printf " %bStatus:%b      %s\n\n" "$CYAN" "$RESET" "$st"
+        printf " %bNetwork:%b     %s\n" "$CYAN" "$RESET" "$name"
+        printf " %bInterface:%b   %s\n" "$CYAN" "$RESET" "$iface"
+        printf " %bDownload:%b    %s\n" "$CYAN" "$RESET" "$(_nl_rate "$dl")"
+        printf " %bUpload:%b      %s\n" "$CYAN" "$RESET" "$(_nl_rate "$ul")"
+        case "$wb" in
+            open)    rl="$(_nl_dot reachable) REACHABLE (managed by zone)" ;;
+            full)    rl="$(_nl_dot reachable) REACHABLE (all ports)" ;;
+            partial) rl="$(_nl_dot partial) PARTIAL (some ports)" ;;
+            blocked) rl="$(_nl_dot blocked) BLOCKED (no access)" ;;
+            *)       rl="$(_nl_dot unknown) N/A" ;;
+        esac
+        printf " %bRouter:%b      %s\n" "$CYAN" "$RESET" "$rl"
+        # Only partial needs a breakdown (which services) - the parenthetical already says
+        # "all ports" / "no access" for the other states.
+        if [ "$wb" = partial ]; then
+            printf "   %bopen to router:%b\n" "$GREY" "$RESET"
+            netlimit_router_allows "$zone" | while IFS='|' read -r _n _dp _pr; do
+                [ -z "$_n" ] && continue
+                printf "     %-8s %-12s %s\n" "$(_nl_svc "$_dp")" "${_dp:-all}" "$(_nl_proto "$_pr")"
+            done
+        fi
+        # A limit ALWAYS survives reboot (service enabled, config on overlay); "Persist" is
+        # specifically about a firmware UPGRADE (sysupgrade backup) - spell that out so "NO"
+        # is never read as "lost on reboot".
+        if [ "$ps" = 1 ]; then printf " %bPersist:%b     YES  %b(survives firmware upgrades)%b\n" "$CYAN" "$RESET" "$GREY" "$RESET"
+        else printf " %bPersist:%b     NO   %b(reboot-safe; lost on firmware upgrade)%b\n" "$CYAN" "$RESET" "$GREY" "$RESET"; fi
+        printf "\n"
+        printf " %s%sSet download limit\n" "$N1" "$NSEP"
+        printf " %s%sSet upload limit\n"   "$N2" "$NSEP"
+        case "$wb" in
+            blocked|partial) printf " %s%sAllow full router access\n" "$N3" "$NSEP" ;;
+            full)            printf " %s%sBlock router access\n" "$N3" "$NSEP" ;;
+            *)               printf " %s%sRouter access (managed by zone)\n" "$N3" "$NSEP" ;;
+        esac
+        [ "$ps" = 1 ] && printf " %s%sDisable persistence\n" "$N4" "$NSEP" || printf " %s%sEnable persistence\n" "$N4" "$NSEP"
+        printf " %s%sDisable limit\n" "$N5" "$NSEP"
+        printf " %s%sBack\n" "$N0" "$NSEP"
+        printf "\nChoose [1-5/0]: "
+        read -r ans; printf "\n"
+        case "$ans" in
+            1) printf "Download limit in Mbps (0 = none): "; read -r v; case "$v" in
+                 ''|*[!0-9]*) print_error "Numbers only"; sleep 1 ;;
+                 *) if [ "$v" -gt 0 ] || [ "$ul" -gt 0 ]; then _netlimit_offload_ok || continue; fi
+                    spin_run "Applying limit" netlimit_set "$iface" "$v" "$ul" ;; esac ;;
+            2) printf "Upload limit in Mbps (0 = none): "; read -r v; case "$v" in
+                 ''|*[!0-9]*) print_error "Numbers only"; sleep 1 ;;
+                 *) if [ "$v" -gt 0 ] || [ "$dl" -gt 0 ]; then _netlimit_offload_ok || continue; fi
+                    spin_run "Applying limit" netlimit_set "$iface" "$dl" "$v" ;; esac ;;
+            3) case "$wb" in
+                 blocked|partial) spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 1 ;;
+                 full)            spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 0 ;;
+                 open)            printf " %bRouter access for '%s' is governed by its firewall zone%b\n" "$YELLOW" "$zone" "$RESET"
+                                  printf " (input policy = ACCEPT), not by this limiter. To change it, edit\n"
+                                  printf " the '%s' zone in the firewall.\n" "$zone"
+                                  press_any_key ;;
+                 *)               printf " %bThis network has no firewall zone,%b so router access can't be\n" "$YELLOW" "$RESET"
+                                  printf " toggled here.\n"
+                                  press_any_key ;;
+               esac ;;
+            4) netlimit_conf_put "$iface" "$dl" "$ul" "$(netlimit_conf_field "$iface" 4)" "$([ "$ps" = 1 ] && echo 0 || echo 1)"; netlimit_persist_sync ;;
+            5) spin_run "Removing limit" netlimit_set "$iface" 0 0 ;;
+            0) return ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+_netlimit_build_map() {
+    netlimit_migrate_guest 2>/dev/null
+    : > "$NL_MAP"
+    local i=1 name iface type zone dl ul wb ps st
+    netlimit_discover | while IFS='|' read -r name iface type zone; do
+        [ -z "$iface" ] && continue
+        dl=$(netlimit_conf_field "$iface" 2); ul=$(netlimit_conf_field "$iface" 3)
+        ps=$(netlimit_conf_field "$iface" 5); wb=$(netlimit_router_state "$zone")   # wb = MEASURED router-state token
+        : "${dl:=0}"; : "${ul:=0}"; : "${ps:=0}"
+        # active only when the shaping is actually in effect: tc present AND offload off.
+        # tc present but offload on = configured-but-bypassed (offload skips the shaper).
+        st=inactive
+        if tc qdisc show dev "$iface" 2>/dev/null | grep -q htb; then
+            [ "$(offload_state)" = off ] && st=active || st=bypassed
+        fi
+        echo "$i|$name|$iface|$type|$zone|$dl|$ul|$wb|$ps|$st" >> "$NL_MAP"
+        i=$((i+1))
+    done
+}
+
+manage_netlimit() {
+    local _div; _div=$(awk 'BEGIN{s="";for(i=0;i<82;i++)s=s"─";print s}')
+    clear; print_centered_header "Network Bandwidth Limiter"
+    spin_run "Discovering networks" _netlimit_build_map
+    while true; do
+        clear
+        print_centered_header "Network Bandwidth Limiter"
+        # HW acceleration is a router-wide GATE for shaping, auto-managed by netlimit_offload_sync
+        # (offload follows limits). Report it HEALTH-aware, not by literal on/off: green = nominal
+        # (nothing bypassed), yellow ONLY when it is ENABLED while a limit exists (that limit is then
+        # BYPASSED - a state reachable only via a manual [H] override). Status word ENABLED/DISABLED
+        # matches the [H] control verb; only the yellow (exception) state carries a side note.
+        local hw; hw=$(offload_state)
+        if [ "$hw" != on ]; then
+            printf " %bHW Acceleration:%b %bDISABLED%b\n" "$CYAN" "$RESET" "$GREEN" "$RESET"
+        elif netlimit_any_limited; then
+            printf " %bHW Acceleration:%b %bENABLED%b  %blimits are BYPASSED - [H] to enforce them%b\n" "$CYAN" "$RESET" "$YELLOW" "$RESET" "$GREY" "$RESET"
+        else
+            printf " %bHW Acceleration:%b %bENABLED%b\n" "$CYAN" "$RESET" "$GREEN" "$RESET"
         fi
         printf "\n"
-        print_info "Guest network limits removed."
-        return
-    fi
-
-    # 3. Create the Init Script
-    cat <<EOF > /etc/init.d/guest_limiter
-#!/bin/sh /etc/rc.common
-# LIMIT_DL=$dl
-# LIMIT_UL=$ul
-START=99
-
-# --- CLEANUP ---
-clean_all() {
-    [ -x /usr/bin/gl_eqos ] && /usr/bin/gl_eqos stop >/dev/null 2>&1
-    tc qdisc del dev br-guest root >/dev/null 2>&1
-    tc qdisc del dev br-guest clsact >/dev/null 2>&1
-    if [ -d "/sys/class/net/br-guest-ifb" ]; then
-        tc qdisc del dev br-guest-ifb root >/dev/null 2>&1
-        ip link set dev br-guest-ifb down >/dev/null 2>&1
-        ip link del dev br-guest-ifb >/dev/null 2>&1
-    fi
-    sleep 1
-}
-
-start() {
-    local i=0
-    while [ ! -d "/sys/class/net/br-guest" ] && [ \$i -lt 30 ]; do
-        sleep 1
-        i=\$((i+1))
+        printf "       %-14s %-13s %-9s %-9s %-8s %-8s %s\n" "Network" "Interface" "Download" "Upload" "Router" "Persist" "Status"
+        printf " %s\n" "$_div"
+        while IFS='|' read -r idx name iface type zone dl ul wb ps st; do
+            local rdot pbl stc stu
+            case "$wb" in
+                open|full) rdot="$_S_RLA_AC" ;;
+                partial)   rdot="$_S_RLA_RO" ;;
+                blocked)   rdot="$_S_RLA_IA" ;;
+                *)         rdot=$(printf '   %b—%b    ' "$GREY" "$RESET") ;;
+            esac
+            [ "$ps" = 1 ] && pbl="YES" || pbl="NO"
+            case "$st" in active) stc="$GREEN"; stu="ACTIVE" ;; bypassed) stc="$YELLOW"; stu="BYPASSED" ;; *) stc="$GREY"; stu="INACTIVE" ;; esac
+            printf " %-5s %-14s %-13s %-9s %-9s %s %-8s %b%s%b\n" "$idx." "$name" "$iface" "$(_nl_rate "$dl")" "$(_nl_rate "$ul")" "$rdot" "$pbl" "$stc" "$stu" "$RESET"
+        done < "$NL_MAP"
+        printf "\n"
+        printf " Legend: %s reachable (all ports)  %s partial (some ports)  %s blocked (no access)\n" "$(_nl_dot reachable)" "$(_nl_dot partial)" "$(_nl_dot blocked)"
+        printf " %s\n" "$_div"
+        # [H] label states what pressing does NOW (toggle-label standard), not "Toggle".
+        local hact; [ "$hw" = on ] && hact="Disable HW Acceleration" || hact="Enable HW Acceleration"
+        printf " [#] Edit a network   [H] %s   [R] Reset   [0] Back   [?] Help\n" "$hact"
+        local n; n=$(wc -l < "$NL_MAP" 2>/dev/null | tr -dc '0-9')
+        printf "\nChoose [1-%s/H/R/0/?]: " "${n:-0}"
+        read -r cmd; printf "\n"
+        case "$cmd" in
+            0) rm -f "$NL_MAP"; return ;;
+            [1-9]*) local ln; ln=$(grep "^$cmd|" "$NL_MAP"); [ -n "$ln" ] && { _netlimit_edit "$ln"; _netlimit_build_map; } || { print_error "Invalid option"; sleep 1; } ;;
+            h|H)
+                if [ "$(offload_state)" = on ]; then
+                    spin_run "Disabling HW acceleration" set_hw_accel 0; _netlimit_build_map
+                elif netlimit_any_limited; then
+                    print_warning "Active limits will stop working with HW acceleration on (offload bypasses the shaper)."
+                    printf "Enable anyway? [y/N]: "; read -r a; printf '\n'
+                    case "$a" in y|Y) spin_run "Enabling HW acceleration" set_hw_accel 1; _netlimit_build_map ;; esac
+                else
+                    spin_run "Enabling HW acceleration" set_hw_accel 1; _netlimit_build_map
+                fi ;;
+            r|R)
+                print_warning "This removes every limit and router rule, re-enables HW acceleration, and stops the background service."
+                printf "Revert to defaults? [y/N]: "; read -r a; printf '\n'
+                case "$a" in y|Y) spin_run "Reverting to defaults" netlimit_reset_all; _netlimit_build_map ;; esac ;;
+            \?|help) show_netlimit_help ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
     done
-    clean_all
-    # --- SETUP UPLOAD PIPE ---
-    # Upload Control (fq_codel + HTB)
-    if [ "$ul" != "0" ]; then
-        ip link add dev br-guest-ifb type ifb
-        ip link set dev br-guest-ifb up
-        
-        tc qdisc add dev br-guest-ifb root handle 1: htb default 1
-        tc class add dev br-guest-ifb parent 1: classid 1:1 htb rate ${ul_kbit}kbit ceil ${ul_kbit}kbit burst 15k cbuffer 15k
- 
-        # --- THE REDIRECT HOOK ---
-        tc qdisc add dev br-guest clsact
-        tc filter add dev br-guest ingress protocol ip u32 match u32 0 0 action mirred egress redirect dev br-guest-ifb
-        tc filter add dev br-guest ingress protocol ipv6 u32 match u32 0 0 action mirred egress redirect dev br-guest-ifb
-    fi
-
-    # --- SETUP DOWNLOAD PIPE ---
-    if [ "$dl" != "0" ]; then
-        tc qdisc add dev br-guest root handle 1: htb default 1
-        tc class add dev br-guest parent 1: classid 1:1 htb rate ${dl_kbit}kbit ceil ${dl_kbit}kbit burst 15k cbuffer 15k
-    fi
-
-    # --- HARDWARE ACCELERATION FLUSH ---
-    [ -x /etc/init.d/mtk-hwnat ] && /etc/init.d/mtk-hwnat restart 2>/dev/null
-    [ -x /etc/init.d/mtk-hwnat-post ] && /etc/init.d/mtk-hwnat-post restart 2>/dev/null
-    [ -x /etc/init.d/shortcut-fe ] && /etc/init.d/shortcut-fe restart 2>/dev/null
-    [ -x /etc/init.d/bridger ] && /etc/init.d/bridger restart >/dev/null 2>&1
-}
-
-stop() {
-    clean_all    
-    [ -x /etc/init.d/mtk-hwnat ] && /etc/init.d/mtk-hwnat restart 2>/dev/null
-    [ -x /etc/init.d/mtk-hwnat-post ] && /etc/init.d/mtk-hwnat-post restart 2>/dev/null
-    [ -x /etc/init.d/shortcut-fe ] && /etc/init.d/shortcut-fe restart 2>/dev/null
-    [ -x /etc/init.d/bridger ] && /etc/init.d/bridger restart >/dev/null 2>&1
-}
-EOF
-
-    # 4. Finalize and Launch
-    set_hw_accel 0 restrict
-    chmod +x /etc/init.d/guest_limiter
-    /etc/init.d/guest_limiter enable
-    /etc/init.d/guest_limiter restart
-    printf "\n"
-    print_success "Configured: $dl Mbps Down / $ul Mbps Up"
 }
 
 # --- Web-UI Terminal Manager ---
 show_terminal_help() {
-    clear
-    print_centered_header "Web Terminal Management - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "Web Terminal Management - Help" << 'HELPEOF'
 Web Terminal (ttyd) Management – Quick Help
 
 What is the Web Terminal?
@@ -4921,8 +5096,6 @@ Note: If the icon does not appear after a refresh, ensure "Network
 Acceleration" isn't preventing the UI from updating, though the 
 script attempts to force this by clearing the Nginx cache.
 HELPEOF
-    
-    press_any_key
 }
 
 # _inject_terminal_into <app.js.gz> [proto] [from_rom]
@@ -5429,6 +5602,11 @@ EOF
 manage_packages() {
     # Define the Utility Database (Package|Binary|Config/Service Files)
     # Types: R = Reinstall (Complex), B = Binary (Simple)
+    # Ookla ships no MIPS build, so on MIPS the internet speed test is speedtest-go (a GitHub
+    # binary, not an opkg package) - offer THAT as the installable entry there instead. Both
+    # install/remove via the special-cases in the apply loop below.
+    local _st_line="speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
+    case "$(uname -m)" in mips*) _st_line="speedtest-go|/usr/bin/speedtest-go|B|/usr/bin/speedtest-go" ;; esac
     local UTILITY_DB="zram-swap|/etc/init.d/zram|R|/etc/init.d/zram /etc/config/system
 librespeed-go|/usr/bin/librespeed-go|R|/usr/bin/librespeed-go /etc/config/librespeed-go /etc/init.d/librespeed-go
 stress|/usr/bin/stress|B|/usr/bin/stress
@@ -5439,17 +5617,154 @@ htop|/usr/bin/htop|B|/usr/bin/htop
 rsync|/usr/bin/rsync|B|/usr/bin/rsync
 diffutils|/usr/bin/diff|B|/usr/bin/diff
 vim-fuller|/usr/bin/vim|R|/usr/bin/vim
-speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
+$_st_line
+iperf3|/usr/bin/iperf3|B|/usr/bin/iperf3
+iputils-ping|/usr/bin/ping|B|/usr/bin/ping"
 
     local map_file="/tmp/pkg_manage_map"
     local sys_conf="/etc/sysupgrade.conf"
     local laz_list="/etc/lazarus.list"
+    local sort_mode="size"                    # size | name; toggled by [S]
+    local sizes_file="/tmp/pkg_manage_sizes"  # name|sizeKB, computed once per entry
+    local idx_sizes="/tmp/pkg_manage_idx"     # name|bytes from ONE batched 'opkg info' (see init)
+    local _pkg_opts="[A] All   [N] None   [#] Toggle   [S] Sort   [C] Confirm   [0] Cancel   [?] Help"
+    local _pkg_div; _pkg_div=$(awk -v n="${#_pkg_opts}" 'BEGIN{s="";for(i=0;i<n;i++)s=s"─";print s}')
+    # Overlay filesystem: ubifs/jffs2 compress transparently (uncompressed sizes overstate real
+    # flash use), f2fs/ext4 do not. Drives whether the storage projection is exact or an "≈"
+    # floor - see _pkg_storage_line.
+    local overlay_fs; overlay_fs=$(awk '$2=="/overlay"{print $3; exit}' /proc/mounts 2>/dev/null)
+    local fs_comp=0; case "$overlay_fs" in ubifs|jffs2) fs_comp=1 ;; esac
+
+    # Size (KB) for a package: an installed one's actual on-disk footprint (its own files,
+    # rom or overlay), or a not-installed one's download size from the index.
+    _pkg_size() {
+        local name="$1" bin="$2" paths="$3" list="/usr/lib/opkg/info/$1.list" kb=0 files="" bytes
+        if [ -e "$bin" ]; then
+            # installed: actual on-disk size of its files, measured at their real paths. This
+            # covers firmware/rom-provided packages too - they can still be removed from the
+            # active partition (they only return on a firmware reset/upgrade), so they have a
+            # real size worth showing, not a blank. For overlay-installed packages the active
+            # file IS the overlay copy, so this is the same number as before.
+            if [ -f "$list" ]; then
+                files=$(while read -r f; do [ -f "$f" ] && echo "$f"; done < "$list")
+            fi
+            # dedupe: $bin is often also listed in $paths (busybox 'du -s a a' double-counts).
+            [ -z "$files" ] && files=$(for f in $bin $paths; do [ -f "$f" ] && echo "$f"; done | sort -u)
+            [ -n "$files" ] && kb=$(du -sk $files 2>/dev/null | awk '{s+=$1} END{print s+0}')
+        else
+            # not installed: estimated INSTALL size (index Installed-Size), from the pre-built
+            # map (init_system_state parses it once - see there for why we don't loop opkg).
+            if [ "$name" = speedtest-go ]; then
+                bytes=8782007    # GitHub binary, not in the opkg index; ~8.4M (MIPS build)
+            else
+                bytes=$(grep -m1 "^$name|" "$idx_sizes" 2>/dev/null | cut -d'|' -f2)
+            fi
+            case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
+            [ "$bytes" -gt 0 ] && kb=$(( (bytes + 1023) / 1024 ))
+        fi
+        printf '%s' "${kb:-0}"
+    }
+    _fmt_kb() {
+        local k="${1:-0}"; case "$k" in ''|*[!0-9]*) k=0 ;; esac
+        [ "$k" -le 0 ] && { printf -- '-'; return; }
+        if [ "$k" -ge 1024 ]; then awk -v k="$k" 'BEGIN{printf "%.1fM", k/1024}'; else printf '%dK' "$k"; fi
+    }
+    # Like _fmt_kb but for free/total space: adds a G tier and never prints "-" (0 is a real
+    # value here, not "unknown").
+    _fmt_space() {
+        local k="${1:-0}"; case "$k" in ''|*[!0-9]*) k=0 ;; esac
+        if   [ "$k" -ge 1048576 ]; then awk -v k="$k" 'BEGIN{printf "%.2fG", k/1048576}'
+        elif [ "$k" -ge 1024 ];    then awk -v k="$k" 'BEGIN{printf "%.1fM", k/1024}'
+        else printf '%dK' "$k"; fi
+    }
+    # Overlay storage line: current free/total, plus a live projection of free space after the
+    # staged install/remove changes. On a compressing overlay (ubifs/jffs2) the uncompressed
+    # sizes overstate real flash use, so the projection is a conservative floor, marked "≈";
+    # on f2fs/ext4 it is exact. Amber when the projected free would get low. Persist toggles
+    # don't touch overlay space (sysupgrade.conf is tiny), so only install-state changes count.
+    _pkg_storage_line() {
+        local free tot
+        read -r free tot <<EOF
+$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4, $2}')
+EOF
+        case "$free" in ''|*[!0-9]*) free=0 ;; esac
+        case "$tot"  in ''|*[!0-9]*) tot=0 ;; esac
+        local delta=0 nm ti tp oi s
+        while IFS='|' read -r _ nm ti tp _ _ _ oi _; do
+            [ -z "$nm" ] && continue
+            [ "$ti" = "$oi" ] && continue        # install state unchanged -> no overlay delta
+            s=$(grep -m1 "^$nm|" "$sizes_file" 2>/dev/null | cut -d'|' -f2)
+            case "$s" in ''|*[!0-9]*) s=0 ;; esac
+            if [ "$ti" -eq 1 ]; then delta=$((delta - s)); else delta=$((delta + s)); fi
+        done < "$map_file"
+        printf " %bStorage:%b  %s free of %s" "$CYAN" "$RESET" "$(_fmt_space "$free")" "$(_fmt_space "$tot")"
+        if [ "$delta" -ne 0 ]; then
+            local proj=$((free + delta)); [ "$proj" -lt 0 ] && proj=0
+            local approx="" col="$GREEN"
+            [ "$fs_comp" -eq 1 ] && approx="≈ "
+            [ "$proj" -lt 10240 ] && col="$YELLOW"      # < 10M projected free -> flag amber
+            printf "   %b→%b  %b%s%s%b after changes" "$GREY" "$RESET" "$col" "$approx" "$(_fmt_space "$proj")" "$RESET"
+            [ "$proj" -lt 10240 ] && printf "  %b(low)%b" "$YELLOW" "$RESET"
+        fi
+        printf "\n"
+    }
+    # Re-sort the map by $sort_mode and renumber the visible index (field 1).
+    _pkg_resort() {
+        # busybox sort can't sort by a mid-line -k field reliably (sort -t'|' -k2,2 is
+        # a no-op there), so annotate each row with its sort key (name, or size KB) in a
+        # leading tab-delimited field, sort on that, then strip it back off.
+        local tmp="${map_file}.rs"
+        {
+            while IFS= read -r _l; do
+                _n=$(printf '%s' "$_l" | cut -d'|' -f2)
+                if [ "$sort_mode" = name ]; then
+                    printf '%s\t%s\n' "$_n" "$_l"
+                else
+                    _k=$(grep -m1 "^$_n|" "$sizes_file" 2>/dev/null | cut -d'|' -f2); : "${_k:=0}"
+                    printf '%s\t%s\n' "$_k" "$_l"
+                fi
+            done < "$map_file"
+        } | if [ "$sort_mode" = name ]; then sort; else sort -rn; fi | cut -f2- > "$tmp"
+        awk -F'|' -v OFS='|' '{$1=NR; print}' "$tmp" > "$map_file"
+        rm -f "$tmp"
+    }
     
     # Initialization: Scan current system state
     init_system_state(){
-    [ -f "$map_file" ] && rm -f "$map_file"
+    rm -f "$map_file" "$sizes_file" "$idx_sizes"
+    # Not-installed sizes come from the package index; refresh it when empty (opkg keeps
+    # the lists under /tmp, so they vanish on reboot). Runs behind the caller's spinner.
+    # Refresh only when the index is empty AND the internet is actually up (a quick ping,
+    # so an offline entry doesn't wait out the timeout). Bound the update at 60s - a full
+    # refresh is ~30s on a slow MIPS box - so a stalled feed can't hang. Anything still
+    # unknown afterwards falls back to "-".
+    if [ "$(pkg_mgr)" = opkg ] && [ -z "$(find /var/opkg-lists /tmp/opkg-lists -type f 2>/dev/null)" ] \
+       && ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
+        if command -v timeout >/dev/null 2>&1; then timeout 60 opkg update >/dev/null 2>&1
+        else opkg update >/dev/null 2>&1; fi
+    fi
+    # Cache every not-installed INSTALL size in ONE pass. We show install size (not download)
+    # for every package, so parse the index's Installed-Size field, not Size (the .ipk
+    # download). 'opkg info <pkg>' cold-parses the whole index on every call (~3s on MIPS) and
+    # only ever reports its FIRST argument, so a call per package made this loop ~3s*N; one awk
+    # over the feeds builds name|bytes for the whole feed in well under a second. The feeds are
+    # usually gzip-compressed on disk (zcat), but plain on some boxes (cat fallback - busybox
+    # 'zcat -f' does NOT pass plain text through). NB: some feeds under-report Installed-Size
+    # for compressible binaries (e.g. librespeed-go), so a not-installed size is a best-effort
+    # estimate; the storage projection treats it as such. Absent names -> "-".
+    : > "$idx_sizes"
+    if [ "$(pkg_mgr)" = opkg ]; then
+        local _files _f
+        # /var is a symlink to /tmp on OpenWrt, so both globs hit the same feeds - dedupe by
+        # basename (keep the first path per feed) so we decompress each feed once, not twice.
+        _files=$(find /var/opkg-lists /tmp/opkg-lists -type f 2>/dev/null | awk -F/ '!seen[$NF]++')
+        for _f in $_files; do
+            zcat "$_f" 2>/dev/null || cat "$_f" 2>/dev/null
+        done | awk '/^Package: /{n=$2} /^Installed-Size: /{if(n!=""){print n"|"$2; n=""}}' > "$idx_sizes"
+    fi
     local i=1
     echo "$UTILITY_DB" | while IFS='|' read -r name bin type paths; do
+        [ -z "$name" ] && continue
         local inst=0; [ -f "$bin" ] && inst=1
         local pers=0
         # Check if any of its paths are in sysupgrade.conf
@@ -5458,29 +5773,52 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
         done
         # Format: Index|Name|Target_I|Target_P|Action|Type|Paths|Orig_I|Orig_P
         echo "$i|$name|$inst|$pers|No Change|$type|$paths|$inst|$pers" >> "$map_file"
+        printf '%s|%s\n' "$name" "$(_pkg_size "$name" "$bin" "$paths")" >> "$sizes_file"
         i=$((i+1))
     done
+    _pkg_resort
     }
 
-    init_system_state
+    # Standard setup-screen flow: show the header, then a spinner while sizes are
+    # gathered (and the opkg index is refreshed if empty), then the loop clears and
+    # renders the full menu. Sizes that can't be determined fall back to "-".
+    clear
+    print_centered_header "Package & Persistence Manager"
+    spin_run "Collecting package sizes" init_system_state
 
     while true; do
         clear
         print_centered_header "Package & Persistence Manager"
-        printf "       %-7s %-7s %-19s %s\n" "Install" "Persist" "Package Name" "Planned Action"
-        printf " ───────────────────────────────────────────────────────────\n"
+        _pkg_storage_line          # print_centered_header already leaves one blank line above
+        printf "\n"
+        # ↓ marks the sorted column; pre-padded to the same display width as the data
+        # columns (%-19s / %-7s) so the arrow's byte width doesn't shift the layout.
+        if [ "$sort_mode" = name ]; then _hn="Package Name ↓     "; _hs="Size   "
+        else                             _hn="Package Name       "; _hs="Size ↓ "; fi
+        printf "       %-7s %-7s %s %s %s\n" "Install" "Persist" "$_hn" "$_hs" "Planned Action"
+        printf " %s\n" "$_pkg_div"
 
         while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
             local i_box="  [ ]  "; [ "$i_t" -eq 1 ] && i_box="  [✓]  "
             local p_box="  [ ]  "; [ "$p_t" -eq 1 ] && p_box="  [✓]  "
-
-            printf " %-5s %s %s %-19s %b%s%b\n" "$idx." "$i_box" "$p_box" "$name" "${CYAN}" "$action" "${RESET}"
+            local sz; sz=$(grep -m1 "^$name|" "$sizes_file" 2>/dev/null | cut -d'|' -f2)
+            # Semantic action colour, matching the confirm screen (green = install/persist,
+            # red = remove/unpersist); "No Change" stays dim so staged rows stand out. Check
+            # the destructive words first ("Disable Persistence" contains "Persist").
+            local _ac
+            case "$action" in
+                "No Change")                    _ac="$GREY" ;;
+                *Remove*|*Disable*|*Unpersist*) _ac="$RED" ;;
+                *Install*|*Enable*)             _ac="$GREEN" ;;
+                *)                              _ac="$CYAN" ;;
+            esac
+            printf " %-5s %s %s %-19s %-7s %b%s%b\n" "$idx." "$i_box" "$p_box" "$name" "$(_fmt_kb "${sz:-0}")" "$_ac" "$action" "${RESET}"
         done < "$map_file"
 
-        printf " ───────────────────────────────────────────────────────────\n"
-        printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel   [?] Help\n"
+        printf " %s\n" "$_pkg_div"
+        printf " %s\n" "$_pkg_opts"
         pkg_count=$(wc -l < "$map_file" 2>/dev/null | tr -dc '0-9')
-        printf "\n Choose [%s/A/N/C/0/?]: " "$(picker_range "$pkg_count")"
+        printf "\n Choose [%s/A/N/S/C/0/?]: " "$(picker_range "$pkg_count")"
         read -r cmd
         cmd=$(echo "$cmd" | tr 'A-Z' 'a-z')
 
@@ -5593,6 +5931,8 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                             if [ "$i_t" -eq 0 ]; then
                                 if [ "$name" == "speedtest" ]; then
                                     rm -f /usr/bin/speedtest
+                                elif [ "$name" == "speedtest-go" ]; then
+                                    rm -f /usr/bin/speedtest-go
                                 else
                                     pkg_remove "$name" >/dev/null 2>&1
                                 fi
@@ -5608,6 +5948,8 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                             if [ "$i_t" -eq 1 ]; then
                                 if [ "$name" == "speedtest" ]; then
                                     install_ookla_speedtest
+                                elif [ "$name" == "speedtest-go" ]; then
+                                    install_speedtest_go /usr/bin || install_fail=$((install_fail + 1))
                                 else
                                     install_package "$name" || install_fail=$((install_fail + 1))
                                 fi
@@ -5628,11 +5970,14 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
                         print_success "System changes applied."
                     fi
                     press_any_key
-                    init_system_state
+                    clear
+                    print_centered_header "Package & Persistence Manager"
+                    spin_run "Refreshing package list" init_system_state
                     continue
                 fi
                 ;;
-            0) rm -f "$map_file" 2>/dev/null; return ;;
+            s) [ "$sort_mode" = size ] && sort_mode=name || sort_mode=size; _pkg_resort ;;
+            0) rm -f "$map_file" "$sizes_file" "$idx_sizes" 2>/dev/null; return ;;
             \?|h|H|❓) show_package_help ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
@@ -5642,10 +5987,7 @@ speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-
 # --- Manage SSH ---
 
 show_ssh_help() {
-    clear
-    print_centered_header "SSH Key Management - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "SSH Key Management - Help" << 'HELPEOF'
 SSH Key Management – Quick Help
 
 What is an SSH Key?
@@ -5694,8 +6036,6 @@ Security Warning:
 Never share your PRIVATE key with anyone. Only the PUBLIC key belongs
 on the router.
 HELPEOF
-    
-    press_any_key
 }
 
 manage_ssh_keys() {
@@ -5844,9 +6184,7 @@ manage_ssh_keys() {
 }
 
 show_system_tweaks_help() {
-    clear
-    print_centered_header "System Tweaks - Help"
-    cat << 'HELPEOF'
+    show_paged "System Tweaks - Help" << 'HELPEOF'
 System Tweaks – Quick Help
 
 Overview
@@ -5864,27 +6202,21 @@ Options
    Install and configure compressed RAM swap. Essential on low-RAM
    devices running AdGuardHome + VPN simultaneously.
 
-3. Guest Network Bandwidth Limiter
-   Set global speed limits for the guest subnet and control whether
-   guest clients can reach the router's LAN IP.
-
-4. Web-UI Terminal Interface
+3. Web-UI Terminal Interface
    Embed a draggable terminal (powered by ttyd) into the GL.iNet
    Admin Panel as a ">_" icon in the navigation bar.
 
-5. Package and Persistence Manager
+4. Package and Persistence Manager
    Install useful CLI tools (htop, tcpdump, etc.) and configure them
    to survive firmware upgrades via the sysupgrade keep-list.
 
-6. SSH Key Management
-   Add, view, and delete authorized SSH keys. Enable or disable persistence so
-   your keys survive firmware upgrades.
-
-7. Toolkit Management
+5. Toolkit Management
    Install this script to /usr/sbin/glinet_utils so it can be run
    from anywhere. Manage sysupgrade persistence and updates.
+
+Moved: the Bandwidth Limiter (now any network, not just guest) and SSH Key
+Management now live under Network and VPN Tools on the main menu.
 HELPEOF
-    press_any_key
 }
 
 # -----------------------------
@@ -5920,9 +6252,7 @@ set_toolkit_persistence() {
 }
 
 show_toolkit_help() {
-    clear
-    print_centered_header "Toolkit Management - Help"
-    cat << 'HELPEOF'
+    show_paged "Toolkit Management - Help" << 'HELPEOF'
 Toolkit Management – Quick Help
 
 Install to /usr/sbin/glinet_utils
@@ -5955,7 +6285,6 @@ Uninstall
 Removes /usr/sbin/glinet_utils and its sysupgrade.conf entry.
 The script you are currently running is not affected.
 HELPEOF
-    press_any_key
 }
 
 check_install_prompt() {
@@ -8187,8 +8516,13 @@ vpn_state_label() {   # iface type role -> label (status values are ALL CAPS per
     esac
 }
 
+# display columns of a flow-table value: everything is ascii (1 byte = 1 cell) EXCEPT a
+# trailing † (U+2020) which is 3 BYTES but DAG_CELLS display cells - so ${#} over-counts it.
+rla_dispw() { _b="${1%†}"; if [ "$_b" != "$1" ]; then printf '%d' $(( ${#_b} + DAG_CELLS )); else printf '%d' "${#1}"; fi; }
+# left-justify $1 to a field of $2 DISPLAY columns (dagger-aware; replaces byte-based %-Ns).
+rla_padr() { _d=$(rla_dispw "$1"); printf '%s' "$1"; [ "$2" -gt "$_d" ] && rla_rep ' ' "$(( $2 - _d ))"; return 0; }
 rla_ctr() {                     # text width -> text centred in a field of width
-    _t="$1"; _w="$2"; _l=${#_t}
+    _t="$1"; _w="$2"; _l=$(rla_dispw "$_t")
     if [ "$_l" -ge "$_w" ]; then printf '%s' "$_t"; return; fi
     _p=$(( (_w - _l) / 2 ))
     rla_rep ' ' "$_p"; printf '%s' "$_t"; rla_rep ' ' "$(( _w - _l - _p ))"
@@ -8590,7 +8924,10 @@ manage_remote_lan_access() {
     # not-yet-known subnet.
     case "$S_AC" in
         \[*) DEC="Legend: [AC] reachable  [IA] blocked  [!] unknown  † inferred subnet" ;;
-        *)  DEC=$(printf 'Legend: %b🟢%b reachable  %b🔴%b blocked  %b🟡%b unknown  † inferred subnet' "$GREEN" "$RESET" "$RED" "$RESET" "$YELLOW" "$RESET") ;;  # painted so PuTTY's monochrome circles stay distinguishable
+            # Painted so PuTTY's monochrome circles stay distinguishable. (Measured with
+            # glyph-test.sh across mac/termius/ttyd/wt/putty: the circles are NOT clipped by the
+            # trailing † on any of them, so no sacrificial space is needed here.)
+        *)  DEC=$(printf 'Legend: %b🟢%b reachable  %b🔴%b blocked  %b🟡%b unknown  † inferred subnet' "$GREEN" "$RESET" "$RED" "$RESET" "$YELLOW" "$RESET") ;;
     esac
     if [ "$OUTPUT_MODE" = "compat" ]; then
         RULE="-"; BAR="|"; TL="|"; TR="|"; LK="===="; WR="--"
@@ -8650,7 +8987,9 @@ manage_remote_lan_access() {
         # information, sorting only costs spatial stability.
         rla_rows "$iface" "$type" "$role" "$dir" | while IFS='|' read -r k a b c d; do
             case "$k" in REACH) g="$S_AC";; BLOCK) g="$S_IA";; *) g="$S_RO";; esac
-            printf '   %s%-18s%-18s%-18s%s\n' "$g" "$a" "$b" "$c" "$d"
+            # dagger-aware padding: %-18s counts the 3-byte † as 3, so a daggered value would
+            # slide the next column left. rla_padr pads by DISPLAY width instead.
+            printf '   %s%s%s%s%s\n' "$g" "$(rla_padr "$a" 18)" "$(rla_padr "$b" 18)" "$(rla_padr "$c" 18)" "$d"
         done
         printf '\n %s\n' "$DEC"
         printf ' %s\n' "$(rla_rep "$RULE" $W)"
@@ -8703,9 +9042,7 @@ manage_remote_lan_access() {
 }
 
 show_vpntools_help() {
-    clear
-    print_centered_header "VPN Tools - Help"
-    cat << 'HELPEOF'
+    show_paged "VPN Tools - Help" << 'HELPEOF'
 
 VPN Tools - Quick Help
 
@@ -8724,13 +9061,10 @@ Type the number beside an item and press Enter. [0] goes back; [?] shows the
 help for whichever screen you are on.
 
 HELPEOF
-    press_any_key
 }
 
 show_mtu_help() {
-    clear
-    print_centered_header "VPN MTU Optimizer - Help"
-    cat << 'HELPEOF'
+    show_paged "VPN MTU Optimizer - Help" << 'HELPEOF'
 
 VPN MTU Optimizer - Quick Help
 
@@ -8781,13 +9115,10 @@ Notes
     Panel under the tunnel's Options and survives a reboot.
 
 HELPEOF
-    press_any_key
 }
 
 show_rla_help() {
-    clear
-    print_centered_header "Remote LAN Access - Help"
-    cat << 'HELPEOF'
+    show_paged "Remote LAN Access - Help" << 'HELPEOF'
 
 Remote LAN Access - Quick Help
 
@@ -8822,13 +9153,10 @@ Notes
     the remote router itself - this tool cannot set it for you.
 
 HELPEOF
-    press_any_key
 }
 
 show_package_help() {
-    clear
-    print_centered_header "Package & Persistence Manager - Help"
-    cat << 'HELPEOF'
+    show_paged "Package & Persistence Manager - Help" << 'HELPEOF'
 
 Package & Persistence Manager - Quick Help
 
@@ -8843,6 +9171,19 @@ Install / remove
     then Confirm. The right package manager for your firmware (opkg or apk) is
     used automatically.
 
+Size & storage
+──────────────
+  • Size is the INSTALL size for every package - what it occupies once on disk, not the
+    download. Installed rows are measured directly (a firmware-provided package counts too:
+    it can be removed from the active partition, returning on a firmware reset); not-installed
+    rows are the package index's declared install size, so they are an estimate. "-" means the
+    size could not be determined (e.g. a package the index doesn't list).
+  • The Storage line shows the overlay's free space and, once you stage changes, the projected
+    free space after them. On a compressing overlay (ubifs/jffs2) that projection is a
+    conservative "≈" floor - real free space is usually a little higher - and it turns amber
+    when it would get low; on f2fs/ext4 it is exact.
+  • [S] Sort toggles largest-first (the default) and alphabetical.
+
 Persistence
 ───────────
 Many models wipe added packages on reboot. Persistence re-installs your marked
@@ -8855,23 +9196,26 @@ Notes
     called out up front, with an alternative suggested.
 
 HELPEOF
-    press_any_key
 }
 
 manage_vpn_tools() {
     while true; do
         clear
-        print_centered_header "VPN Tools"
+        print_centered_header "Network and VPN Tools"
         printf "%s%sVPN MTU Optimizer\n" "$N1" "$NSEP"
         printf "%s%sRemote LAN Access\n" "$N2" "$NSEP"
+        printf "%s%sNetwork Bandwidth Limiter\n" "$N3" "$NSEP"
+        printf "%s%sSSH Key Management\n" "$N4" "$NSEP"
         printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-2/0/?]: "
+        printf "\nChoose [1-4/0/?]: "
         read -r vpn_choice
         printf "\n"
         case "$vpn_choice" in
             1) manage_mtu ;;
             2) manage_remote_lan_access ;;
+            3) manage_netlimit ;;
+            4) manage_ssh_keys ;;
             0) return ;;
             \?|h|H|❓) show_vpntools_help ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -8885,24 +9229,20 @@ system_tweaks() {
         print_centered_header "System Tweaks"
         printf "%s%sDevice Fan Settings\n" "$N1" "$NSEP"
         printf "%s%sManage Zram Swap\n" "$N2" "$NSEP"
-        printf "%s%sGuest Network Bandwidth Limiter\n" "$N3" "$NSEP"
-        printf "%s%sWeb-UI Terminal Interface\n" "$N4" "$NSEP"
-        printf "%s%sPackage and Persistence Manager\n" "$N5" "$NSEP"
-        printf "%s%sSSH Key Management\n" "$N6" "$NSEP"
-        printf "%s%sToolkit Management\n" "$N7" "$NSEP"
+        printf "%s%sWeb-UI Terminal Interface\n" "$N3" "$NSEP"
+        printf "%s%sPackage and Persistence Manager\n" "$N4" "$NSEP"
+        printf "%s%sToolkit Management\n" "$N5" "$NSEP"
         printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-7/0/?]: "
+        printf "\nChoose [1-5/0/?]: "
         read -r st_choice
         printf "\n"
         case $st_choice in
             1) manage_fan_settings ;;
             2) manage_zram ;;
-            3) manage_guest_limiter ;;
-            4) manage_web_terminal ;;
-            5) manage_packages ;;
-            6) manage_ssh_keys ;;
-            7) manage_toolkit ;;
+            3) manage_web_terminal ;;
+            4) manage_packages ;;
+            5) manage_toolkit ;;
             \?|h|H|❓) show_system_tweaks_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -8915,10 +9255,7 @@ system_tweaks() {
 # -----------------------------
 
 show_benchmarks_help() {
-    clear
-    print_centered_header "System Benchmarks - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "System Benchmarks - Help" << 'HELPEOF'
 System Benchmarks – Quick Help
 
 Overview
@@ -8957,15 +9294,10 @@ Note on Local Servers:
 iPerf3 is the industry standard for CLI testing. LibreSpeed and OpenSpeedTest 
 provide a browser-based UI for testing from phones and tablets without apps.
 HELPEOF
-    
-    press_any_key
 }
 
 show_librespeed_help() {
-    clear
-    print_centered_header "LibreSpeed Speed Test - Help"
-    
-    cat << 'HELPEOF'
+    show_paged "LibreSpeed Speed Test - Help" << 'HELPEOF'
 LibreSpeed Speed Test Server – Quick Help
 
 What is LibreSpeed?
@@ -9001,8 +9333,6 @@ Important notes:
   firmware updates, preventing manual re-installation.
 • Procd Jail: Runs in a secure sandbox for improved router security.
 HELPEOF
-    
-    press_any_key
 }
 
 manage_librespeed() {
@@ -9121,7 +9451,7 @@ manage_librespeed() {
                 ;;
             4)
                 if [ "$IS_INSTALLED" -eq 1 ]; then
-                    printf "%b" "${YELLOW}Remove LibreSpeed package? [y/N]: ${RESET}"; read -r confirm
+                    printf "Remove LibreSpeed package? [y/N]: "; read -r confirm
                     if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                         /etc/init.d/librespeed-go stop >/dev/null 2>&1
                         pkg_remove librespeed-go >/dev/null 2>&1
@@ -9193,13 +9523,24 @@ install_ookla_speedtest() {
 
 STGO_BIN="/tmp/speedtest-go"
 
-# speedtest-go is a maintained, statically-linked Go client that measures against the
-# same speedtest.net servers as Ookla but - unlike Ookla - ships MIPS builds. We use it
-# on MIPS routers, where the official Ookla binary doesn't exist. It installs to /tmp,
-# not /usr/bin: the binary is ~8.8 MB and MIPS boards have ~16 MB of flash, so keeping it
-# would nearly fill the overlay; tmpfs has room and a re-fetch per session is cheap.
-install_speedtest_go() {
-    # Cached and runnable? (--version also proves the download matched this CPU.)
+# speedtest-go is a maintained, statically-linked Go client that measures against the same
+# speedtest.net servers as Ookla but - unlike Ookla - ships MIPS builds. We use it on MIPS
+# routers, where the official Ookla binary doesn't exist. By default it fetches to /tmp (the
+# binary is ~8.4 MB and MIPS boards have little flash, so a per-session re-fetch keeps the
+# overlay free). But it can also be installed persistently to /usr/bin via the Package
+# Manager - the Size column + storage line let the user judge the flash cost first - and a
+# persistent copy is always preferred here (survives reboots, no re-download). Sets STGO_BIN
+# to whichever copy it ended up with.
+install_speedtest_go() {   # [target_dir]  default /tmp (scratch); pass /usr/bin to persist
+    local _dir="${1:-/tmp}"
+    # A persistent /usr/bin copy always wins - survives reboots, no re-download.
+    if [ -x /usr/bin/speedtest-go ] && /usr/bin/speedtest-go --version >/dev/null 2>&1; then
+        STGO_BIN=/usr/bin/speedtest-go
+        [ "$_dir" = /usr/bin ] && print_success "speedtest-go already installed."
+        return 0
+    fi
+    STGO_BIN="$_dir/speedtest-go"
+    # Cached and runnable at the target? (--version also proves the download matched this CPU.)
     if [ -x "$STGO_BIN" ] && "$STGO_BIN" --version >/dev/null 2>&1; then
         return 0
     fi
@@ -9217,7 +9558,7 @@ install_speedtest_go() {
         url=$(wget -qO- "https://api.github.com/repos/showwin/speedtest-go/releases/latest" 2>/dev/null \
                 | grep -oE "https://[^\"]*speedtest-go_[0-9.]+_${_stgo_asset}" | head -n1)
         [ -z "$url" ] && url="https://github.com/showwin/speedtest-go/releases/download/v1.7.11/speedtest-go_1.7.11_${_stgo_asset}"
-        wget -qO- "$url" | tar xz -C /tmp speedtest-go
+        wget -qO- "$url" | tar xz -C "$_dir" speedtest-go
         chmod +x "$STGO_BIN"
     }
 
@@ -9862,10 +10203,7 @@ mt1300|Beryl|MT7621|179.39'
 # UCI Configuration Viewer
 # -----------------------------
 show_uci_help() {
-    clear
-    print_centered_header "System Configuration Viewer - Help"
-
-    cat << 'HELPEOF'
+    show_paged "System Configuration Viewer - Help" << 'HELPEOF'
 System Configuration Viewer - Quick Help
 
 What it does
@@ -9880,8 +10218,6 @@ Nothing is changed, saved or committed from this screen. It's for inspecting
 what the router is actually running - safe to browse, and handy for
 troubleshooting or comparing against the Admin Panel.
 HELPEOF
-
-    press_any_key
 }
 
 view_uci_config() {
@@ -10276,10 +10612,7 @@ fi
 # Main Menu
 # -----------------------------
 show_main_help() {
-    clear
-    print_centered_header "GL.iNet Toolkit - Main Menu Help"
-
-    cat << 'HELPEOF'
+    show_paged "GL.iNet Toolkit - Main Menu Help" << 'HELPEOF'
 GL.iNet Toolkit - Quick Help
 
 What it does
@@ -10299,8 +10632,6 @@ Getting around (the same keys work on every screen):
   it goes Back, or returns to the Main menu.
 • [?] shows the help for whichever screen you are on.
 HELPEOF
-
-    press_any_key
 }
 
 show_menu() {
@@ -10312,7 +10643,7 @@ show_menu() {
         printf "%s%sAdGuardHome Control Center\n" "$N2" "$NSEP"
         printf "%s%sSystem Tweaks\n" "$N3" "$NSEP"
         printf "%s%sSystem Benchmarks\n" "$N4" "$NSEP"
-        printf "%s%sVPN Tools\n" "$N5" "$NSEP"
+        printf "%s%sNetwork and VPN Tools\n" "$N5" "$NSEP"
         printf "%s%sView System Configuration (UCI)\n" "$N6" "$NSEP"
         printf "%s%sExit\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"

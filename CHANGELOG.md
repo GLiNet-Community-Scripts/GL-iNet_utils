@@ -4,6 +4,68 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-21
+- Added: a scrollable **help viewer** — every help screen now pages with `[P]` Previous /
+  `[N]` Next / numbered jumps / `[0]` Back instead of scrolling off the top of the window on a
+  shorter terminal. Page breaks fall on blank lines so a paragraph never splits across a page,
+  and short help still shows on one screen.
+- Added: a generalized **Network Bandwidth Limiter** replaces the guest-only limiter. It shapes
+  any network the router actually has — LAN, guest, IoT, a VLAN, or a VPN tunnel — discovered
+  automatically, in a grid with per-network Download / Upload limits, a measured Router-access
+  dot, persistence, and live status. It lives under **Network and VPN Tools** (renamed from VPN
+  Tools), alongside SSH Key Management; both moved out of System Tweaks. An existing guest
+  limiter is migrated over automatically, so nothing breaks.
+- Added: **Router access** per network is measured live from the firewall and shown as a
+  red/amber/green dot matching the Remote LAN Access screen — reachable (all ports) / partial
+  (some ports, e.g. the DNS + DHCP that GL opens by default) / blocked (no access). When
+  partial, the detail page lists exactly which services are open (service / port / proto).
+  "Allow full router access" opens all ports; "Block" falls back to partial, so DNS/DHCP keep
+  working.
+- Added: hardware acceleration is managed for you — applying any limit disables offload for the
+  whole router (shaping needs the software path), and clearing your last limit re-enables it. The
+  status line reports it health-aware: **DISABLED** / **ENABLED** shown green when nothing is
+  bypassed, and yellow only when acceleration is on while a limit exists (that limit is then
+  BYPASSED). **[H]** is a manual Enable / Disable override, **[R] Reset** reverts everything to
+  defaults (removes every limit and router rule, re-enables acceleration, stops the background
+  service), and the help explains the trade-off with measured CPU-cost figures.
+- Changed: the detail screen follows the standard vertical layout — Status first, then the fields
+  in the same order and names as the grid columns, status values ALL CAPS in both views.
+- Fixed: Remote LAN Access flow-table columns misaligned on any row carrying the inferred-subnet
+  dagger (†). `printf %-Ns` pads by *bytes*, and † is 3 bytes but 1–2 display cells; the columns
+  now pad by measured display width (the dagger's cell width is probed per terminal), so they
+  line up on macOS Terminal, Termius, ttyd, Windows Terminal, and PuTTY.
+- Fixed: the AdGuardHome filter-space, zram-swap, and LibreSpeed removal confirmations painted
+  their question yellow with no warning glyph; they now use the standard warning style — the bold
+  glyph via the shared helper for the caution line, and a plain question — matching every other
+  warning in the toolkit.
+- Removed: the old guest-only limiter code (~500 lines) now that the generalized engine
+  supersedes it; the System Tweaks help was corrected to match the current menu.
+
+## 2026-08-18
+- Added: the Package & Persistence Manager now shows a **Size** column (between Package Name
+  and Planned Action) and a **Storage** line under the title. Size is the *install* size for
+  every package - what it occupies on disk once installed, not the download - measured
+  directly for installed packages (firmware/rom ones included) and taken from the package
+  index for not-installed ones (an estimate). The Storage line shows the overlay's free space
+  and, once changes are staged, the projected free space after them: a conservative "≈" floor
+  on a compressing overlay (ubifs/jffs2, where uncompressed sizes overstate real flash use),
+  exact on f2fs/ext4, turning amber when it would get low. Sizes are gathered on entry behind
+  a spinner; **[S] Sort** toggles size / alphabetical with a ↓ on the sorted column.
+- Added: on MIPS routers - where Ookla ships no binary - the Package Manager now offers
+  **speedtest-go** as the installable internet speed-test entry (in place of the
+  un-installable Ookla `speedtest`). Installing it also makes the "Ookla Internet Speedtest"
+  benchmark instant, since it then uses the persistent copy instead of re-fetching each run.
+- Added: `iperf3` and `iputils-ping` to the Package Manager.
+- Changed: Planned Action colours now match the confirm screen - green for install/persist,
+  red for remove/unpersist, dim grey for no change.
+- Fixed: not-installed sizes stayed "-" even online - the empty-index check used `ls -A` on
+  two directories (which prints directory-name headers, so it never read as empty); it now
+  uses `find -type f`, so the index refreshes and sizes appear.
+- Changed: size gathering is much faster - sizes come from a single pass over the package
+  index feeds instead of one `opkg info` call per package (~3s each on MIPS); a refresh with
+  the index already populated dropped from ~19s to ~5s.
+- Fixed: the Package Manager's divider lines span the full width of the widest row.
+
 ## 2026-08-14
 - Added: the Hardware Info **Network** page (page 3) is now a physical-port panel - a
   column grid (Port · Role · Status · Link · Maps to) grouped by the chip each port

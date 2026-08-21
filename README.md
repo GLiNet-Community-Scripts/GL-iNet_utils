@@ -28,15 +28,16 @@
   - **Surgical Backups:** Precision tracking of configurations, binaries, and scripts with automated timestamping and integrity checks that persist through firmware upgrades.
 - ⚙️ **System Tweaks**
   - **Zram Tuning:** Essential for low-RAM devices (e.g., Beryl 7/MT3600BE). Easily install and tune compressed RAM swap to reduce OOM (Out-of-Memory) crashes.
-  - **Guest Network Limiter:** Global speed control for the entire guest subnet and the ability to toggle guest access to the router’s local IP.
   - **Advanced Fan Control:** Granular management of Min/Max thresholds, "Fan-on" triggers, and thermal warnings with direct UI integration.
   - **Web-UI Terminal:** Embeds a fully functional Linux terminal directly into the GL.iNet Admin Panel. Adds a `>_` icon to the navigation bar that opens a draggable, resizable, minimizable terminal modal powered by ttyd. Supports both HTTP and HTTPS modes.
-  - **DevOps Tools:** Automated SSH Key installer and a Package Manager to persist essential CLI tools across sysupgrades.
+  - **Package Manager:** Installs and persists essential CLI tools across sysupgrades — showing each tool's install size and the overlay's free space, with a live projection of what's left after your selections (an approximate floor on compressing filesystems), so you can weigh the flash cost before committing.
   - **Toolkit Management:** Install the toolkit as a system command — copies it to `/usr/sbin/glinet_utils` so you can launch it from any directory by just typing `glinet_utils`, with optional `sysupgrade.conf` persistence so it (and its self-updates) survive firmware upgrades.
 - 📊 **Performance Benchmarks**
   - **Cross-Device Leaderboards:** A VPN & Crypto benchmark (WireGuard/ChaCha20, OpenVPN/AES-GCM, and RSA handshake), plus CPU thermal stress and raw Disk/Memory I/O — each ranked against saved reference routers instead of a single baseline — alongside DNS latency.
   - **Network Probing:** Integrated support for Ookla Speedtest, LibreSpeed, and OpenSpeedTest server environments. (Ookla publishes no MIPS build, so on MIPS routers the Ookla Internet Speedtest transparently uses speedtest-go — a maintained client on the same speedtest.net servers — for a real internet speed test there too.)
-- 🔐 **VPN Tools**
+- 🔐 **Network and VPN Tools**
+  - **Network Bandwidth Limiter:** Sets a download/upload speed ceiling on any network the router actually has — LAN, guest, IoT, a VLAN, or a VPN tunnel — discovered automatically. A grid shows each network's limits, whether it can reach the router's own services (a red/amber/green dot: reachable / partial / blocked, measured live from the firewall), and whether the limit persists across firmware upgrades. Shaping needs the software forwarding path, so applying a limit turns hardware acceleration off (with a confirm); `[R]` resets everything to defaults. Replaces — and automatically migrates — the old guest-only limiter.
+  - **SSH Key Management:** Add, view, and delete authorized SSH keys, with optional persistence so your keys survive firmware upgrades.
   - **MTU Optimizer:** Finds your active WireGuard and OpenVPN tunnels — client or server — and recommends the right MTU (the underlay link MTU minus that protocol's exact overhead), so tunnelled traffic stops fragmenting and silently losing throughput. Apply it with one keypress, set a value by hand, run an optional active probe, or reset to the router's default. On routers with more than one tunnel, Optimize and Reset can act on all of them at once, each with its own correct value.
   - **Written where the router expects it:** the MTU goes into GL.iNet's own VPN configuration rather than a generic network setting, so it appears in the Admin Panel under that tunnel's Options and survives a reboot. On older firmware, where the web UI can set an MTU but not clear it again, Reset is the only way back to the default.
   - **Remote LAN Access** — shows every traffic combination across the tunnel in
@@ -90,7 +91,7 @@ Main Menu
 2️⃣  AdGuardHome Control Center
 3️⃣  System Tweaks
 4️⃣  System Benchmarks
-5️⃣  VPN Tools
+5️⃣  Network and VPN Tools
 6️⃣  View System Configuration (UCI)
 0️⃣  Exit
 ❓ Help
@@ -116,11 +117,9 @@ System Tweaks
 ```
 1️⃣  Device Fan Settings
 2️⃣  Manage Zram Swap
-3️⃣  Guest Network Bandwidth Limiter
-4️⃣  Web-UI Terminal Interface
-5️⃣  Package and Persistence Manager
-6️⃣  SSH Key Management
-7️⃣  Toolkit Management
+3️⃣  Web-UI Terminal Interface
+4️⃣  Package and Persistence Manager
+5️⃣  Toolkit Management
 0️⃣  Main menu
 ❓ Help
 ```
@@ -143,11 +142,13 @@ System Benchmarks
 
 ```
 
-VPN Tools
+Network and VPN Tools
 
 ```
 1️⃣  VPN MTU Optimizer
 2️⃣  Remote LAN Access
+3️⃣  Network Bandwidth Limiter
+4️⃣  SSH Key Management
 0️⃣  Main menu
 ```
 

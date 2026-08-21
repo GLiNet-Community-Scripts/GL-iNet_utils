@@ -4,6 +4,23 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-21_10:01
+- Fixed: the self-installer could replace the installed `glinet_utils` command with a copy of
+  **BusyBox** (so it printed `applet not found`) when the toolkit was piped into a shell — `$0`
+  resolved to `/bin/sh` → BusyBox and the installer copied that. It now verifies the source really
+  is the toolkit (shebang + `# Version:` marker) before copying, and doesn't offer to install at
+  all on a piped/stdin run.
+- Changed: the Bandwidth Limiter's "turn off hardware acceleration" prompt is now an **informational
+  note** (not a warning) with a **Yes default** — it describes the side effect of the limit you
+  just asked for, and that acceleration turns back on by itself when the last limit is removed,
+  instead of reading like a caution against limiting.
+- Changed: the per-network router-access action is now **"Enable / Disable router to be reachable
+  on all ports"** (context-aware) instead of "Allow full router access" / "Block router access" —
+  the old "Allow" implied a web-UI permission, and "Block" was inaccurate (turning it off only
+  falls back to the default partial access; it does not block).
+- Fixed: the router-access detail notices (managed-by-zone / no-zone) now use the standard info
+  style with an icon instead of hand-painted yellow text.
+
 ## 2026-08-21
 - Added: a scrollable **help viewer** — every help screen now pages with `[P]` Previous /
   `[N]` Next / numbered jumps / `[0]` Back instead of scrolling off the top of the window on a

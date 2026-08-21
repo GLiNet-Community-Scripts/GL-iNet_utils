@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-21
+# Version: 2026-08-21_10:01
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -85,8 +85,8 @@
 #    modal body-vs-footer pattern, same as a menu's options => "Choose").
 #    Exception - a MID-FLOW interruption: when the disclosure+prompt appear AFTER the
 #    user has already answered a DIFFERENT prompt in the same flow (e.g. typed a value,
-#    then a "that requires X - proceed?" surprise), the warning is a NEW component, not
-#    a leading disclosure - give it ONE blank line ABOVE it to detach it from the
+#    then a "that requires X - proceed?" surprise), the disclosure (info or warning) is a
+#    NEW component, not a leading disclosure - give it ONE blank line ABOVE it to detach it from the
 #    finished entry, then hug its own prompt below as usual. (The action that follows
 #    the answer still gets its one blank per rule 10.) See _netlimit_offload_ok.
 # 2. Yes = the action; the capitalized default marks the safe side
@@ -4803,11 +4803,14 @@ _nl_rate() {
 # Returns 0 to proceed; only prompts when offload is currently ON.
 _netlimit_offload_ok() {
     [ "$(offload_state)" = off ] && return 0
-    printf '\n'                                   # blank line before the warning glyph (UX prompt-flow std)
-    print_warning "Bandwidth shaping requires HW acceleration OFF.\n   Turning it off affects the whole router's forwarding performance."
-    printf "Turn it off and apply the limit? [y/N]: "
+    # INFO, not a warning: this is a side-effect disclosure for the action the user just asked
+    # for, not a caution against it - so ℹ️, one concise factual line, and a [Y/n] default (they
+    # already entered a limit; the change auto-reverts). Mid-flow interruption keeps its blank above (rule #1).
+    printf '\n'
+    print_info "Bandwidth limiting requires HW acceleration OFF and may impact network and router performance."
+    printf "Apply the limit now? [Y/n]: "
     local a; read -r a; printf '\n'               # blank line after the answer, before the action/gear
-    case "$a" in y|Y) return 0 ;; *) print_info "Cancelled - HW acceleration left on."; sleep 1; return 1 ;; esac
+    case "$a" in n|N) print_info "Cancelled - HW acceleration left on."; sleep 1; return 1 ;; *) return 0 ;; esac
 }
 
 show_netlimit_help() {
@@ -4858,8 +4861,9 @@ Per-network options
       - partial   (yellow) only some ports - typically the DNS/DHCP that GL opens by
                            default; the detail page lists exactly which (service/port/proto)
       - blocked   (red)    no router services reachable at all (rare)
-    "Allow full router access" opens all ports; "Block" removes only that and falls back to
-    partial, so DNS/DHCP keep working. Networks whose zone already accepts input (the LAN,
+    "Enable router to be reachable on all ports" opens every port; the matching "Disable ..."
+    removes only that and falls back to partial (it does NOT block - DNS/DHCP keep working).
+    Networks whose zone already accepts input (the LAN,
     and typically VPN zones) are "managed by zone" and not toggled here - that would risk
     locking you out. (Only ACCEPT rules are counted; hand-written nft rules outside uci are
     not, and the exact reachable set can differ if custom DROP rules interleave.)
@@ -4920,8 +4924,8 @@ EOF
         printf " %s%sSet download limit\n" "$N1" "$NSEP"
         printf " %s%sSet upload limit\n"   "$N2" "$NSEP"
         case "$wb" in
-            blocked|partial) printf " %s%sAllow full router access\n" "$N3" "$NSEP" ;;
-            full)            printf " %s%sBlock router access\n" "$N3" "$NSEP" ;;
+            blocked|partial) printf " %s%sEnable router to be reachable on all ports\n" "$N3" "$NSEP" ;;
+            full)            printf " %s%sDisable router to be reachable on all ports\n" "$N3" "$NSEP" ;;
             *)               printf " %s%sRouter access (managed by zone)\n" "$N3" "$NSEP" ;;
         esac
         [ "$ps" = 1 ] && printf " %s%sDisable persistence\n" "$N4" "$NSEP" || printf " %s%sEnable persistence\n" "$N4" "$NSEP"
@@ -4941,12 +4945,9 @@ EOF
             3) case "$wb" in
                  blocked|partial) spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 1 ;;
                  full)            spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 0 ;;
-                 open)            printf " %bRouter access for '%s' is governed by its firewall zone%b\n" "$YELLOW" "$zone" "$RESET"
-                                  printf " (input policy = ACCEPT), not by this limiter. To change it, edit\n"
-                                  printf " the '%s' zone in the firewall.\n" "$zone"
+                 open)            print_info "Router access for '$name' is governed by its firewall zone (input policy =\n   ACCEPT), not by this limiter. To change it, edit the '$zone' zone in the firewall."
                                   press_any_key ;;
-                 *)               printf " %bThis network has no firewall zone,%b so router access can't be\n" "$YELLOW" "$RESET"
-                                  printf " toggled here.\n"
+                 *)               print_info "This network has no firewall zone, so router access can't be toggled here."
                                   press_any_key ;;
                esac ;;
             4) netlimit_conf_put "$iface" "$dl" "$ul" "$(netlimit_conf_field "$iface" 4)" "$([ "$ps" = 1 ] && echo 0 || echo 1)"; netlimit_persist_sync ;;
@@ -6287,10 +6288,22 @@ The script you are currently running is not affected.
 HELPEOF
 }
 
+# True only if $1 is a readable copy of THIS toolkit (shebang + the "# Version:" marker). Guards
+# the installer against copying a mis-resolved SCRIPT_PATH: when the script is piped into a shell
+# ($0 = "sh"/"ash"), SCRIPT_PATH resolves via `command -v` to /bin/sh -> a symlink to busybox, and
+# a blind `cp "$SCRIPT_PATH" /usr/sbin/glinet_utils` would replace the command with busybox (which
+# then answers "glinet_utils: applet not found"). Verify before we ever copy.
+_is_toolkit_file() {
+    [ -r "$1" ] || return 1
+    head -1 "$1" 2>/dev/null | grep -q '^#!' || return 1
+    grep -q '^# Version:' "$1" 2>/dev/null
+}
+
 check_install_prompt() {
     local ip_ans
     [ "$SCRIPT_PATH" = "$INSTALL_PATH" ] && return
     [ "$INSTALL_PROMPTED" -eq 1 ] && return
+    _is_toolkit_file "$SCRIPT_PATH" || return   # piped/stdin run: no real file to install, don't offer
 
     print_info "Installing to $INSTALL_PATH lets you run this program from anywhere as a system command."
     printf "Install as a system command? [Y/n]: "
@@ -6310,6 +6323,15 @@ check_install_prompt() {
 
 do_install_to_sbin() {
     local persist_ans
+    # Never copy anything that isn't this toolkit (see _is_toolkit_file). A piped run mis-resolves
+    # SCRIPT_PATH to /bin/sh -> busybox; copying that would brick the installed command.
+    if ! _is_toolkit_file "$SCRIPT_PATH"; then
+        print_error "Can't install: couldn't locate the running script."
+        print_info "This happens when the toolkit is piped into a shell. Save it to a file and run that:"
+        print_info "  sh glinet_utils.sh"
+        press_any_key
+        return 1
+    fi
     print_action "Installing to $INSTALL_PATH"
     if ! cp "$SCRIPT_PATH" "$INSTALL_PATH" || ! chmod +x "$INSTALL_PATH"; then
         print_error "Install failed. Check write permissions on /usr/sbin."

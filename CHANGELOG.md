@@ -4,6 +4,15 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-24
+- Fixed: the memory-throughput benchmark reported the wrong RAM on some devices (a 128 MB
+  GL-MT300N "Mango" showed 256 MB) — it used its own estimate (kernel MemTotal + 30 MB, rounded
+  up to the next 128) which overshot into the wrong bucket. It now shows the same figure as
+  Hardware Info screen 1 (MemTotal rounded to the nearest common size), so the two always agree.
+- Changed: RAM-size rounding now recognizes the 1.5× sizes (192 MB, 384 MB, 768 MB, 1.5 GB, 3 GB,
+  6 GB, 12 GB), so a device with one of those isn't rounded up to the next power of two, and a
+  device reporting ~3 GB no longer rounds to 4 GB. Both screens share one rounding helper.
+
 ## 2026-08-21_10:01
 - Fixed: the self-installer could replace the installed `glinet_utils` command with a copy of
   **BusyBox** (so it printed `applet not found`) when the toolkit was piped into a shell — `$0`

@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-21_10:01
+# Version: 2026-08-24
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -1498,6 +1498,20 @@ cpu_counts() {
     printf '%s %s' "$_l" "$_p"
 }
 
+# Round a MB figure UP to the nearest standard RAM size. Kernel MemTotal is ALWAYS below PHYSICAL
+# by a variable, sometimes-large amount (kernel image + MediaTek/Qualcomm reserved-memory carve-outs
+# - measured 11-162 MB across the fleet, the 162 on a Qualcomm IPQ5332). Rounding to the next
+# standard size recovers physical; fine-grained rounding (nearest 32/16/8) would just echo the
+# under-report. The 1.5x sizes (192/384/768/1536/3072/6144/12288) keep a 768 MB / 1.5 GB device from
+# over-rounding to the next power of two. >16 GB falls to a 256 MB grid.
+_mem_bucket() {
+    local m=$1 s
+    for s in 32 64 128 192 256 384 512 768 1024 1536 2048 3072 4096 6144 8192 12288 16384; do
+        [ "$m" -le "$s" ] && { printf '%s' "$s"; return; }
+    done
+    printf '%s' "$(( (m + 255) / 256 * 256 ))"
+}
+
 get_mem_stats() {
     local t=0 a=0 f=0
     if [ -f /proc/meminfo ]; then
@@ -1510,18 +1524,7 @@ get_mem_stats() {
             [ "$t" -gt 0 ] && [ "$a" -gt 0 ] && [ "$f" -gt 0 ] && break
         done < /proc/meminfo
     fi
-    local m=$t
-    if [ "$m" -le 32 ]; then mem_rounded=32
-    elif [ "$m" -le 64 ]; then mem_rounded=64
-    elif [ "$m" -le 128 ]; then mem_rounded=128
-    elif [ "$m" -le 256 ]; then mem_rounded=256
-    elif [ "$m" -le 512 ]; then mem_rounded=512
-    elif [ "$m" -le 1024 ]; then mem_rounded=1024
-    elif [ "$m" -le 2048 ]; then mem_rounded=2048
-    elif [ "$m" -lt 3072 ]; then mem_rounded=3072
-    elif [ "$m" -le 4096 ]; then mem_rounded=4096
-    else mem_rounded=$(( (m + 128) / 256 * 256 ))
-    fi
+    mem_rounded=$(_mem_bucket "$t")
     mem_total=$t
     mem_avail=$a
     mem_free=$f
@@ -10016,16 +10019,13 @@ mt1300|Beryl|MT7621|0.24|12.54'
                 clear
                 print_centered_header "Memory I/O Benchmark"
 
-                if [ -f /proc/meminfo ]; then
-                    total_mem=$(awk '/MemTotal/ {
-                        m = $2 / 1024
-                        est = m + 30
-                        rounded = (int((est + 127) / 128) * 128)
-                        print rounded
-                    }' /proc/meminfo)
-                fi
-
-                total_mem=${total_mem:-512} # Default to 512MB if we can't read it
+                # Use the SAME RAM figure as Hardware Info screen 1 (get_mem_stats -> mem_rounded),
+                # never a second calc. A 128 MB device reads MemTotal ~124 MB; the old inline
+                # "est = MemTotal+30, then ceil-to-128" over-rounded that to 256. get_mem_stats
+                # buckets MemTotal to the nearest common size (124 -> 128), matching the GL UI.
+                get_mem_stats
+                total_mem=$mem_rounded
+                [ "${mem_total:-0}" -gt 0 ] || total_mem=512   # /proc/meminfo unreadable: old default
 
                 # Determine test size (100k blocks of 1M = 100GB of throughput)
                 # We want a large enough test to bypass L1/L2 cache saturation

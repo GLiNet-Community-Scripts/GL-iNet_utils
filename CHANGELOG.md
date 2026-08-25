@@ -4,6 +4,21 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-24_21:00
+- Fixed: the Package Manager showed a blank size for most packages on **apk**-based systems (newer
+  GL firmware and OpenWrt 24.10+/25) — the size lookup only understood opkg's package feeds. It now
+  reads sizes from `apk info -s` (which covers both installed and available packages), so the Size
+  column fills in on apk the same as on opkg. The Ookla **speedtest** binary (installed from Ookla,
+  not in any package feed) now shows a size estimate too, like speedtest-go — on both apk and opkg.
+
+## 2026-08-24_20:48
+- Changed: the Bandwidth Limiter now preflight-checks for `tc` (traffic control) and installs
+  `tc-tiny` if it's missing — so shaping still works if the package was removed — instead of
+  failing at the first `tc` command. If it can't be installed, it says so instead of silently
+  doing nothing.
+- Added: **openssl-util** to the Package Manager's installable tools list, so it can be installed
+  proactively (the crypto benchmark and Web-UI Terminal HTTPS use it).
+
 ## 2026-08-24_20:10
 - Fixed: the crypto benchmark and the Web-UI Terminal's HTTPS certificate both need the `openssl`
   command, which GL firmware ships (openssl-util) but stock/vanilla OpenWrt does not — so on bare

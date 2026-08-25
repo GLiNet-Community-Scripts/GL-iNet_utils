@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-24_20:10
+# Version: 2026-08-24_21:00
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -4995,6 +4995,12 @@ manage_netlimit() {
     local _div; _div=$(awk 'BEGIN{s="";for(i=0;i<82;i++)s=s"─";print s}')
     clear; print_centered_header "Network Bandwidth Limiter"
     spin_run "Discovering networks" _netlimit_build_map
+    # Preflight: shaping needs tc (tc-tiny). Present on GL firmware; require_cmd reinstalls it if a
+    # user removed it. (The HTB/IFB kernel modules are a separate, rarer gap - see the backlog.)
+    if ! require_cmd tc tc-tiny "traffic control (tc)"; then
+        print_warning "Traffic control (tc) isn't available - limits can't be applied until it's installed."
+        press_any_key
+    fi
     while true; do
         clear
         print_centered_header "Network Bandwidth Limiter"
@@ -5636,6 +5642,7 @@ stress|/usr/bin/stress|B|/usr/bin/stress
 stress-ng|/usr/bin/stress-ng|B|/usr/bin/stress-ng
 lscpu|/usr/bin/lscpu|B|/usr/bin/lscpu
 apache|/usr/bin/htpasswd|R|/usr/bin/htpasswd
+openssl-util|/usr/bin/openssl|B|/usr/bin/openssl
 htop|/usr/bin/htop|B|/usr/bin/htop
 rsync|/usr/bin/rsync|B|/usr/bin/rsync
 diffutils|/usr/bin/diff|B|/usr/bin/diff
@@ -5660,8 +5667,36 @@ iputils-ping|/usr/bin/ping|B|/usr/bin/ping"
 
     # Size (KB) for a package: an installed one's actual on-disk footprint (its own files,
     # rom or overlay), or a not-installed one's download size from the index.
+    # Binaries installed from GitHub/Ookla, absent from every opkg/apk feed - best-effort INSTALL
+    # size (the extracted binary, measured) so their column isn't blank. Estimates; arch varies a bit.
+    _nonindex_bytes() {
+        case "$1" in
+            speedtest-go) echo 8782007 ;;   # ~8.4M GitHub binary (MIPS)
+            speedtest)    echo 2541880 ;;   # ~2.5M Ookla CLI (measured aarch64; other arches similar)
+            *)            echo 0 ;;
+        esac
+    }
     _pkg_size() {
         local name="$1" bin="$2" paths="$3" list="/usr/lib/opkg/info/$1.list" kb=0 files="" bytes
+        if [ "$(pkg_mgr)" = apk ]; then
+            # apk-tools (OpenWrt 24.10+/25, newer GL firmware) has no opkg feeds to parse. `apk info -s`
+            # reports the installed size for BOTH installed and available (index) packages in one fast
+            # local call ("<pkg>-<ver> installed size:\n284 KiB"), so it fills the whole column. Fall
+            # back to du only for a toolkit-made symlink apk doesn't know (e.g. stress -> stress-ng).
+            kb=$(apk info -s "$name" 2>/dev/null | awk '
+                $2=="B"   {printf "%d",($1+1023)/1024; exit}
+                $2=="KiB" {printf "%d",$1;             exit}
+                $2=="MiB" {printf "%d",$1*1024;        exit}
+                $2=="GiB" {printf "%d",$1*1048576;     exit}')
+            case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
+            # non-index binaries (Ookla speedtest, speedtest-go) aren't in apk either - use the estimate
+            if [ "$kb" -le 0 ]; then bytes=$(_nonindex_bytes "$name"); [ "$bytes" -gt 0 ] && kb=$(( (bytes + 1023) / 1024 )); fi
+            if [ "$kb" -le 0 ] && [ -e "$bin" ]; then
+                files=$(for f in $bin $paths; do [ -f "$f" ] && echo "$f"; done | sort -u)
+                [ -n "$files" ] && kb=$(du -sk $files 2>/dev/null | awk '{s+=$1} END{print s+0}')
+            fi
+            printf '%s' "${kb:-0}"; return
+        fi
         if [ -e "$bin" ]; then
             # installed: actual on-disk size of its files, measured at their real paths. This
             # covers firmware/rom-provided packages too - they can still be removed from the
@@ -5677,11 +5712,8 @@ iputils-ping|/usr/bin/ping|B|/usr/bin/ping"
         else
             # not installed: estimated INSTALL size (index Installed-Size), from the pre-built
             # map (init_system_state parses it once - see there for why we don't loop opkg).
-            if [ "$name" = speedtest-go ]; then
-                bytes=8782007    # GitHub binary, not in the opkg index; ~8.4M (MIPS build)
-            else
-                bytes=$(grep -m1 "^$name|" "$idx_sizes" 2>/dev/null | cut -d'|' -f2)
-            fi
+            bytes=$(_nonindex_bytes "$name")   # GitHub/Ookla binaries: fixed estimate, not in the index
+            [ "$bytes" -eq 0 ] && bytes=$(grep -m1 "^$name|" "$idx_sizes" 2>/dev/null | cut -d'|' -f2)
             case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
             [ "$bytes" -gt 0 ] && kb=$(( (bytes + 1023) / 1024 ))
         fi

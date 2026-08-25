@@ -4,6 +4,15 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-24_20:10
+- Fixed: the crypto benchmark and the Web-UI Terminal's HTTPS certificate both need the `openssl`
+  command, which GL firmware ships (openssl-util) but stock/vanilla OpenWrt does not — so on bare
+  OpenWrt they failed. The toolkit now **installs openssl-util automatically** when `openssl` is
+  missing (via the apk/opkg-aware installer) instead of erroring or failing silently.
+- Fixed: the Web-UI Terminal's HTTPS setup printed "Generated certificate" even when generation
+  actually failed (e.g. no openssl), leaving ttyd on HTTPS with no cert/key. It now verifies the
+  cert and key were really created and **falls back to HTTP** if not.
+
 ## 2026-08-24
 - Fixed: the memory-throughput benchmark reported the wrong RAM on some devices (a 128 MB
   GL-MT300N "Mango" showed 256 MB) — it used its own estimate (kernel MemTotal + 30 MB, rounded

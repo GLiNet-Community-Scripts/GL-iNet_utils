@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-24
+# Version: 2026-08-24_20:10
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -1349,6 +1349,16 @@ install_package() {
     check_connectivity
     rm -f "$SPIN_LOG" 2>/dev/null
     return 1
+}
+
+# Ensure an external COMMAND is available, installing its package if the binary is missing (via the
+# apk/opkg-aware install_package). For tools stock/vanilla OpenWrt does not ship by default - e.g.
+# `openssl` lives in openssl-util, which GL firmware includes but bare OpenWrt does not. Returns 0
+# if the command is present afterwards, 1 if still missing.
+require_cmd() {   # <command> <package> [<friendly-name>]
+    command -v "$1" >/dev/null 2>&1 && return 0
+    install_package "$2" "${3:-$2}"
+    command -v "$1" >/dev/null 2>&1
 }
 
 get_lan_ip() {
@@ -5379,17 +5389,26 @@ manage_web_terminal() {
                     # Generate cert if HTTPS chosen
                     if [ "$ttyd_proto" = "https" ]; then
                         if [ ! -f /etc/ttyd.crt ] || [ ! -f /etc/ttyd.key ]; then
-                            print_info "Generating self-signed certificate for ttyd"
-                            printf "\n"
-                            openssl req -x509 -nodes -newkey rsa:2048 \
-                                -keyout /etc/ttyd.key \
-                                -out /etc/ttyd.crt \
-                                -days 3650 \
-                                -subj "/CN=gl-router" >/dev/null 2>&1
-                            print_success "Generated /etc/ttyd.crt"
-                            printf "\n"
-                            print_success "Generated /etc/ttyd.key"
-                            printf "\n"
+                            if ! require_cmd openssl openssl-util "OpenSSL command-line tools"; then
+                                print_error "OpenSSL isn't available, so an HTTPS certificate can't be generated."
+                                print_info "Using HTTP for the Web-UI Terminal instead."
+                                printf "\n"
+                                ttyd_proto="http"
+                            else
+                                print_info "Generating self-signed certificate for ttyd"
+                                printf "\n"
+                                if openssl req -x509 -nodes -newkey rsa:2048 \
+                                        -keyout /etc/ttyd.key -out /etc/ttyd.crt -days 3650 \
+                                        -subj "/CN=gl-router" >/dev/null 2>&1 && [ -s /etc/ttyd.crt ] && [ -s /etc/ttyd.key ]; then
+                                    print_success "Generated /etc/ttyd.crt and /etc/ttyd.key"
+                                    printf "\n"
+                                else
+                                    rm -f /etc/ttyd.crt /etc/ttyd.key
+                                    print_error "Certificate generation failed; using HTTP for the Web-UI Terminal instead."
+                                    printf "\n"
+                                    ttyd_proto="http"
+                                fi
+                            fi
                         else
                             print_info "SSL certificates already exist, reusing."
                             printf "\n"
@@ -9856,8 +9875,8 @@ benchmark_system() {
                 clear
                 print_centered_header "VPN & Crypto Benchmark"
 
-                if ! command -v openssl >/dev/null 2>&1; then
-                    print_error "OpenSSL not found"
+                if ! require_cmd openssl openssl-util "OpenSSL command-line tools"; then
+                    print_error "OpenSSL is required for the crypto benchmark and could not be installed."
                     press_any_key
                     continue
                 fi

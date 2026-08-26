@@ -4,6 +4,21 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-26_17:12
+- Fixed: the Package & Persistence Manager wrongly reported "System changes applied" when a package could
+  not actually be removed. Removals are now verified and reported honestly — a package required by other
+  installed packages is kept (with the option to type `YES` to force-remove it despite a warning listing
+  the dependents), a non-opkg "raw" utility has all of its files removed (no leftovers), and anything that
+  could not be removed is listed rather than silently claimed as done.
+- Changed: on apk-based firmware, Package System Repair can now also restore the factory package database
+  from read-only firmware (`/rom`) as a last resort, matching the opkg behavior (lossy — clearly warned).
+- Fixed: the Web-UI Terminal now confirms the ttyd service actually started before reporting success. If it
+  did not (an invalid certificate, a wrong system clock, or the port already in use), it shows the reason
+  and skips patching the Admin Panel — instead of a false "Installed" message and a button that opens a
+  dead page.
+- Changed: the "hard refresh" hint now includes Safari's shortcut (Cmd+Option+R) alongside Ctrl+F5 and
+  Cmd+Shift+R.
+
 ## 2026-08-26
 - Changed: Package System Repair now escalates a corrupt installed database through one shared repair
   flow, so "Repair now" and "Repair the installed database" behave and read identically. It tries, in

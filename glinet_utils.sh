@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-26
+# Version: 2026-08-26_17:12
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -5282,7 +5282,7 @@ Usage in this Menu:
 Important UX Notes:
 ────────────────────
 • Hard Refresh: After deploying or disabling, you MUST perform a 
-  "Hard Refresh" (Cmd+Shift+R or Ctrl+F5) in your browser. This 
+  "Hard Refresh" (Ctrl+F5, or Cmd+Shift+R / Cmd+Option+R on Mac) in your browser. This
   clears the Nginx cache ( /var/lib/nginx ) and forces the new UI.
 • Security: The service is bound to the 'LAN' interface by default. 
   It is not accessible from the WAN (Internet) unless you manually 
@@ -5647,13 +5647,34 @@ UCIEOF
                     /etc/init.d/ttyd enable
                     /etc/init.d/ttyd restart >/dev/null 2>&1
 
+                    # Verify ttyd actually came up before patching the UI + claiming success. The restart
+                    # can fail SILENTLY (a bad/invalid SSL cert, a wrong system clock, or the port already
+                    # in use), which otherwise leaves a "Web-UI Terminal Installed" message + a dead page.
+                    _ttyd_port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${_ttyd_port:=7681}"
+                    _ttyd_up=0
+                    for _i in 1 2 3 4 5; do
+                        if { netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null; } | grep -q ":${_ttyd_port} "; then _ttyd_up=1; break; fi
+                        sleep 1
+                    done
+                    if [ "$_ttyd_up" -ne 1 ]; then
+                        printf "\n"
+                        print_error "ttyd did not start - nothing is listening on port ${_ttyd_port}."
+                        _why=$(logread 2>/dev/null | grep -i ttyd | tail -3)
+                        [ -n "$_why" ] && { print_info "Last ttyd log lines:"; printf '%s\n' "$_why" | sed 's/^/   /'; printf "\n"; }
+                        print_info "Common causes: an invalid certificate, a wrong system clock, or port ${_ttyd_port} already in use."
+                        print_info "Run ${GREY}/etc/init.d/ttyd restart${RESET} to see the error, and check ${GREY}date${RESET} against the certificate."
+                        print_warning "The Web-UI was not patched (the terminal button would lead to a dead page)."
+                        press_any_key
+                        continue
+                    fi
+
                 fi
-               
-                # UI Injection 
+
+                # UI Injection
                 print_info "Patching Web-UI"
                 printf "\n"
                 _inject_terminal_into "$TARGET_GZ" "$ttyd_proto" 1
-                print_success "Web-UI Terminal Installed. \n   Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser to see the changes."
+                print_success "Web-UI Terminal Installed. \n   Please perform a HARD REFRESH (Ctrl+F5, or Cmd+Shift+R / Cmd+Option+R on Mac) in your browser to see the changes."
                 press_any_key
                 ;;
 
@@ -5698,7 +5719,7 @@ UCIEOF
                         print_info "If you customised Fan settings, re-apply them - the panel was reset to stock here."
                     fi
                     printf "\n"
-                    print_info "Please perform a HARD REFRESH (Ctrl+F5 or Cmd+Shift+R) in your browser."
+                    print_info "Please perform a HARD REFRESH (Ctrl+F5, or Cmd+Shift+R / Cmd+Option+R on Mac) in your browser."
                 else
                     print_error "ROM backup not found. Manual UI restoration required."
                 fi
@@ -6154,7 +6175,7 @@ EOF
                 
                 printf "Proceed with changes? [y/N]: "; read -r confirm; printf "\n"
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    install_fail=0
+                    install_fail=0; rem_kept=""; rem_fail=""; rem_forced=""
                     # map_file columns: idx|name|i_t|p_t|action|type|paths|o_i|o_p
                     while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
                         [ "$action" == "No Change" ] && continue
@@ -6162,15 +6183,53 @@ EOF
                         # EXECUTE REMOVALS
                         if [[ "$action" == *"> Remove"* ]] || [[ "$action" == *"> Unpersist"* ]]; then
                             if [ "$i_t" -eq 0 ]; then
-                                if [ "$name" == "speedtest" ]; then
-                                    rm -f /usr/bin/speedtest
-                                elif [ "$name" == "speedtest-go" ]; then
-                                    rm -f /usr/bin/speedtest-go
+                                if pkg_is_installed "$name"; then
+                                    # opkg-managed: let opkg remove the package (and all its files).
+                                    _rout=$(pkg_remove "$name" 2>&1)
+                                    if pkg_is_installed "$name"; then
+                                        if printf '%s' "$_rout" | grep -qi 'depended upon'; then
+                                            # Required by other packages. Default = keep it; offer a
+                                            # typed-YES forced removal with a clear warning.
+                                            printf "\n"
+                                            print_warning "'$name' is required by other installed packages:"
+                                            # Pull just the dependent package NAMES out of opkg's noisy
+                                            # "print_dependents_warning: <pkg>" lines (skip the header + the
+                                            # "Collected errors:" / "No packages removed." chatter).
+                                            _deps=$(printf '%s\n' "$_rout" | grep 'dependents_warning' \
+                                                | grep -vi 'depended upon\|circular' \
+                                                | sed 's/.*dependents_warning:[[:space:]]*//' \
+                                                | grep -E '^[A-Za-z0-9._+-]+$' | head -12)
+                                            if [ -n "$_deps" ]; then printf '%s\n' "$_deps" | sed 's/^/     - /'
+                                            else printf "     (other installed packages depend on it)\n"; fi
+                                            printf "   Forcing removal leaves those packages with a broken dependency.\n"
+                                            printf "   Type %bYES%b to force-remove '%s' anyway, anything else to keep it: " "$BOLD" "$RESET" "$name"
+                                            read -r _force </dev/tty; printf "\n"
+                                            case "$_force" in
+                                                [Yy][Ee][Ss])
+                                                    opkg remove --force-depends --autoremove "$name" >/dev/null 2>&1
+                                                    if pkg_is_installed "$name"; then
+                                                        rem_fail="${rem_fail}\n     - $name (force-remove failed)"
+                                                    else
+                                                        rem_forced="${rem_forced}\n     - $name (force-removed; dependents may be broken)"
+                                                    fi ;;
+                                                *) rem_kept="${rem_kept}\n     - $name (kept - required by other packages)" ;;
+                                            esac
+                                        else
+                                            rem_fail="${rem_fail}\n     - $name (could not be removed)"
+                                        fi
+                                    fi
                                 else
-                                    pkg_remove "$name" >/dev/null 2>&1
+                                    # Not an opkg package (raw binary / util) - remove everything it owns
+                                    # so nothing is left behind, but never a shared core config file.
+                                    for p in $paths; do
+                                        case "$p" in
+                                            /etc/config/system|/etc/config/network|/etc/config/wireless|/etc/config/firewall|/etc/config/dhcp|/etc/config/dropbear|/etc/config/uhttpd) : ;;
+                                            *) rm -rf "$p" 2>/dev/null ;;
+                                        esac
+                                    done
                                 fi
                             fi
-                            
+
                             # Standard cleanup for paths and survival lists
                             for p in $paths; do sed -i "\|$p|d" "$sys_conf" 2>/dev/null; done
                             [ -f "$laz_list" ] && sed -i "\|$name|d" "$laz_list" 2>/dev/null
@@ -6197,10 +6256,14 @@ EOF
                             fi
                         fi
                     done < "$map_file"
-                    if [ "$install_fail" -gt 0 ]; then
-                        print_warning "$install_fail package(s) failed to install; other changes applied."
-                    else
+                    if [ "$install_fail" -eq 0 ] && [ -z "$rem_fail" ] && [ -z "$rem_kept" ] && [ -z "$rem_forced" ]; then
                         print_success "System changes applied."
+                    else
+                        print_warning "Changes applied, with exceptions:"
+                        [ "$install_fail" -gt 0 ] && printf "   %d package(s) failed to install.\n" "$install_fail"
+                        [ -n "$rem_kept" ]   && { printf "   %bKept - required by other installed packages:%b" "$YELLOW" "$RESET"; printf "$rem_kept\n"; }
+                        [ -n "$rem_fail" ]   && { printf "   %bCould not be removed:%b" "$RED" "$RESET"; printf "$rem_fail\n"; }
+                        [ -n "$rem_forced" ] && { printf "   %bForce-removed (dependent packages may now be broken):%b" "$YELLOW" "$RESET"; printf "$rem_forced\n"; }
                     fi
                     press_any_key
                     clear
@@ -9429,6 +9492,10 @@ Install / remove
   • Toggle a package to mark it for install (or an installed one for removal),
     then Confirm. The right package manager for your firmware (opkg or apk) is
     used automatically.
+  • Removals are verified: if a package you are removing is required by other
+    installed packages it is kept and reported (you may type YES to force it,
+    though that can break the packages that depend on it). A non-package tool
+    has all of its files removed, leaving nothing behind.
 
 Size & storage
 ──────────────
@@ -9718,6 +9785,30 @@ _pkg_db_repair_flow() {
     return 1
 }
 
+# apk installed-database repair (the apk analog of _pkg_db_repair_flow, kept separate because apk's world
+# differs: apk-tools is tolerant of a partly-corrupt DB - `apk info` stays exit-0 - so there is no clean
+# "still broken" signal to gate on, and apk keeps NO per-package metadata to reconstruct from. So: run
+# apk's own `apk fix`, then OFFER the factory /rom copy as a lossy last resort (the user judges whether
+# the DB is still misbehaving). Shared by "Repair now" and "Repair the installed database".
+_pkg_db_repair_apk() {
+    spin_run "Repairing the package database (apk fix)" apk fix
+    rm -f "$SPIN_LOG" 2>/dev/null
+    print_success "Ran apk fix."
+    [ -f "$(pkg_db_rom)" ] || return 0
+    printf "\n"
+    print_info "If the package database is still misbehaving, the factory copy can be restored from"
+    printf "   read-only firmware - lossy: apk forgets post-factory package records, but the files stay.\n\n"
+    printf "Restore the factory package database from /rom now? [y/N]: "; local _r; read -r _r; printf "\n"
+    case "$_r" in
+        y|Y) cp "$(pkg_db_rom)" "$(pkg_db_path)" 2>/dev/null
+             spin_run "Refreshing the package index" pkg_update
+             rm -f "$SPIN_LOG" 2>/dev/null
+             print_success "Factory package database restored."
+             print_info "Packages you had installed remain on disk; reinstall any you want apk to track again." ;;
+        *) print_info "Left as-is (apk fix applied)." ;;
+    esac
+}
+
 pkg_repair_now() {
     printf "\n"
     if [ "$PR_DB" != "CORRUPT" ] && [ "$PR_CACHE" != "CORRUPT" ] && [ "$PR_CACHE" != "EMPTY" ]; then
@@ -9732,9 +9823,8 @@ pkg_repair_now() {
     fi
     rm -f "$SPIN_LOG" 2>/dev/null
     if [ "$(pkg_mgr)" = apk ]; then
-        spin_run "Repairing the package database (apk fix)" apk fix
-        print_success "Ran apk update and apk fix."
-        rm -f "$SPIN_LOG" 2>/dev/null; press_any_key; return
+        _pkg_db_repair_apk
+        press_any_key; return
     fi
     printf "\n"
     print_warning "The cache was rebuilt but the installed database still can't be parsed."
@@ -9762,9 +9852,8 @@ pkg_cache_rebuild_action() {
 pkg_db_repair_action() {
     printf "\n"
     if [ "$(pkg_mgr)" = apk ]; then
-        spin_run "Repairing the package database (apk fix)" apk fix
-        print_success "Ran apk fix."
-        rm -f "$SPIN_LOG" 2>/dev/null; press_any_key; return
+        _pkg_db_repair_apk
+        press_any_key; return
     fi
     local _db; _db="$(pkg_db_path)"
     if [ ! -f "$_db" ]; then print_error "No installed database found at $_db."; press_any_key; return; fi

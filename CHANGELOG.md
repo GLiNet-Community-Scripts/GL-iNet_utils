@@ -4,6 +4,21 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-25
+- New: **Package System Repair** under System Tweaks. Fixes a corrupted package system — the opkg
+  `parse_from_stream_nomalloc: Missing new line character at end of file` error, which makes package
+  installs and removals fail (or silently do nothing). It measures the state live (package manager,
+  installed database, index cache, internet, backups), then can rebuild the re-fetchable feed cache
+  and/or repair the installed database (opkg's `/usr/lib/opkg/status` or apk's `/lib/apk/db/installed`).
+  The database is backed up before any change and is never deleted; deeper damage falls back to a restore.
+- New: package installs now self-heal automatically. If the downloaded feed index is corrupted, the
+  toolkit silently rebuilds the (fully re-fetchable) cache; if the installed database is the cause, it
+  offers a guarded, backed-up repair inline instead of just failing.
+- Changed: backups now live in one place — `/etc/glinet_utils/backups`. Existing AdGuardHome backups
+  are migrated there automatically when you upgrade to this version; nothing is lost.
+- Fixed: in the Network Bandwidth Limiter, the "Applying limit" spinner hugged the value-entry line
+  when HW acceleration was already off (the confirmation that normally added the spacing was skipped).
+
 ## 2026-08-24_21:00
 - Fixed: the Package Manager showed a blank size for most packages on **apk**-based systems (newer
   GL firmware and OpenWrt 24.10+/25) — the size lookup only understood opkg's package feeds. It now

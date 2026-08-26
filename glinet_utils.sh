@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-24_21:00
+# Version: 2026-08-25
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -362,8 +362,68 @@ pkg_remove() {         # <pkg>  - removes dependencies too where the manager can
     if [ "$(pkg_mgr)" = apk ]; then apk del "$1"; else opkg remove --autoremove "$1"; fi
 }
 
-pkg_update() {         # refresh the package index
-    if [ "$(pkg_mgr)" = apk ]; then apk update; else opkg update; fi
+pkg_update() {         # refresh the package index; silently self-heals a corrupted (re-fetchable) feed cache
+    if [ "$(pkg_mgr)" = apk ]; then apk update; return; fi
+    local out; out=$(opkg update 2>&1); printf '%s\n' "$out"
+    # A truncated feed Packages file makes opkg choke with "parse_from_stream_nomalloc: Missing new line
+    # character at end of file", which then breaks installs and removes. The feed-index cache under
+    # /var/opkg-lists is fully re-fetchable, so clearing + retrying it is non-destructive and safe to do
+    # silently. This NEVER touches the installed database /usr/lib/opkg/status - if the parse error
+    # persists after this, the corruption is DB-side, and check_opkg_updated offers a guarded, backed-up
+    # repair inline (which needs a prompt and so cannot live here in the spinner subshell).
+    if printf '%s' "$out" | pkg_parse_sig; then
+        PKG_INDEX_HEALED=1
+        rm -rf /var/opkg-lists/* /tmp/opkg-lists/* 2>/dev/null
+        opkg update 2>&1
+    fi
+}
+
+# ── Package-system corruption detection & repair ────────────────────────────────────────────────
+# Shared by the inline install-time self-heal (check_opkg_updated -> offer_pkg_db_repair) and the
+# standalone Package System Repair tool (System Tweaks). opkg throws "parse_from_stream_nomalloc:
+# Missing new line character at end of file" when a Packages-format file is TRUNCATED (ends mid-stanza).
+# Two sources: the re-fetchable feed cache /var/opkg-lists (fixed by re-downloading - non-destructive)
+# and the INSTALLED database /usr/lib/opkg/status (repaired in place, backed up first, NEVER deleted).
+# NOTE: GL's own feed Packages files legitimately omit a trailing newline, so "missing final newline"
+# is a corruption signal ONLY for the status DB, never for the cache.
+# The installed-database path and its backup namespace depend on the package manager: opkg keeps a
+# single /usr/lib/opkg/status; apk keeps /lib/apk/db/installed. Backups of either go to the central
+# bk_* store under a per-manager namespace so they never collide.
+pkg_db_path() { if [ "$(pkg_mgr)" = apk ]; then printf '/lib/apk/db/installed'; else printf '/usr/lib/opkg/status'; fi; }
+pkg_db_ns()   { if [ "$(pkg_mgr)" = apk ]; then printf 'apk'; else printf 'opkg'; fi; }
+
+pkg_parse_sig() { grep -q 'parse_from_stream_nomalloc\|Missing new line character'; }   # reads stdin
+
+# busybox-safe "the last line has no terminating newline": on busybox `od -An -tx1` is unsupported and
+# `tail -c1` returns empty, so both mis-detect. `grep -c ''` counts every line INCLUDING a final
+# unterminated one, while `wc -l` counts newline characters - a difference means no trailing newline.
+_file_missing_final_nl() {   # <file>
+    [ -s "$1" ] || return 1
+    [ "$(grep -c '' "$1")" -gt "$(wc -l < "$1")" ]
+}
+
+# Structural health of the installed opkg database - cheap, offline, and reliable for the documented
+# corruption (a healthy status file ends in a newline). Only meaningful for opkg.
+pkg_db_broken() { [ "$(pkg_mgr)" = opkg ] && _file_missing_final_nl "$(pkg_db_path)"; }
+
+# Safe, reversible repair of the installed database: back it up to the central store first, then append
+# the missing end-of-file newline. Never trims or deletes; deeper corruption is left for a backup
+# restore. Returns 0 when the file ends in a newline afterwards.
+pkg_db_repair() {
+    [ "$(pkg_mgr)" = opkg ] || return 0
+    local _db; _db="$(pkg_db_path)"
+    [ -f "$_db" ] || return 1
+    bk_save "$(pkg_db_ns)" "$(bk_ts)" "$_db"
+    _file_missing_final_nl "$_db" && printf '\n' >> "$_db"
+    ! _file_missing_final_nl "$_db"
+}
+
+# Explicit, forced rebuild of the re-fetchable feed-index cache (non-destructive: the cache is a mirror
+# of the online feeds). Used by the standalone tool; the silent per-session heal lives in pkg_update.
+pkg_cache_rebuild() {
+    if [ "$(pkg_mgr)" = apk ]; then apk update; return; fi
+    rm -rf /var/opkg-lists/* /tmp/opkg-lists/* 2>/dev/null
+    opkg update 2>&1
 }
 
 # Ensure a real (coreutils) `stty` is available for the cursor-advance probe.
@@ -1323,12 +1383,49 @@ check_opkg_updated() {
         rm -f "$SPIN_LOG" 2>/dev/null
         return 0
     fi
+    # pkg_update already tried the silent, non-destructive cache heal. If opkg is STILL throwing the
+    # Packages-parse error, the corruption is in the installed database - offer a guarded, backed-up
+    # repair inline (only when we can actually prompt).
+    if [ -r /dev/tty ] && tail -n 40 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+        if offer_pkg_db_repair; then
+            opkg_updated=1
+            rm -f "$SPIN_LOG" 2>/dev/null
+            return 0
+        fi
+        rm -f "$SPIN_LOG" 2>/dev/null
+        return 1
+    fi
     print_error "Package index update failed."
     check_connectivity
     print_info "Collected errors:"
     tail -n 20 "$SPIN_LOG" 2>/dev/null | grep -E '^(\*|\*\*\*|Collected errors:|wget returned)' | sed 's/^/  /'
     printf "\n"
     rm -f "$SPIN_LOG" 2>/dev/null
+    return 1
+}
+
+# Inline, guarded repair of a corrupted installed opkg database - offered when the package index update
+# keeps failing with the Packages-parse error after the silent cache heal. Warns, confirms (default No),
+# backs up before any change, and only applies the safe end-of-file repair. Returns 0 only if the system
+# parses clean afterwards; deeper corruption is deferred to the standalone Package System Repair tool.
+offer_pkg_db_repair() {
+    printf "\n"
+    print_warning "The package database appears to be corrupted."
+    printf "   opkg can't parse ${GREY}%s${RESET}, so installs and removals will fail until it is fixed.\n" "$(pkg_db_path)"
+    printf "   A backup is saved first, and only a safe end-of-file repair is applied.\n\n"
+    printf "Repair the package database now? [y/N]: "; read -r _pdr; printf "\n"
+    case "$_pdr" in
+        y|Y) ;;
+        *) print_info "Skipped. You can repair it later via System Tweaks ▸ Package System Repair."; return 1 ;;
+    esac
+    spin_run "Backing up and repairing the database" pkg_db_repair
+    spin_run "Verifying the package index" pkg_update
+    if ! tail -n 40 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+        print_success "Package database repaired."
+        return 0
+    fi
+    print_error "The automatic repair could not resolve it."
+    print_info "Open System Tweaks ▸ Package System Repair to restore a backup or review options."
     return 1
 }
 
@@ -1359,6 +1456,56 @@ require_cmd() {   # <command> <package> [<friendly-name>]
     command -v "$1" >/dev/null 2>&1 && return 0
     install_package "$2" "${3:-$2}"
     command -v "$1" >/dev/null 2>&1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backup / restore module — shared by the AdGuardHome Backup & Recovery suite and
+# the Package System Repair tool. Backups live CENTRALLY under
+# /etc/glinet_utils/backups/<namespace>/, one file per component per timestamp,
+# named "<basename>.<ts>" (ts = YYYYMMDDHHMMSS). Overlay-persistent (survives a
+# reboot); intentionally NOT added to /etc/sysupgrade.conf (a backup is firmware-
+# specific). A multi-component backup shares ONE ts across its components.
+# ─────────────────────────────────────────────────────────────────────────────
+BK_ROOT="/etc/glinet_utils/backups"
+
+bk_ts()   { date +%Y%m%d%H%M%S; }                        # new backup timestamp
+bk_date() {   # <ts> -> "YYYY-MM-DD HH:MM"
+    local t="$1"; printf '%s-%s-%s %s:%s' "${t:0:4}" "${t:4:2}" "${t:6:2}" "${t:8:2}" "${t:10:2}"
+}
+bk_dir()  { local d="$BK_ROOT/$1"; mkdir -p "$d" 2>/dev/null; printf '%s' "$d"; }   # <ns> -> ensure+echo dir
+
+bk_save() {   # <ns> <ts> <path>  -> copy path to <dir>/<basename>.<ts>  (skips a missing source)
+    [ -f "$3" ] || return 1
+    cp "$3" "$(bk_dir "$1")/$(basename "$3").$2"
+}
+bk_list() {   # <ns> [basename]  -> timestamps newest-first (for that component, or the union of all)
+    local d; d="$(bk_dir "$1")"
+    ls "$d/${2:+$2.}"* 2>/dev/null | sed 's/.*\.//' | grep -xE '[0-9]{14}' | sort -ru | awk '!seen[$0]++'
+}
+bk_has()  { [ -f "$(bk_dir "$1")/$2.$3" ]; }             # <ns> <basename> <ts>
+bk_restore() {   # <ns> <ts> <path>  -> copy <dir>/<basename>.<ts> back to path
+    local src; src="$(bk_dir "$1")/$(basename "$3").$2"
+    [ -f "$src" ] && cp "$src" "$3"
+}
+bk_delete() { rm -f "$(bk_dir "$1")"/*."$2" 2>/dev/null; }   # <ns> <ts> -> all components for that ts
+bk_size_kb() {   # <ns> <ts> -> total KB of all components for that ts (0 if none)
+    du -sk "$(bk_dir "$1")"/*."$2" 2>/dev/null | awk '{s+=$1} END{print s+0}'
+}
+
+# One-time migration of legacy co-located "<path>.backup.<ts>" backups into the central store.
+# Usage: bk_migrate_legacy <ns> <original-path>...  (e.g. the AGH config/binary/init paths).
+bk_migrate_legacy() {
+    local ns="$1"; shift; local d orig base f ts
+    d="$(bk_dir "$ns")"
+    for orig in "$@"; do
+        base="$(basename "$orig")"
+        for f in "$orig".backup.*; do
+            [ -f "$f" ] || continue
+            ts="${f##*.backup.}"
+            case "$ts" in ''|*[!0-9]*) continue ;; esac
+            [ -f "$d/$base.$ts" ] || mv "$f" "$d/$base.$ts"
+        done
+    done
 }
 
 get_lan_ip() {
@@ -3245,9 +3392,9 @@ create_agh_backup() {
                 printf "\n"
                 print_info "Creating Selected Backups"
                 # Atomic Save Logic
-                [ "$b_cfg" = "Y" ] && [ -f "$AGH_CONFIG" ] && cp "$AGH_CONFIG" "$AGH_CONFIG.backup.$ts"
-                [ "$b_bin" = "Y" ] && [ -f "/usr/bin/AdGuardHome" ] && cp "/usr/bin/AdGuardHome" "/usr/bin/AdGuardHome.backup.$ts"
-                [ "$b_ini" = "Y" ] && [ -f "/etc/init.d/adguardhome" ] && cp "/etc/init.d/adguardhome" "/etc/init.d/adguardhome.backup.$ts"
+                [ "$b_cfg" = "Y" ] && bk_save agh "$ts" "$AGH_CONFIG"
+                [ "$b_bin" = "Y" ] && bk_save agh "$ts" "/usr/bin/AdGuardHome"
+                [ "$b_ini" = "Y" ] && bk_save agh "$ts" "/etc/init.d/adguardhome"
                 
                 printf "\n"
                 print_success "Backup $ts completed!"
@@ -3262,7 +3409,7 @@ create_agh_backup() {
 
 manage_agh_backups() {
     while true; do
-        local backups=$(ls /etc/AdGuardHome/config.yaml.backup.* 2>/dev/null | sed 's/.*\.backup\.//' | sort -r)
+        local backups=$(bk_list agh config.yaml)
         [ -z "$backups" ] && { print_error "No backups found."; sleep 2; return; }
 
         clear
@@ -3276,8 +3423,8 @@ manage_agh_backups() {
 
         for ts in $backups; do
             local p_date="${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:8:2}:${ts:10:2}"
-            local has_bin="[N]"; [ -f "/usr/bin/AdGuardHome.backup.$ts" ] && has_bin="[Y]"
-            local has_ini="[N] "; [ -f "/etc/init.d/adguardhome.backup.$ts" ] && has_ini="[Y] "
+            local has_bin="[N]"; bk_has agh AdGuardHome "$ts" && has_bin="[Y]"
+            local has_ini="[N] "; bk_has agh adguardhome "$ts" && has_ini="[Y] "
 
             printf " %-3s  %-18s  %s  %s   %s\n" "$i." "$p_date" "[Y] " "$has_bin" "$has_ini"
             printf "%s|%s\n" "$i" "$ts" >> "$map_file"
@@ -3299,8 +3446,8 @@ manage_agh_backups() {
         # timestamp comes from a config backup, so config always exists; binary
         # and init are optional - show (and allow toggling) only what's present,
         # numbered sequentially so there are no gaps.
-        local bin_avail=0; [ -f "/usr/bin/AdGuardHome.backup.$selected_ts" ] && bin_avail=1
-        local ini_avail=0; [ -f "/etc/init.d/adguardhome.backup.$selected_ts" ] && ini_avail=1
+        local bin_avail=0; bk_has agh AdGuardHome "$selected_ts" && bin_avail=1
+        local ini_avail=0; bk_has agh adguardhome "$selected_ts" && ini_avail=1
         local fix_cfg="Y"
         local fix_bin="Y"; [ "$bin_avail" -eq 0 ] && fix_bin="N"
         local fix_ini="Y"; [ "$ini_avail" -eq 0 ] && fix_ini="N"
@@ -3330,9 +3477,9 @@ manage_agh_backups() {
                 printf "\nApplying Restore...\n"
                 agh_was_running=0; is_agh_running && agh_was_running=1
                 [ "$agh_was_running" -eq 1 ] && { $AGH_INIT stop >/dev/null 2>&1; sleep 1; }
-                [ "$fix_cfg" = "Y" ] && cp "/etc/AdGuardHome/config.yaml.backup.$selected_ts" "/etc/AdGuardHome/config.yaml"
-                [ "$fix_bin" = "Y" ] && cp "/usr/bin/AdGuardHome.backup.$selected_ts" "/usr/bin/AdGuardHome"
-                [ "$fix_ini" = "Y" ] && cp "/etc/init.d/adguardhome.backup.$selected_ts" "/etc/init.d/adguardhome"
+                [ "$fix_cfg" = "Y" ] && bk_restore agh "$selected_ts" "/etc/AdGuardHome/config.yaml"
+                [ "$fix_bin" = "Y" ] && bk_restore agh "$selected_ts" "/usr/bin/AdGuardHome"
+                [ "$fix_ini" = "Y" ] && bk_restore agh "$selected_ts" "/etc/init.d/adguardhome"
                 agh_apply_and_restart "$agh_was_running" "" "" "Restore complete."
                 press_any_key; return
             elif [ "$s_choice" = "$cfg_n" ]; then
@@ -3352,7 +3499,7 @@ delete_agh_backups() {
     local map_file="/tmp/agh_del_map"
     [ -f "$map_file" ] && rm -f "$map_file"
     while true; do
-        local backups=$(ls /etc/AdGuardHome/config.yaml.backup.* 2>/dev/null | sed 's/.*\.backup\.//' | sort -r)
+        local backups=$(bk_list agh config.yaml)
         [ -z "$backups" ] && { print_error "No backups found."; sleep 2; return; }
 
         # Initialize map file if it doesn't exist (Index|Timestamp|Selected)
@@ -3374,13 +3521,13 @@ delete_agh_backups() {
             local s_box="[ ]"; [ "$sel" -eq 1 ] && s_box="[✓]"
 
             # Check presence of components
-            local c="[Y] "; [ ! -f "/etc/AdGuardHome/config.yaml.backup.$ts" ] && c="[N] "
-            local b="[Y]"; [ ! -f "/usr/bin/AdGuardHome.backup.$ts" ] && b="[N]"
-            local n="[Y] "; [ ! -f "/etc/init.d/adguardhome.backup.$ts" ] && n="[N] "
+            local c="[Y] "; bk_has agh config.yaml "$ts" || c="[N] "
+            local b="[Y]"; bk_has agh AdGuardHome "$ts" || b="[N]"
+            local n="[Y] "; bk_has agh adguardhome "$ts" || n="[N] "
 
-            # Calculate total size for this timestamp
-            local ts_bytes=0
-            for f in "/etc/AdGuardHome/config.yaml.backup.$ts" "/usr/bin/AdGuardHome.backup.$ts" "/etc/init.d/adguardhome.backup.$ts"; do
+            # Calculate total size for this timestamp (components now live in the central store)
+            local ts_bytes=0 _bkd; _bkd=$(bk_dir agh)
+            for f in "$_bkd/config.yaml.$ts" "$_bkd/AdGuardHome.$ts" "$_bkd/adguardhome.$ts"; do
                 [ -f "$f" ] && ts_bytes=$((ts_bytes + $(ls -nl "$f" | awk '{print $5}')))
             done
             
@@ -3426,11 +3573,7 @@ delete_agh_backups() {
                 case "$confirm" in
                     y|Y)
                     while IFS='|' read -r idx ts sel; do
-                        if [ "$sel" -eq 1 ]; then
-                            rm -f "/etc/AdGuardHome/config.yaml.backup.$ts"
-                            rm -f "/usr/bin/AdGuardHome.backup.$ts"
-                            rm -f "/etc/init.d/adguardhome.backup.$ts"
-                        fi
+                        [ "$sel" -eq 1 ] && bk_delete agh "$ts"
                     done < "$map_file"
                     printf "\n"
                     print_success "Selected backups purged."
@@ -3501,14 +3644,19 @@ Notes
 ─────
   • Backups are timestamped, so you can keep several and roll back to any one
     if a change goes wrong.
+  • They are stored centrally in /etc/glinet_utils/backups and survive a reboot;
+    older in-place backups are moved there automatically.
   • A firmware update can replace the binary and script; restore a backup to
     recover.
 HELPEOF
 }
 
 sub_backup_recovery() {
+    # Sweep any legacy co-located backups (from older versions and from the transactional auto-backups
+    # the credential / direct-access screens still make) into the central store so they appear + are managed.
+    bk_migrate_legacy agh "$(get_agh_config)" /usr/bin/AdGuardHome /etc/init.d/adguardhome
     while true; do
-        get_agh_stats 
+        get_agh_stats
         clear
         print_centered_header "AdGuardHome Backup & Recovery Suite"
         printf " ${CYAN}OVERVIEW${RESET}\n"
@@ -3711,23 +3859,22 @@ get_agh_stats() {
     qlog_u=$(awk "BEGIN {printf \"%.1fM\", ${q_bytes:-0}/1048576}")
     qlog_f=$(get_free_space "$data_dir")
 
-    # 6. Backup Storage & Last Date
-    local bk_locs="/etc/AdGuardHome /usr/bin /etc/init.d"
-    
-    local bk_bytes=$(find $bk_locs -maxdepth 1 -name "*.backup.*" -exec ls -nl {} + 2>/dev/null | awk '{sum += $5} END {print sum + 0}')
-    
-    bk_total_u=$(awk "BEGIN { 
+    # 6. Backup Storage & Last Date (central store - see bk_* / BK_ROOT)
+    local _bkd; _bkd=$(bk_dir agh)
+
+    local bk_bytes=$(find "$_bkd" -type f -exec ls -nl {} + 2>/dev/null | awk '{sum += $5} END {print sum + 0}')
+
+    bk_total_u=$(awk "BEGIN {
         mbs = $bk_bytes / 1048576;
         if (mbs > 0 && mbs < 0.1) printf \"0.01M\";
         else printf \"%.2fM\", mbs;
     }")
 
-    bk_file_count=$(find $bk_locs -maxdepth 1 -name "*.backup.*" 2>/dev/null | wc -l)
-    
-    local last_bk_file=$(ls -t /etc/AdGuardHome/config.yaml.backup.* 2>/dev/null | head -n1)
+    bk_file_count=$(find "$_bkd" -type f 2>/dev/null | wc -l)
+
+    local last_bk_file=$(ls -t "$_bkd"/config.yaml.* 2>/dev/null | head -n1)
     if [ -n "$last_bk_file" ]; then
-        # Extracts YYYYMMDD from the suffix
-        local ts=$(echo "$last_bk_file" | awk -F'.backup.' '{print $2}')
+        local ts=$(echo "$last_bk_file" | sed 's/.*\.//')
         bk_date="${ts:0:4}-${ts:4:2}-${ts:6:2}"
     else
         bk_date="None"
@@ -4822,8 +4969,10 @@ _netlimit_offload_ok() {
     printf '\n'
     print_info "Bandwidth limiting requires HW acceleration OFF and may impact network and router performance."
     printf "Apply the limit now? [Y/n]: "
-    local a; read -r a; printf '\n'               # blank line after the answer, before the action/gear
-    case "$a" in n|N) print_info "Cancelled - HW acceleration left on."; sleep 1; return 1 ;; *) return 0 ;; esac
+    local a; read -r a
+    # The blank line before the apply gear is added by the caller (so it also appears when this
+    # confirm is skipped - i.e. HW accel already off); here we only space the cancel message.
+    case "$a" in n|N) printf '\n'; print_info "Cancelled - HW acceleration left on."; sleep 1; return 1 ;; *) return 0 ;; esac
 }
 
 show_netlimit_help() {
@@ -4950,10 +5099,12 @@ EOF
             1) printf "Download limit in Mbps (0 = none): "; read -r v; case "$v" in
                  ''|*[!0-9]*) print_error "Numbers only"; sleep 1 ;;
                  *) if [ "$v" -gt 0 ] || [ "$ul" -gt 0 ]; then _netlimit_offload_ok || continue; fi
+                    printf '\n'
                     spin_run "Applying limit" netlimit_set "$iface" "$v" "$ul" ;; esac ;;
             2) printf "Upload limit in Mbps (0 = none): "; read -r v; case "$v" in
                  ''|*[!0-9]*) print_error "Numbers only"; sleep 1 ;;
                  *) if [ "$v" -gt 0 ] || [ "$dl" -gt 0 ]; then _netlimit_offload_ok || continue; fi
+                    printf '\n'
                     spin_run "Applying limit" netlimit_set "$iface" "$dl" "$v" ;; esac ;;
             3) case "$wb" in
                  blocked|partial) spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 1 ;;
@@ -6265,7 +6416,12 @@ Options
    Install useful CLI tools (htop, tcpdump, etc.) and configure them
    to survive firmware upgrades via the sysupgrade keep-list.
 
-5. Toolkit Management
+5. Package System Repair
+   Fix a corrupted package system (the "Missing new line character at
+   end of file" opkg error) by rebuilding the feed cache and/or
+   repairing the installed database, with backups.
+
+6. Toolkit Management
    Install this script to /usr/sbin/glinet_utils so it can be run
    from anywhere. Manage sysupgrade persistence and updates.
 
@@ -9299,6 +9455,330 @@ manage_vpn_tools() {
     done
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Package System Repair (System Tweaks)
+# ─────────────────────────────────────────────────────────────────────────────
+# Diagnoses and repairs the two ways a Packages-format file gets corrupted (see the
+# pkg_* primitives near the top of the script): a truncated, re-fetchable feed cache,
+# and a truncated installed database /usr/lib/opkg/status. Database backups live in the
+# central store (bk_* namespace "opkg"). apk devices use apk's own update / fix, since
+# the newline corruption is opkg-specific.
+
+pkg_db_restore() {
+    local _db _ns _base; _db="$(pkg_db_path)"; _ns="$(pkg_db_ns)"; _base="$(basename "$_db")"
+    local list; list=$(bk_list "$_ns" "$_base")
+    if [ -z "$list" ]; then printf "\n"; print_info "No database backups saved yet."; press_any_key; return; fi
+    clear
+    print_centered_header "Restore Package Database"
+    printf " %-3s  %-18s  %s\n" "#" "Date / Time" "Size"
+    printf " ────────────────────────────────────────────\n"
+    local map="/tmp/pkg_bk_map.$$"; : > "$map"
+    local i=1 ts
+    for ts in $list; do
+        printf " %-3s  %-18s  %sK\n" "$i." "$(bk_date "$ts")" "$(bk_size_kb "$_ns" "$ts")"
+        printf "%s|%s\n" "$i" "$ts" >> "$map"; i=$((i+1))
+    done
+    printf " ────────────────────────────────────────────\n"
+    printf " [#] To Restore   [0] Cancel\n"
+    printf "\n Choose [%s/0]: " "$(picker_range $((i-1)))"
+    read -r c; printf "\n"
+    if [ -z "$c" ] || [ "$c" = "0" ]; then rm -f "$map"; return; fi
+    local ts_sel; ts_sel=$(grep "^$c|" "$map" | cut -d'|' -f2); rm -f "$map"
+    if [ -z "$ts_sel" ]; then print_error "Invalid selection"; sleep 1; return; fi
+    print_warning "This overwrites the current installed database with the backup from $(bk_date "$ts_sel")."
+    printf "Restore this backup? [y/N]: "; read -r yn; printf "\n"
+    case "$yn" in y|Y) ;; *) print_info "Restore cancelled."; press_any_key; return ;; esac
+    if bk_restore "$_ns" "$ts_sel" "$_db"; then
+        spin_run "Verifying the package index" pkg_update
+        if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+            print_warning "Restored, but opkg still reports parse errors - the backup may predate the corruption; try 'Rebuild the package index cache'."
+        else
+            print_success "Database restored from $(bk_date "$ts_sel")."
+        fi
+        rm -f "$SPIN_LOG" 2>/dev/null
+    else
+        print_error "Could not restore the selected backup."
+    fi
+    press_any_key
+}
+
+# Multi-select cleanup, mirroring the AdGuardHome Backup Cleanup (delete_agh_backups): a persistent
+# selection map with [A] All / [N] None / [#] Toggle / [C] Confirm / [0] Cancel, so several backups
+# can be purged at once. Single-component (the installed DB), so no Conf/Bin/Init columns.
+pkg_db_delete() {
+    local _ns _base _bkd; _ns="$(pkg_db_ns)"; _base="$(basename "$(pkg_db_path)")"; _bkd="$(bk_dir "$_ns")"
+    local map_file="/tmp/pkg_del_map"
+    [ -f "$map_file" ] && rm -f "$map_file"
+    while true; do
+        local backups; backups=$(bk_list "$_ns" "$_base")
+        [ -z "$backups" ] && { printf "\n"; print_info "No database backups saved yet."; press_any_key; rm -f "$map_file"; return; }
+
+        # Selection map (Index|Timestamp|Selected), built once and updated in place across redraws.
+        if [ ! -f "$map_file" ]; then
+            local i=1
+            for ts in $backups; do echo "$i|$ts|0" >> "$map_file"; i=$((i+1)); done
+        fi
+
+        clear
+        print_centered_header "Package Database Cleanup"
+        printf " %-3s  %-4s  %-18s  %s\n" "Sel" "Idx" "Date / Time" "Size"
+        printf " ────────────────────────────────────────────\n"
+        while IFS='|' read -r idx ts sel; do
+            local p_date; p_date="$(bk_date "$ts")"
+            local s_box="[ ]"; [ "$sel" -eq 1 ] && s_box="[✓]"
+            local ts_bytes=0
+            [ -f "$_bkd/$_base.$ts" ] && ts_bytes=$(ls -nl "$_bkd/$_base.$ts" | awk '{print $5}')
+            local p_size="0B"
+            if [ "$ts_bytes" -ge 1048576 ]; then p_size=$(awk "BEGIN {printf \"%.1fM\", $ts_bytes/1048576}")
+            elif [ "$ts_bytes" -ge 1024 ]; then p_size=$(awk "BEGIN {printf \"%.1fK\", $ts_bytes/1024}")
+            else p_size="${ts_bytes}B"; fi
+            printf " %s  %-4s  %-18s  %-6s\n" "$s_box" "$idx." "$p_date" "$p_size"
+        done < "$map_file"
+        printf " ────────────────────────────────────────────\n"
+        printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel\n"
+        local bk_count; bk_count=$(wc -l < "$map_file" 2>/dev/null | tr -dc '0-9')
+        printf "\n Choose [%s/A/N/C/0]: " "$(picker_range "$bk_count")"
+        read -r input
+        local cmd; cmd=$(echo "$input" | tr 'A-Z' 'a-z')
+        case "$cmd" in
+            a) sed -i 's/|0$/|1/' "$map_file" ;;
+            n) sed -i 's/|1$/|0/' "$map_file" ;;
+            [1-9]*)
+                if grep -q "^$cmd|" "$map_file"; then
+                    local current_state new_state
+                    current_state=$(grep "^$cmd|" "$map_file" | cut -d'|' -f3)
+                    new_state=$((1 - current_state))
+                    sed -i "s/^\($cmd|[^|]*|\).*/\1$new_state/" "$map_file"
+                else
+                    print_error "Index $cmd not found"; sleep 1
+                fi ;;
+            c)
+                if ! grep -q "|1$" "$map_file"; then
+                    printf "\n"; print_error "No backups selected."; sleep 2; continue
+                fi
+                printf "\n"
+                print_warning "WARNING: You are about to permanently delete selected backups."
+                printf "Delete selected backups? [y/N]: "; read -r confirm
+                case "$confirm" in
+                    y|Y)
+                        while IFS='|' read -r idx ts sel; do
+                            [ "$sel" -eq 1 ] && bk_delete "$_ns" "$ts"
+                        done < "$map_file"
+                        printf "\n"
+                        print_success "Selected backups purged."
+                        press_any_key; rm -f "$map_file"; return ;;
+                    *) print_error "Deletion cancelled."; sleep 2; continue ;;
+                esac ;;
+            0) rm -f "$map_file"; return ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+pkg_backup_restore() {
+    local _db _ns _base; _db="$(pkg_db_path)"; _ns="$(pkg_db_ns)"; _base="$(basename "$_db")"
+    while true; do
+        clear
+        print_centered_header "Package Database Backups"
+        local n; n=$(bk_list "$_ns" "$_base" | grep -c .); case "$n" in ''|*[!0-9]*) n=0 ;; esac
+        printf " ${CYAN}STATUS${RESET}\n"
+        printf "   %-16s %b%s%b\n" "Database file:" "$GREY" "$_db" "$RESET"
+        printf "   %-16s %s\n" "Saved backups:" "$n"
+        printf " ────────────────────────────────────────────────\n\n"
+        printf "%s%sSave a backup now\n" "$N1" "$NSEP"
+        printf "%s%sRestore from a backup\n" "$N2" "$NSEP"
+        printf "%s%sDelete a backup\n" "$N3" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
+        printf "\nChoose [1-3/0]: "
+        read -r b
+        case "$b" in
+            1) printf "\n"
+               if [ ! -f "$_db" ]; then print_error "No installed database found at $_db."
+               elif bk_save "$_ns" "$(bk_ts)" "$_db"; then print_success "Backup saved."
+               else print_error "Could not save a backup."; fi
+               press_any_key ;;
+            2) pkg_db_restore ;;
+            3) pkg_db_delete ;;
+            0) return ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+pkg_repair_measure() {   # measure live -> PR_MGR/PR_NET/PR_BK/PR_DB/PR_CACHE (spinner while probing online)
+    PR_MGR=$(pkg_mgr)
+    ping -c1 -W3 8.8.8.8 >/dev/null 2>&1 && PR_NET="UP" || PR_NET="DOWN"
+    PR_BK=$(bk_list "$(pkg_db_ns)" "$(basename "$(pkg_db_path)")" | grep -c .); case "$PR_BK" in ''|*[!0-9]*) PR_BK=0 ;; esac
+    if [ "$PR_MGR" = apk ]; then PR_DB="HEALTHY"; PR_CACHE="HEALTHY"; return 0; fi
+    local files broke=0
+    if [ "$PR_NET" = "UP" ]; then
+        spin_run "Checking package system" pkg_update
+        tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig && broke=1
+        rm -f "$SPIN_LOG" 2>/dev/null
+    fi
+    files=$(find /var/opkg-lists /tmp/opkg-lists -type f 2>/dev/null | grep -c .)
+    case "$files" in ''|*[!0-9]*) files=0 ;; esac
+    if pkg_db_broken; then PR_DB="CORRUPT"; else PR_DB="HEALTHY"; fi
+    if [ "$files" -eq 0 ]; then PR_CACHE="EMPTY"
+    elif [ "$broke" = "1" ] && [ "$PR_DB" = "HEALTHY" ]; then PR_CACHE="CORRUPT"
+    else PR_CACHE="HEALTHY"; fi
+}
+
+pkg_repair_now() {
+    printf "\n"
+    if [ "$PR_DB" != "CORRUPT" ] && [ "$PR_CACHE" != "CORRUPT" ] && [ "$PR_CACHE" != "EMPTY" ]; then
+        print_success "The package system looks healthy - nothing to repair."
+        press_any_key; return
+    fi
+    spin_run "Rebuilding the package index cache" pkg_cache_rebuild
+    if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+        rm -f "$SPIN_LOG" 2>/dev/null
+        if [ "$(pkg_mgr)" = apk ]; then
+            spin_run "Repairing the package database (apk fix)" apk fix
+            print_success "Ran apk update and apk fix."
+            rm -f "$SPIN_LOG" 2>/dev/null; press_any_key; return
+        fi
+        printf "\n"
+        print_warning "The cache was rebuilt but the installed database still can't be parsed."
+        printf "   A backup is saved first, and only a safe end-of-file repair is applied.\n\n"
+        printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
+        case "$yn" in
+            y|Y) spin_run "Backing up and repairing the database" pkg_db_repair
+                 spin_run "Verifying the package index" pkg_update
+                 if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+                     print_error "The automatic repair could not resolve it."
+                     print_info "Use 'Backup & Restore' to roll back to a known-good database, or re-flash if the repository is very old."
+                 else
+                     print_success "Package system repaired."
+                 fi ;;
+            *) print_info "Database left unchanged." ;;
+        esac
+    else
+        print_success "Package index cache rebuilt - the package system now parses cleanly."
+    fi
+    rm -f "$SPIN_LOG" 2>/dev/null
+    press_any_key
+}
+
+pkg_cache_rebuild_action() {
+    printf "\n"
+    spin_run "Rebuilding the package index cache" pkg_cache_rebuild
+    if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+        print_warning "The index was refreshed but opkg still reports parse errors - the installed database may be corrupted (try 'Repair the installed database')."
+    else
+        print_success "Package index cache rebuilt."
+    fi
+    rm -f "$SPIN_LOG" 2>/dev/null
+    press_any_key
+}
+
+pkg_db_repair_action() {
+    printf "\n"
+    if [ "$(pkg_mgr)" = apk ]; then
+        spin_run "Repairing the package database (apk fix)" apk fix
+        print_success "Ran apk fix."
+        rm -f "$SPIN_LOG" 2>/dev/null; press_any_key; return
+    fi
+    local _db; _db="$(pkg_db_path)"
+    if [ ! -f "$_db" ]; then print_error "No installed database found at $_db."; press_any_key; return; fi
+    print_warning "This repairs the installed package database ($_db)."
+    printf "   A backup is saved first, and only a safe end-of-file repair is applied.\n\n"
+    printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
+    case "$yn" in
+        y|Y) spin_run "Backing up and repairing the database" pkg_db_repair
+             spin_run "Verifying the package index" pkg_update
+             if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+                 print_error "The automatic repair could not resolve it."
+                 print_info "Use 'Backup & Restore' to roll back to a known-good database."
+             else
+                 print_success "Installed database repaired."
+             fi ;;
+        *) print_info "Database left unchanged." ;;
+    esac
+    rm -f "$SPIN_LOG" 2>/dev/null
+    press_any_key
+}
+
+show_pkg_repair_help() {
+    show_paged "Package System Repair - Help" << 'HELPEOF'
+Package System Repair - Quick Help
+
+What it does
+────────────
+Detects and fixes the two ways OpenWrt's package system gets corrupted. Both
+show up as "parse_from_stream_nomalloc: Missing new line character at end of
+file" and make installs and removals fail (or silently do nothing).
+
+What can go wrong
+─────────────────
+  • Index cache - the downloaded feed lists under /var/opkg-lists. Fully
+    re-fetchable, so rebuilding it is safe and loses nothing.
+  • Installed database - /usr/lib/opkg/status, the record of what is installed.
+    Repaired in place and NEVER deleted; a backup is saved first.
+
+The status block
+────────────────
+Installed database and Index cache read HEALTHY, CORRUPT or EMPTY. When online,
+the check runs a real package-index refresh so the reading is measured, not
+guessed; offline it falls back to a structural check of the database.
+
+Actions
+───────
+  • Repair now - rebuilds the cache first (non-destructive); if the database is
+    still unparseable it asks before repairing it (backup first).
+  • Rebuild the package index cache - forces a fresh download of the feed lists.
+  • Repair the installed database - backs up, then applies a safe end-of-file
+    repair. Deeper damage is left for a backup restore rather than risking the
+    file.
+  • Backup & Restore - save, restore or delete timestamped copies of the
+    installed database, kept under /etc/glinet_utils/backups.
+
+Note: apk-based firmware keeps its own database; there the repair uses apk's own
+update and fix.
+HELPEOF
+}
+
+repair_package_system() {
+    clear; print_centered_header "Package System Repair"; pkg_repair_measure
+    while true; do
+        clear
+        print_centered_header "Package System Repair"
+        printf " ${CYAN}STATUS${RESET}\n"
+        printf "   %-20s %s\n" "Package manager:" "$(printf '%s' "$PR_MGR" | tr 'a-z' 'A-Z')"
+        local dbc cac netc
+        case "$PR_DB" in HEALTHY) dbc="$GREEN";; CORRUPT) dbc="$RED";; *) dbc="$YELLOW";; esac
+        case "$PR_CACHE" in HEALTHY) cac="$GREEN";; CORRUPT) cac="$RED";; *) cac="$YELLOW";; esac
+        [ "$PR_NET" = "UP" ] && netc="$GREEN" || netc="$RED"
+        printf "   %-20s %b%s%b\n" "Installed database:" "$dbc" "$PR_DB" "$RESET"
+        printf "   %-20s %b%s%b\n" "Index cache:" "$cac" "$PR_CACHE" "$RESET"
+        printf "   %-20s %b%s%b\n" "Internet:" "$netc" "$PR_NET" "$RESET"
+        if [ "${PR_BK:-0}" -gt 0 ]; then
+            printf "   %-20s %b%s AVAILABLE%b\n" "Database backups:" "$GREEN" "$PR_BK" "$RESET"
+        else
+            printf "   %-20s %b%s%b\n" "Database backups:" "$YELLOW" "NONE" "$RESET"
+        fi
+        printf " ────────────────────────────────────────────────\n\n"
+        printf "%s%sRepair now (auto-detect and fix)\n" "$N1" "$NSEP"
+        printf "%s%sRebuild the package index cache\n" "$N2" "$NSEP"
+        printf "%s%sRepair the installed database\n" "$N3" "$NSEP"
+        printf "%s%sBackup & Restore the database\n" "$N4" "$NSEP"
+        printf "%s%sBack\n" "$N0" "$NSEP"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-4/0/?]: "
+        read -r opt
+        case "$opt" in
+            1) pkg_repair_now ;;
+            2) pkg_cache_rebuild_action ;;
+            3) pkg_db_repair_action ;;
+            4) pkg_backup_restore ;;
+            \?|h|H|❓) show_pkg_repair_help; continue ;;
+            0) return ;;
+            *) print_error "Invalid option"; sleep 1; continue ;;
+        esac
+        clear; print_centered_header "Package System Repair"; pkg_repair_measure
+    done
+}
+
 system_tweaks() {
     while true; do
         clear
@@ -9307,10 +9787,11 @@ system_tweaks() {
         printf "%s%sManage Zram Swap\n" "$N2" "$NSEP"
         printf "%s%sWeb-UI Terminal Interface\n" "$N3" "$NSEP"
         printf "%s%sPackage and Persistence Manager\n" "$N4" "$NSEP"
-        printf "%s%sToolkit Management\n" "$N5" "$NSEP"
+        printf "%s%sPackage System Repair\n" "$N5" "$NSEP"
+        printf "%s%sToolkit Management\n" "$N6" "$NSEP"
         printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-5/0/?]: "
+        printf "\nChoose [1-6/0/?]: "
         read -r st_choice
         printf "\n"
         case $st_choice in
@@ -9318,7 +9799,8 @@ system_tweaks() {
             2) manage_zram ;;
             3) manage_web_terminal ;;
             4) manage_packages ;;
-            5) manage_toolkit ;;
+            5) repair_package_system ;;
+            6) manage_toolkit ;;
             \?|h|H|❓) show_system_tweaks_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -10678,6 +11160,16 @@ if [ ! -f "$AGH_INIT" ]; then
             press_any_key
         fi
     fi
+fi
+
+# One-time sweep of any legacy co-located AdGuardHome backups (from versions before the central
+# /etc/glinet_utils/backups store) into the central store - so upgrading to this version does not
+# strand them, and the AGH overview counts them immediately (not only after opening Backup &
+# Recovery). Idempotent: skips components already migrated. Runs only where AGH is present.
+if [ -f "$AGH_INIT" ]; then
+    _aghcfg="$(get_agh_config)"
+    bk_migrate_legacy agh ${_aghcfg:+"$_aghcfg"} /usr/bin/AdGuardHome /etc/init.d/adguardhome 2>/dev/null
+    unset _aghcfg
 fi
 
 

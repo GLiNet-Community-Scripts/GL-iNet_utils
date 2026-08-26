@@ -4,6 +4,17 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-26
+- Changed: Package System Repair now escalates a corrupt installed database through one shared repair
+  flow, so "Repair now" and "Repair the installed database" behave and read identically. It tries, in
+  order: (1) a safe end-of-file repair; (2) rebuilding the database from opkg's own on-disk per-package
+  metadata (`/usr/lib/opkg/info/*.control`), which keeps your actual installed packages; and, only as a
+  last resort before re-flashing, (3) restoring the **factory package database from read-only firmware**
+  (`/rom`) — lossy (opkg forgets post-factory package records, though the files stay on disk).
+- Changed: the repair no longer makes a "pre-repair backup" of the corrupt database — there was nothing
+  worth restoring in it, and it cluttered the backup list. The "restore a backup" advice now appears only
+  when you actually have an earlier backup to roll back to.
+
 ## 2026-08-25
 - New: **Package System Repair** under System Tweaks. Fixes a corrupted package system — the opkg
   `parse_from_stream_nomalloc: Missing new line character at end of file` error, which makes package

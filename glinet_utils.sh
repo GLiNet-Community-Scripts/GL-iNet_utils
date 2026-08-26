@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-25
+# Version: 2026-08-26
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -383,7 +383,7 @@ pkg_update() {         # refresh the package index; silently self-heals a corrup
 # standalone Package System Repair tool (System Tweaks). opkg throws "parse_from_stream_nomalloc:
 # Missing new line character at end of file" when a Packages-format file is TRUNCATED (ends mid-stanza).
 # Two sources: the re-fetchable feed cache /var/opkg-lists (fixed by re-downloading - non-destructive)
-# and the INSTALLED database /usr/lib/opkg/status (repaired in place, backed up first, NEVER deleted).
+# and the INSTALLED database /usr/lib/opkg/status (repaired in place, NEVER deleted).
 # NOTE: GL's own feed Packages files legitimately omit a trailing newline, so "missing final newline"
 # is a corruption signal ONLY for the status DB, never for the cache.
 # The installed-database path and its backup namespace depend on the package manager: opkg keeps a
@@ -406,16 +406,43 @@ _file_missing_final_nl() {   # <file>
 # corruption (a healthy status file ends in a newline). Only meaningful for opkg.
 pkg_db_broken() { [ "$(pkg_mgr)" = opkg ] && _file_missing_final_nl "$(pkg_db_path)"; }
 
-# Safe, reversible repair of the installed database: back it up to the central store first, then append
-# the missing end-of-file newline. Never trims or deletes; deeper corruption is left for a backup
-# restore. Returns 0 when the file ends in a newline afterwards.
+# The read-only firmware baseline of the installed DB (opkg only): a factory-fresh, parseable copy that
+# can un-stick a badly corrupted database without a re-flash. Restoring it is LOSSY (opkg forgets
+# post-factory package records; the files stay on disk).
+pkg_db_rom() { printf '/rom%s' "$(pkg_db_path)"; }
+
+# Safe, reversible repair of the installed database: append the missing end-of-file newline. Never trims
+# or deletes; deeper corruption is escalated by _pkg_db_repair_flow (rebuild-from-metadata, then factory
+# /rom) rather than risked here. No pre-repair copy is kept: there is nothing worth backing up (the DB is
+# corrupt), and every recovery path - rebuild from info/*.control, /rom, a real user backup - is
+# independent of the pre-repair bytes. Returns 0 when the file ends in a newline afterwards.
 pkg_db_repair() {
     [ "$(pkg_mgr)" = opkg ] || return 0
     local _db; _db="$(pkg_db_path)"
     [ -f "$_db" ] || return 1
-    bk_save "$(pkg_db_ns)" "$(bk_ts)" "$_db"
     _file_missing_final_nl "$_db" && printf '\n' >> "$_db"
     ! _file_missing_final_nl "$_db"
+}
+
+# Directory of the per-package control metadata opkg keeps on disk (one <pkg>.control per installed pkg).
+pkg_db_info_dir() { printf '%s/info' "$(dirname "$(pkg_db_path)")"; }
+
+# Rebuild the installed database from that on-disk metadata (opkg only). Higher fidelity than the /rom
+# factory baseline: it preserves the ACTUAL installed set, not just what the firmware shipped. The only
+# thing lost is the user/auto-installed and hold flags (there is no on-disk source for them) - so every
+# package is marked plainly installed, which is safe (nothing gets auto-removed). "Status: install user
+# installed" is opkg's own idiomatic line for an installed package. Returns 0 if it wrote a non-empty DB.
+pkg_db_reconstruct() {
+    [ "$(pkg_mgr)" = opkg ] || return 1
+    local _db _info _tmp _c; _db="$(pkg_db_path)"; _info="$(pkg_db_info_dir)"
+    ls "$_info"/*.control >/dev/null 2>&1 || return 1
+    _tmp="$_db.reconstruct.$$"
+    for _c in "$_info"/*.control; do
+        awk '1' "$_c"                                  # normalize: field lines + a guaranteed trailing newline
+        printf 'Status: install user installed\n\n'    # mark installed + blank-line stanza separator
+    done > "$_tmp"
+    [ -s "$_tmp" ] || { rm -f "$_tmp"; return 1; }
+    mv "$_tmp" "$_db"
 }
 
 # Explicit, forced rebuild of the re-fetchable feed-index cache (non-destructive: the cache is a mirror
@@ -1412,13 +1439,13 @@ offer_pkg_db_repair() {
     printf "\n"
     print_warning "The package database appears to be corrupted."
     printf "   opkg can't parse ${GREY}%s${RESET}, so installs and removals will fail until it is fixed.\n" "$(pkg_db_path)"
-    printf "   A backup is saved first, and only a safe end-of-file repair is applied.\n\n"
+    printf "   Only a safe end-of-file repair is applied.\n\n"
     printf "Repair the package database now? [y/N]: "; read -r _pdr; printf "\n"
     case "$_pdr" in
         y|Y) ;;
         *) print_info "Skipped. You can repair it later via System Tweaks ▸ Package System Repair."; return 1 ;;
     esac
-    spin_run "Backing up and repairing the database" pkg_db_repair
+    spin_run "Repairing the installed database" pkg_db_repair
     spin_run "Verifying the package index" pkg_update
     if ! tail -n 40 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
         print_success "Package database repaired."
@@ -9624,6 +9651,73 @@ pkg_repair_measure() {   # measure live -> PR_MGR/PR_NET/PR_BK/PR_DB/PR_CACHE (s
     else PR_CACHE="HEALTHY"; fi
 }
 
+# Shared installed-database repair escalation - the ONE place the repair tiers + their messages live, so
+# "Repair now" and "Repair the installed database" behave and read identically. Tiers, stopping at the
+# first that makes opkg parse clean: (1) safe end-of-file repair (append the missing EOF newline);
+# (2) rebuild from on-disk per-package metadata (keeps the real installed set - high fidelity, runs
+# automatically); (3) as a LAST RESORT before re-flash, restore the factory database from read-only /rom
+# (lossy - opkg forgets post-factory package records; files stay - so this one is confirmed). No pre-repair
+# copy is kept (see pkg_db_repair). Prints its own success/failure + guidance; the caller already confirmed
+# the safe repair. Returns 0 iff opkg parses clean afterwards.
+_pkg_db_repair_flow() {
+    local _db _ns _base; _db="$(pkg_db_path)"; _ns="$(pkg_db_ns)"; _base="$(basename "$_db")"
+
+    # Tier 1: safe end-of-file repair.
+    spin_run "Repairing the installed database" pkg_db_repair
+    spin_run "Verifying the package index" pkg_update
+    if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+        rm -f "$SPIN_LOG" 2>/dev/null; print_success "Installed database repaired."; return 0
+    fi
+    rm -f "$SPIN_LOG" 2>/dev/null
+
+    # Tier 2: rebuild from the on-disk per-package metadata (opkg only). High fidelity - it keeps the
+    # ACTUAL installed set (only the user/auto + hold flags are lost, which is safe), so it runs as part
+    # of the repair the user already confirmed rather than behind its own prompt.
+    if [ "$(pkg_mgr)" = opkg ] && ls "$(pkg_db_info_dir)"/*.control >/dev/null 2>&1; then
+        printf "\n"
+        print_info "Rebuilding the database from installed-package metadata (this keeps your installed packages)."
+        spin_run "Rebuilding the installed database" pkg_db_reconstruct
+        spin_run "Verifying the package index" pkg_update
+        if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+            rm -f "$SPIN_LOG" 2>/dev/null
+            print_success "Installed database rebuilt from package metadata - opkg is working again."
+            return 0
+        fi
+        rm -f "$SPIN_LOG" 2>/dev/null
+    fi
+
+    # Tier 3: factory database from /rom (opkg only, lossy) - the last resort before re-flash.
+    if [ "$(pkg_mgr)" = opkg ] && [ -f "$(pkg_db_rom)" ]; then
+        printf "\n"
+        print_warning "Neither repair could fix it. As a last resort, the FACTORY package database can be"
+        printf "   restored from read-only firmware. This gets opkg working again, but resets its record of\n"
+        printf "   installed packages to the factory set - anything you added stays on disk, but opkg no longer\n"
+        printf "   tracks it (reinstall to re-register). Your data, settings and configs are untouched.\n\n"
+        printf "Restore the factory package database now? [y/N]: "; local _r; read -r _r; printf "\n"
+        case "$_r" in
+            y|Y) cp "$(pkg_db_rom)" "$_db" 2>/dev/null
+                 spin_run "Verifying the package index" pkg_update
+                 if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+                     rm -f "$SPIN_LOG" 2>/dev/null
+                     print_success "Factory package database restored - opkg is working again."
+                     print_info "Packages you had installed remain on disk; reinstall any you want opkg to track again."
+                     return 0
+                 fi
+                 rm -f "$SPIN_LOG" 2>/dev/null ;;
+            *) : ;;
+        esac
+    fi
+
+    # Exhausted - honest, consistent guidance (offer a restore only if the user actually has backups).
+    print_error "The database could not be repaired automatically."
+    if [ "$(bk_list "$_ns" "$_base" | grep -c .)" -gt 0 ]; then
+        print_info "Restore an earlier backup (from before the corruption) via 'Backup & Restore', or re-flash the firmware."
+    else
+        print_info "No earlier package-database backup exists to restore - re-flash the firmware to recover."
+    fi
+    return 1
+}
+
 pkg_repair_now() {
     printf "\n"
     if [ "$PR_DB" != "CORRUPT" ] && [ "$PR_CACHE" != "CORRUPT" ] && [ "$PR_CACHE" != "EMPTY" ]; then
@@ -9631,32 +9725,25 @@ pkg_repair_now() {
         press_any_key; return
     fi
     spin_run "Rebuilding the package index cache" pkg_cache_rebuild
-    if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
+    if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
         rm -f "$SPIN_LOG" 2>/dev/null
-        if [ "$(pkg_mgr)" = apk ]; then
-            spin_run "Repairing the package database (apk fix)" apk fix
-            print_success "Ran apk update and apk fix."
-            rm -f "$SPIN_LOG" 2>/dev/null; press_any_key; return
-        fi
-        printf "\n"
-        print_warning "The cache was rebuilt but the installed database still can't be parsed."
-        printf "   A backup is saved first, and only a safe end-of-file repair is applied.\n\n"
-        printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
-        case "$yn" in
-            y|Y) spin_run "Backing up and repairing the database" pkg_db_repair
-                 spin_run "Verifying the package index" pkg_update
-                 if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
-                     print_error "The automatic repair could not resolve it."
-                     print_info "Use 'Backup & Restore' to roll back to a known-good database, or re-flash if the repository is very old."
-                 else
-                     print_success "Package system repaired."
-                 fi ;;
-            *) print_info "Database left unchanged." ;;
-        esac
-    else
         print_success "Package index cache rebuilt - the package system now parses cleanly."
+        press_any_key; return
     fi
     rm -f "$SPIN_LOG" 2>/dev/null
+    if [ "$(pkg_mgr)" = apk ]; then
+        spin_run "Repairing the package database (apk fix)" apk fix
+        print_success "Ran apk update and apk fix."
+        rm -f "$SPIN_LOG" 2>/dev/null; press_any_key; return
+    fi
+    printf "\n"
+    print_warning "The cache was rebuilt but the installed database still can't be parsed."
+    printf "   A safe end-of-file repair is tried first, before anything drastic.\n\n"
+    printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
+    case "$yn" in
+        y|Y) _pkg_db_repair_flow ;;
+        *) print_info "Database left unchanged." ;;
+    esac
     press_any_key
 }
 
@@ -9682,20 +9769,12 @@ pkg_db_repair_action() {
     local _db; _db="$(pkg_db_path)"
     if [ ! -f "$_db" ]; then print_error "No installed database found at $_db."; press_any_key; return; fi
     print_warning "This repairs the installed package database ($_db)."
-    printf "   A backup is saved first, and only a safe end-of-file repair is applied.\n\n"
+    printf "   A safe end-of-file repair is tried first, before anything drastic.\n\n"
     printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
     case "$yn" in
-        y|Y) spin_run "Backing up and repairing the database" pkg_db_repair
-             spin_run "Verifying the package index" pkg_update
-             if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
-                 print_error "The automatic repair could not resolve it."
-                 print_info "Use 'Backup & Restore' to roll back to a known-good database."
-             else
-                 print_success "Installed database repaired."
-             fi ;;
+        y|Y) _pkg_db_repair_flow ;;
         *) print_info "Database left unchanged." ;;
     esac
-    rm -f "$SPIN_LOG" 2>/dev/null
     press_any_key
 }
 

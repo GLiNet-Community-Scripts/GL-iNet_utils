@@ -4,6 +4,20 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-27
+- Fixed: the Package & Persistence Manager could show a package as "persisted" while it wasn't installed,
+  and "Disable Persistence" silently did nothing. Persistence now follows installation — a package that
+  isn't installed never shows as persisted, uninstalling always clears persistence, and disabling
+  persistence on an installed package actually removes it from the sysupgrade keep-list and boot-restore
+  list.
+- Changed: **stress-ng** (a CPU stress tool) is now withheld only on kernels older than 6.6 — where a Linux
+  memory-pressure bug can hard-crash the router — instead of on all GL.iNet firmware. Newer firmware
+  (kernel 6.6+, e.g. OpenWrt 25) can use it safely again; older kernels use `stress` only. Applies to both
+  the Package Manager and the CPU stress benchmark.
+- Changed: the "hard refresh" hint shown after Web-UI Terminal changes now lists the shortcut per browser
+  (Chrome / Edge / Firefox: Ctrl+F5 or Ctrl/Cmd + Shift + R; Safari: Cmd + Option + R), on indented lines
+  that fit the screen, and reads consistently in both enable and disable.
+
 ## 2026-08-26_17:12
 - Fixed: the Package & Persistence Manager wrongly reported "System changes applied" when a package could
   not actually be removed. Removals are now verified and reported honestly — a package required by other

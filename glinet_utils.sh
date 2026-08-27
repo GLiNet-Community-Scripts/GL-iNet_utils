@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-26_17:12
+# Version: 2026-08-27
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -345,6 +345,20 @@ NSEP="  "             # keycap->label separator: 2 cols default, termius narrows
 # fail with "pkg_update: not found" into a redirected log - silently dropping
 # the display to Compatible mode.
 pkg_mgr() { command -v apk >/dev/null 2>&1 && printf 'apk' || printf 'opkg'; }
+
+# stress-ng can HARD-CRASH a router on kernels before 6.6 (a memory-pressure bug - openwrt#15561, fixed
+# in 6.6): its CPU stressor allocates memory and trips the bug where plain `stress` (pure CPU) does not.
+# Returns 0 (true) when the RUNNING kernel is susceptible (< 6.6), so stress-ng is withheld both from the
+# Package Manager util list and as a CPU-benchmark fallback. Kernel version - not GL-vs-OpenWrt - is the
+# real gate (e.g. GL's mt3000 on kernel 6.12 is safe; an old vanilla-OpenWrt box is not).
+_stressng_unsafe() {
+    local kr kmaj kmin; kr=$(uname -r 2>/dev/null); kmaj=${kr%%.*}; kmin=${kr#*.}; kmin=${kmin%%.*}
+    case "$kmaj" in ''|*[!0-9]*) return 0 ;; esac      # unknown kernel -> conservative (treat as unsafe)
+    [ "$kmaj" -lt 6 ] && return 0
+    [ "$kmaj" -gt 6 ] && return 1
+    case "$kmin" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$kmin" -lt 6 ]
+}
 
 pkg_is_installed() {   # <pkg> -> 0 if installed
     if [ "$(pkg_mgr)" = apk ]; then
@@ -759,6 +773,15 @@ print_success() { printf "%b\n" "${BOLD}${GREEN}${_S_OK}${RESET}${GREEN}$1${RESE
 print_error()   { printf "%b\n" "${BOLD}${RED}${_S_ERR}${RESET}${RED}$1${RESET}"; }
 print_warning() { printf "%b\n" "${BOLD}${YELLOW}${_S_WARN}${RESET}${YELLOW}$1${RESET}"; }
 print_info()    { printf "%b\n" "${BOLD}${BLUE}${_S_INFO}${RESET}${BLUE}$1${RESET}"; }
+
+# Standardized "hard refresh your browser" advisory - shown after any change that patches the Web UI.
+# A print_info heading + 3-space-indented per-browser continuation lines (reserved indent for wrapped
+# body under a heading, per the UX standard); each line stays within the 110-col window.
+_hard_refresh_hint() {
+    print_info "Hard-refresh your browser to load the change:"
+    printf "   Chrome / Edge / Firefox:  Ctrl+F5, or Ctrl/Cmd + Shift + R\n"
+    printf "   Safari:                   Cmd + Option + R\n"
+}
 print_action()  { printf "%b\n" "${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}$1${RESET}"; }
 
 terminal_setup() {
@@ -5282,7 +5305,8 @@ Usage in this Menu:
 Important UX Notes:
 ────────────────────
 • Hard Refresh: After deploying or disabling, you MUST perform a 
-  "Hard Refresh" (Ctrl+F5, or Cmd+Shift+R / Cmd+Option+R on Mac) in your browser. This
+  "Hard Refresh" (Chrome/Edge/Firefox: Ctrl+F5 or Ctrl/Cmd + Shift + R; Safari:
+  Cmd + Option + R) in your browser. This
   clears the Nginx cache ( /var/lib/nginx ) and forces the new UI.
 • Security: The service is bound to the 'LAN' interface by default. 
   It is not accessible from the WAN (Internet) unless you manually 
@@ -5674,7 +5698,9 @@ UCIEOF
                 print_info "Patching Web-UI"
                 printf "\n"
                 _inject_terminal_into "$TARGET_GZ" "$ttyd_proto" 1
-                print_success "Web-UI Terminal Installed. \n   Please perform a HARD REFRESH (Ctrl+F5, or Cmd+Shift+R / Cmd+Option+R on Mac) in your browser to see the changes."
+                print_success "Web-UI Terminal installed."
+                printf "\n"
+                _hard_refresh_hint
                 press_any_key
                 ;;
 
@@ -5719,7 +5745,7 @@ UCIEOF
                         print_info "If you customised Fan settings, re-apply them - the panel was reset to stock here."
                     fi
                     printf "\n"
-                    print_info "Please perform a HARD REFRESH (Ctrl+F5, or Cmd+Shift+R / Cmd+Option+R on Mac) in your browser."
+                    _hard_refresh_hint
                 else
                     print_error "ROM backup not found. Manual UI restoration required."
                 fi
@@ -5835,10 +5861,14 @@ manage_packages() {
     # install/remove via the special-cases in the apply loop below.
     local _st_line="speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
     case "$(uname -m)" in mips*) _st_line="speedtest-go|/usr/bin/speedtest-go|B|/usr/bin/speedtest-go" ;; esac
+    # stress-ng can crash routers on kernels < 6.6 - withhold it there (empty entry -> skipped by the
+    # init loop's blank-name guard); offered normally on 6.6+ where the kernel bug is fixed.
+    local _stressng_line="stress-ng|/usr/bin/stress-ng|B|/usr/bin/stress-ng"
+    _stressng_unsafe && _stressng_line=""
     local UTILITY_DB="zram-swap|/etc/init.d/zram|R|/etc/init.d/zram /etc/config/system
 librespeed-go|/usr/bin/librespeed-go|R|/usr/bin/librespeed-go /etc/config/librespeed-go /etc/init.d/librespeed-go
 stress|/usr/bin/stress|B|/usr/bin/stress
-stress-ng|/usr/bin/stress-ng|B|/usr/bin/stress-ng
+$_stressng_line
 lscpu|/usr/bin/lscpu|B|/usr/bin/lscpu
 apache|/usr/bin/htpasswd|R|/usr/bin/htpasswd
 openssl-util|/usr/bin/openssl|B|/usr/bin/openssl
@@ -6021,10 +6051,14 @@ EOF
         [ -z "$name" ] && continue
         local inst=0; [ -f "$bin" ] && inst=1
         local pers=0
-        # Check if any of its paths are in sysupgrade.conf
-        for p in $paths; do
-            if grep -qFx "$p" "$sys_conf" 2>/dev/null; then pers=1; break; fi
-        done
+        # Persistence is only meaningful for an INSTALLED package (there is no persist-without-install);
+        # only reflect it when installed, so the Persist column can never show a checked box for a
+        # package that isn't there.
+        if [ "$inst" -eq 1 ]; then
+            for p in $paths; do
+                if grep -qFx "$p" "$sys_conf" 2>/dev/null; then pers=1; break; fi
+            done
+        fi
         # Format: Index|Name|Target_I|Target_P|Action|Type|Paths|Orig_I|Orig_P
         echo "$i|$name|$inst|$pers|No Change|$type|$paths|$inst|$pers" >> "$map_file"
         printf '%s|%s\n' "$name" "$(_pkg_size "$name" "$bin" "$paths")" >> "$sizes_file"
@@ -6253,6 +6287,12 @@ EOF
                                     grep -qFx "$name" "$laz_list" 2>/dev/null || echo "$name" >> "$laz_list"
                                     create_lazarus_hook
                                 fi
+                            elif [ "$o_p" -eq 1 ]; then
+                                # Persistence turned OFF while the package stays installed ("Disable
+                                # Persistence") - actually strip its sysupgrade + boot-restore entries
+                                # (this path used to do nothing, so persistence never got removed).
+                                for p in $paths; do sed -i "\|$p|d" "$sys_conf" 2>/dev/null; done
+                                [ -f "$laz_list" ] && sed -i "\|$name|d" "$laz_list" 2>/dev/null
                             fi
                         fi
                     done < "$map_file"
@@ -9514,7 +9554,8 @@ Persistence
 ───────────
 Many models wipe added packages on reboot. Persistence re-installs your marked
 tools automatically at boot so they are always there; turn it off to save space
-and install on demand instead.
+and install on demand instead. Persistence applies only to installed packages -
+uninstalling a tool also clears its persistence.
 
 Notes
 ─────
@@ -10007,8 +10048,9 @@ Benchmark Categories:
 
 Technical Details:
 ──────────────────
-• Stress Testing: The script attempts to use 'stress' primarily. If missing, 
-  it installs 'stress-ng' and creates a symlink to maintain compatibility.
+• Stress Testing: The script uses 'stress' primarily. If it is missing, it falls
+  back to 'stress-ng' ONLY on kernel 6.6+; on older kernels stress-ng is withheld
+  because a memory-pressure kernel bug can hard-crash the router there.
 • Baselines: The VPN & Crypto Benchmark is a leaderboard - its "vs yours"
   column compares saved devices to the one you are on. Disk and Memory tests
   use a fixed Beryl 7 (0.0%) reference point.
@@ -10427,6 +10469,12 @@ benchmark_system() {
                 if ! command -v stress >/dev/null 2>&1; then
                     install_package stress
                     if ! command -v stress >/dev/null 2>&1; then
+                        # stress-ng can hard-crash routers on kernels < 6.6 - never fall back to it there.
+                        if _stressng_unsafe; then
+                            print_error "Could not install 'stress', and 'stress-ng' can crash this router's kernel (a pre-6.6 kernel bug), so it isn't used here."
+                            press_any_key
+                            continue
+                        fi
                         install_package stress-ng
                         if ! command -v stress-ng >/dev/null 2>&1; then
                             print_error "Could not install a CPU stress tool."
@@ -11338,6 +11386,13 @@ if [ -f "$AGH_INIT" ]; then
     _aghcfg="$(get_agh_config)"
     bk_migrate_legacy agh ${_aghcfg:+"$_aghcfg"} /usr/bin/AdGuardHome /etc/init.d/adguardhome 2>/dev/null
     unset _aghcfg
+fi
+
+# Safety: stress-ng can hard-crash routers on kernels < 6.6. If a previous version left it in the boot
+# re-install list (persisted via the Package Manager), drop it on a susceptible kernel so it cannot
+# crash-loop the router on the next firmware upgrade.
+if _stressng_unsafe && [ -f /etc/lazarus.list ]; then
+    sed -i '/^stress-ng$/d' /etc/lazarus.list 2>/dev/null
 fi
 
 

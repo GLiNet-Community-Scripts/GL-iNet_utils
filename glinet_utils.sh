@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-27
+# Version: 2026-08-28
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -2672,12 +2672,74 @@ Risks if you remove it without mitigation
 
 Strong recommendation
 ─────────────────────
-Enable **zram swap** first (Manage Zram Swap → Install & Enable).  
-Zram gives fast compressed swap in RAM, greatly reduces memory pressure, 
-and is safe for most GL.iNet 512MB devices.
+Enable **zram swap** first (Advanced Settings → Zram Swap → Install & Enable).
+Zram gives fast compressed swap in RAM, greatly reduces memory pressure,
+and is safe for most GL.iNet 512MB devices. The Lists Manager also offers to
+enable zram automatically when a selection would run memory high.
 
-Only remove the 10MB limit after zram is active.
+Only remove the limit after zram is active.
 HELPEOF
+}
+
+# Remove the GL filter-space limit (the loop-mounted filters partition).
+# Shared mechanical action used by both AdGuardHome Storage Management and the
+# AdGuardHome Lists Manager so the two never diverge. Prints its own progress.
+# Returns 0 on success, 1 if there was nothing to do or a step failed.
+agh_remove_filter_limit() {
+    local workdir; workdir=$(get_agh_workdir)
+    [ -z "$workdir" ] && { print_error "Could not find AdGuardHome working directory"; return 1; }
+    local fdir="$workdir/data/filters"
+
+    # Assess both halves of the limit independently: the live mount and the init call.
+    # A prior partial run can leave them inconsistent (call commented but still mounted),
+    # which we must recover from - not bail on.
+    local mounted=0; awk -v d="$fdir" '$2==d{f=1} END{exit !f}' /proc/mounts && mounted=1
+    local call_active=0; grep -qE "^[[:space:]]*mount_filter_img[[:space:]]+" "$AGH_INIT" && call_active=1
+
+    if [ "$mounted" -eq 0 ] && [ "$call_active" -eq 0 ]; then
+        print_warning "Filter space limitation is already INACTIVE on the system."
+        return 1
+    fi
+
+    local agh_pid=""
+    if is_agh_running; then
+        agh_pid=$(pidof AdGuardHome)
+        $AGH_INIT stop >/dev/null 2>&1; sleep 2
+    fi
+
+    # Unmount, then VERIFY it actually released before we touch the init script - so a
+    # busy mount can't leave us in the half-done state that reports false success.
+    if [ "$mounted" -eq 1 ]; then
+        local loop_dev; loop_dev=$(awk -v d="$fdir" '$2==d{print $1; exit}' /proc/mounts)
+        umount "$fdir" 2>/dev/null || umount "$loop_dev" 2>/dev/null
+        sleep 1
+        # A lingering kernel/journal handle can keep a plain umount "busy" even with AGH
+        # stopped; a lazy unmount detaches it safely (the partition is being discarded).
+        if awk -v d="$fdir" '$2==d{f=1} END{exit !f}' /proc/mounts; then
+            umount -l "$fdir" 2>/dev/null; sleep 1
+        fi
+        if awk -v d="$fdir" '$2==d{f=1} END{exit !f}' /proc/mounts; then
+            [ -n "$agh_pid" ] && { $AGH_INIT start >/dev/null 2>&1; sleep 1; }
+            print_error "Could not unmount the filter partition (still in use) - nothing changed. Try again."
+            return 1
+        fi
+        print_success "Unmounted filter partition"
+        [ -n "$loop_dev" ] && losetup -d "$loop_dev" 2>/dev/null
+    fi
+
+    [ -f "$workdir/data.img" ] && { rm -f "$workdir/data.img" && print_success "Removed data.img file"; }
+
+    if [ "$call_active" -eq 1 ]; then
+        sed -i "s|^\([[:space:]]*\)\(mount_filter_img[[:space:]]\)|\1# \2|" "$AGH_INIT"
+        print_success "Disabled the mount in the init script"
+    fi
+
+    if [ -n "$agh_pid" ]; then
+        $AGH_INIT start >/dev/null 2>&1; sleep 2
+        is_agh_running && print_success "AdGuardHome restarted successfully" || print_error "AdGuardHome did not restart"
+    fi
+    print_success "Filter space limit removed!"
+    return 0
 }
 
 manage_agh_storage() {
@@ -2766,37 +2828,7 @@ WARNEOF
                     continue
                 fi
                 
-                if is_agh_running; then
-                    agh_pid=$(pidof AdGuardHome)
-                    $AGH_INIT stop >/dev/null 2>&1; sleep 1
-                else
-                    agh_pid=""
-                fi
-
-                loop_dev=$(mount | grep "$AGH_WORKDIR/data/filters" | awk '{print $1}')
-                if [ -n "$loop_dev" ]; then
-                    umount "$loop_dev" 2>/dev/null
-                    print_success "Unmounted filter partition"
-                fi
-                
-                if [ -f "$AGH_WORKDIR/data.img" ]; then
-                    rm -f "$AGH_WORKDIR/data.img"
-                    print_success "Removed data.img file"
-                fi
-                
-                sed -i "s|^\([[:space:]]*\)\(mount_filter_img[[:space:]]\)|\1# \2|" "$AGH_INIT"
-                print_success "Disabled execution call in init script"
-                
-                if [ -n "$agh_pid" ]; then
-                    $AGH_INIT start >/dev/null 2>&1; sleep 2
-                    if is_agh_running; then
-                        print_success "AdGuardHome restarted successfully"
-                        print_success "Filter space limit removed!"
-                    else
-                        print_error "Failed to restart AdGuardHome"
-                    fi
-                fi
-                
+                agh_remove_filter_limit
                 press_any_key
                 ;;
             2)
@@ -2858,239 +2890,537 @@ WARNEOF
 # AdGuardHome Lists Management
 # -----------------------------
 show_agh_lists_help() {
-    show_paged "AdGuardHome Lists - Help" << 'HELPEOF'
-AdGuardHome Lists - Quick Help
+    show_paged "AdGuardHome Lists Manager - Help" << 'HELPEOF'
+AdGuardHome Lists Manager - Quick Help
 
 What it does
 ────────────────────────────────────────────────────────────────────────
-This option installs custom DNS filter lists for AdGuardHome to enhance 
-ad blocking and streaming compatibility:
+Pick which DNS filter lists AdGuardHome installs and enables. Each list has
+two toggles:
 
-- **Phantasm22's Blocklist**:
-  Blocks Amazon Echo Show ads. Derived from HaGeZi's Pro++ for broad 
-  protection, curated for GL.iNet performance. (Auto-updates, GPL-3.0).
-  URL: https://github.com/phantasm22/AdGuardHome-Lists/blocklist.txt
+  • Install  - the list is present in AdGuardHome's config
+  • Enable   - AdGuardHome actually loads and uses it
 
-- **Phantasm22's CDN Allow List**:
-  Unblocks domains for Roku, Apple TV, NBC, Peacock, Hulu, Disney+, 
-  YouTube, Prime, Max, and more. Prevents false positives.
-  URL: https://github.com/phantasm22/AdGuardHome-Lists/allowlist.txt
+Typing a list's number cycles it through the sensible steps for its current
+state, and the Planned Action column shows exactly what will happen:
 
-- **Phantasm22's Apps and User Flow Allow List**:
-  Unblocks domains necessary for common day to day use like clicking on
-  a WSJ or Home Depot link or using other common apps.
-  URL: https://github.com/phantasm22/AdGuardHome-Lists/allowlist2.txt
+  • a Missing list    ->  Install + Enable  ->  Install (leave off)  ->  no change
+  • an Active list    ->  Remove  ->  Disable  ->  no change
+  • an Inactive list  ->  Enable  ->  Remove  ->  no change
 
-- **HaGeZi's Pro++ Blocklist**:
-  Aggressive protection against ads, tracking, phishing, and malware.
-  Part of the Multi series (230k+ entries). Strict protection; 
-  best for users comfortable whitelisting if rare breaks occur.
+Nothing is applied until you press [C] Confirm and approve the summary.
 
-Why HaGeZi's Pro++ as the default base?
+The screen
 ────────────────────────────────────────────────────────────────────────
-It provides comprehensive protection and balances aggressive blocking 
-with usability. Users report ~2x more blocks than alternatives like 
-OISD with minimal false positives. It is highly regarded on Reddit, 
-NextDNS, and Pi-hole forums for privacy gains.
+  • Memory Impact (top): a bar of the rules that will actually load, against
+    this box's RAM (plus zram swap if enabled). Green is comfortable; it turns
+    (high)/(critical) as the enabled lists approach what the box can hold.
+  • Size: each list's rule count - a real count once downloaded, or a "~"
+    estimate before then.
+  • Sections: Recommended (a curated, safe default set), General, Security,
+    Allowlist, and any of "Your Other Lists" already in the config.
 
-These lists auto-update in AdGuardHome. Install for enhanced blocking—
-monitor for streaming breaks and whitelist via the AdGuardHome UI.
+Staying safe on small boxes
+────────────────────────────────────────────────────────────────────────
+Before applying a heavy set, the manager can:
+
+  • offer to enable zram swap (compressed RAM headroom) when memory would run
+    high on a low-RAM router; and
+  • warn - on models with a filter-storage cap - when the selection won't fit,
+    offering to remove the cap (also under Advanced Settings).
+
+After applying, it verifies each enabled list actually downloaded; any that
+could not (storage full) are reported and removed, so nothing is left
+half-installed.
 HELPEOF
 }
 
+# ============================================================
+# AdGuardHome Lists Manager — helpers
+# ============================================================
+
+# Echo a list's status by name in the config: 0=missing 1=inactive 2=active
+agh_list_status() {
+    local sv
+    sv=$(awk -v n="$1" '
+        BEGIN { RS = "[[:space:]]*- "; FS = "\n" }
+        index($0, "name: " n) || index($0, "name: \"" n "\"") {
+            if ($0 ~ "enabled: true")  { print "true";  exit }
+            if ($0 ~ "enabled: false") { print "false"; exit }
+        }' "$2")
+    case "$sv" in true) echo 2 ;; false) echo 1 ;; *) echo 0 ;; esac
+}
+
+# Echo the numeric id of an installed list by name (empty if not found).
+agh_list_id() {
+    awk -v n="$1" '
+        BEGIN { RS = "[[:space:]]*- "; FS = "\n" }
+        index($0, "name: " n) || index($0, "name: \"" n "\"") {
+            for (i=1;i<=NF;i++) if ($i ~ /id:/) { x=$i; sub(/.*id:[[:space:]]*/,"",x); gsub(/[^0-9]/,"",x); if (x!="") { print x; exit } }
+        }' "$2"
+}
+
+# Echo a list's real rule count (wc of AGH's local filter file) or a fallback.
+#   $1 name  $2 config  $3 workdir  $4 fallback
+agh_list_rulecount() {
+    local id f
+    id=$(agh_list_id "$1" "$2")
+    f="$3/data/filters/$id.txt"
+    if [ -n "$id" ] && [ -n "$3" ] && [ -f "$f" ]; then
+        grep -vc '^!\|^#\|^[[:space:]]*$' "$f"
+    else
+        echo "${4:-0}"
+    fi
+}
+
+# Format a rule count: 1234567 -> 1.2M, 12345 -> 12.3K, else the number.
+agh_fmt_rules() {
+    local n="${1:-0}"
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    if [ "$n" -ge 1000000 ]; then awk -v x="$n" 'BEGIN{printf "%.1fM", x/1000000}'
+    elif [ "$n" -ge 1000 ]; then awk -v x="$n" 'BEGIN{printf "%.1fK", x/1000}'
+    else printf "%s" "$n"; fi
+}
+
+# Derived planned-action text (mirrors the Package Manager's get_action_text).
+#   $1 t_i  $2 t_e  $3 o_i  $4 o_e   (target/original install & enable)
+get_agh_action_text() {
+    local ti=$1 te=$2 oi=$3 oe=$4
+    if [ "$ti" = "$oi" ] && [ "$te" = "$oe" ]; then echo "No Change"; return; fi
+    if [ "$oi" = 0 ] && [ "$ti" = 1 ]; then
+        [ "$te" = 1 ] && echo "> Install + Enable" || echo "> Install"; return
+    fi
+    if [ "$oi" = 1 ] && [ "$ti" = 1 ] && [ "$te" != "$oe" ]; then
+        [ "$te" = 1 ] && echo "> Enable" || echo "> Disable"; return
+    fi
+    if [ "$oi" = 1 ] && [ "$ti" = 0 ]; then echo "> Remove"; return; fi
+    echo "No Change"
+}
+
+# Delete a list's 4-line block from the config by name.  Matches the name
+# literally (awk index) so parentheses/+/. in list names don't break it.
+agh_delete_block() {
+    local cfg="$2" nl sd
+    nl=$(awk -v n="$1" 'index($0,"name: " n) || index($0,"name: \"" n "\"") {print NR; exit}' "$cfg")
+    [ -z "$nl" ] && return 0
+    sd=$(awk -v L="$nl" 'NR<=L && /enabled:/{last=NR} END{print last+0}' "$cfg")
+    [ "$sd" -gt 0 ] 2>/dev/null || return 0
+    sed -i "${sd},$((sd + 3))d" "$cfg"
+}
+
+# Flip the enabled: flag of a list's block by name.  $2 = true|false, $3 = config
+# Matches the name literally (awk index) for parens/+/. safety.
+agh_set_enabled() {
+    local cfg="$3" val="$2" nl el
+    nl=$(awk -v n="$1" 'index($0,"name: " n) || index($0,"name: \"" n "\"") {print NR; exit}' "$cfg")
+    [ -z "$nl" ] && return 0
+    el=$(awk -v L="$nl" 'NR<=L && /enabled:/{last=NR} END{print last+0}' "$cfg")
+    [ "$el" -gt 0 ] 2>/dev/null || return 0
+    sed -i "${el}s/enabled: .*/enabled: $val/" "$cfg"
+}
+
+# Append a new enabled list block to the correct section.
+#   $1 name  $2 type(Blocklist|Allowlist)  $3 url  $4 uniq-counter  $5 config
+agh_add_block() {
+    local n="$1" t="$2" u="$3" count="$4" cfg="$5" ts th nb
+    # Stable id derived from the URL, so re-adding the same list reuses its file
+    # instead of orphaning a new one (AGH never reclaims orphaned filter files, and
+    # a full capped partition then fails downloads with ENOSPC). Fallback: timestamp.
+    ts=$(printf '%s' "$u" | md5sum 2>/dev/null | cut -c1-8)
+    ts=$(printf '%d' "0x$ts" 2>/dev/null)
+    case "$ts" in ''|0|*[!0-9]*) ts="$(( $(date +%s) - 1769040000 ))$count" ;; esac
+    nb="- enabled: true\\
+url: $u\\
+name: \"$n\"\\
+id: $ts"
+    th="filters:"; [ "$t" = "Allowlist" ] && th="whitelist_filters:"
+    sed -i "s/^$th \[\]/$th/" "$cfg"
+    sed -i "/^$th/a $nb" "$cfg"
+    sed -i "s/^- enabled:/  - enabled:/" "$cfg"
+    sed -i "s/^url:/    url:/" "$cfg"
+    sed -i "s/^name:/    name:/" "$cfg"
+    sed -i "s/^id:/    id:/" "$cfg"
+}
+
+# Sum of rules for lists that will be ACTIVE after apply (t_i=1 & t_e=1).
+# Sum of rules AGH will actually LOAD: active lists that have a real file (est=0),
+# plus lists being newly enabled (o_e=0 -> will download).  An already-enabled list
+# with no file (est=1 & o_e=1 = a failed/ENOSPC download) is NOT loaded, so excluded.
+agh_proj_active_rules() { awk -F'|' '{ if($7==1 && $8==1 && ($11==0 || $6==0)) s+=$9 } END{print s+0}' "$1"; }
+
+# Total memory capacity in MB, inclusive of zram swap.
+agh_capacity_mb() {
+    local mt st
+    mt=$(awk '/^MemTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null); : "${mt:=0}"
+    st=$(awk '/^SwapTotal:/{print int($2/1024)}' /proc/meminfo 2>/dev/null); : "${st:=0}"
+    echo "$mt $st $((mt + st))"
+}
+
+# Filled-block count (0..20) for the projected active rules given capacity MB.
+agh_mem_fill() {
+    local active="$1" cap_mb="$2" ceil filled
+    ceil=$(( (cap_mb - 128) * 1000 )); [ "$ceil" -lt 1000 ] && ceil=1000
+    filled=$(( active * 20 / ceil ))
+    [ "$filled" -gt 20 ] && filled=20; [ "$filled" -lt 0 ] && filled=0
+    echo "$filled"
+}
+
+# Print the Memory Health meter line for the current target selection ($1=LISTS_DATA).
+agh_memory_meter() {
+    local active mt st cap filled i bar swaptxt status
+    active=$(agh_proj_active_rules "$1")
+    read -r mt st cap <<EOF
+$(agh_capacity_mb)
+EOF
+    filled=$(agh_mem_fill "$active" "$cap")
+    bar=""; i=1
+    while [ "$i" -le 20 ]; do
+        if [ "$i" -le "$filled" ]; then
+            if   [ "$i" -le 14 ]; then bar="${bar}${GREEN}█${RESET}"
+            elif [ "$i" -le 18 ]; then bar="${bar}${YELLOW}█${RESET}"
+            else                       bar="${bar}${RED}█${RESET}"; fi
+        else bar="${bar}${GREY}░${RESET}"; fi
+        i=$((i + 1))
+    done
+    status=""
+    if   [ "$filled" -gt 18 ]; then status="  ${RED}(critical)${RESET}"
+    elif [ "$filled" -gt 14 ]; then status="  ${YELLOW}(high)${RESET}"; fi
+    swaptxt=""; [ "$st" -gt 0 ] && swaptxt=" + ${st}MB zram"
+    printf "%b\n" " ${CYAN}Memory Impact${RESET}   [${bar}]   $(agh_fmt_rules "$active") rules · ${mt}MB RAM${swaptxt}${status}"
+}
+
+# Prevention guard rails before applying.  $1 = LISTS_DATA.  Reuses the System
+# Tweaks zram + filter-limit actions so behavior never diverges.
+agh_lists_guard_rails() {
+    local data="$1" active mt st cap filled workdir free_kb add_kb
+    _agh_storage_over=0   # global: set if the capped partition stays too small -> verify downloads after apply
+    active=$(agh_proj_active_rules "$data")
+    read -r mt st cap <<EOF
+$(agh_capacity_mb)
+EOF
+    filled=$(agh_mem_fill "$active" "$cap")
+
+    # zram: projected memory in the yellow/red zone and zram not active
+    if [ "$filled" -gt 14 ] && ! swapon -s 2>/dev/null | grep -q zram; then
+        printf "\n"
+        if [ "$filled" -gt 18 ]; then
+            print_warning "Enabling these lists (~$(agh_fmt_rules "$active") rules) puts memory in the CRITICAL zone on ${mt}MB RAM."
+        else
+            print_warning "Enabling these lists (~$(agh_fmt_rules "$active") rules) puts memory in the HIGH zone on ${mt}MB RAM."
+        fi
+        print_info "zram swap adds compressed headroom and is strongly recommended before loading them."
+        printf "Enable zram swap now? [Y/n]: "; read -r _zr
+        if [ "$_zr" != "n" ] && [ "$_zr" != "N" ]; then
+            printf "\n"
+            zram_install_enable
+            print_info "Manage this later in AdGuardHome -> Advanced Settings -> Zram Swap."
+        fi
+    fi
+
+    # filter storage limit: on a capped partition, warn only if the post-apply
+    # footprint of ALL installed lists (t_i=1) exceeds the partition CAPACITY.
+    # Comparing to capacity (not current free) avoids a false warning when the
+    # same lists are re-added and their old files still linger on disk.
+    workdir=$(get_agh_workdir)
+    if [ -n "$workdir" ] && grep -q "$workdir/data/filters" /proc/mounts; then
+        cap_kb=$(df -Pk "$workdir/data/filters" 2>/dev/null | tail -1 | awk '{print $2}')
+        # Only ENABLED lists download to disk (AGH never fetches disabled ones), so
+        # project active lists (t_i=1 & t_e=1) - matches the Memory Impact meter.
+        proj_kb=$(awk -F'|' '{ if($7==1 && $8==1) s+=$9 } END{ printf "%d", (s*25)/1024 }' "$data")
+        case "$cap_kb" in ''|*[!0-9]*) cap_kb=0 ;; esac
+        if [ "$cap_kb" -gt 0 ] && [ "$proj_kb" -gt "$cap_kb" ]; then
+            _agh_storage_over=1
+            printf "\n"
+            print_warning "The selected lists (~$((proj_kb/1024))MB) exceed the ~$((cap_kb/1024))MB filter storage limit."
+            print_info "Removing the filter space limit lets them download."
+            printf "Remove the filter storage limit now? [y/N]: "; read -r _sl
+            if [ "$_sl" = "y" ] || [ "$_sl" = "Y" ]; then
+                printf "\n"
+                agh_remove_filter_limit && _agh_storage_over=0
+                print_info "Manage this later in AdGuardHome -> Advanced Settings -> Filter Storage Space Limit."
+            fi
+        fi
+    fi
+}
+
+# Remove downloaded filter files whose id is no longer referenced in the config.
+# AGH leaves orphaned <id>.txt behind when a list is removed, which keeps the
+# capped filter partition full and inflates the cached rule count. Run with AGH
+# stopped; a wrongly-removed file is re-fetched on the next update, so it is safe.
+agh_clean_orphan_filters() {
+    local cfg="$1" wd="$2" f id
+    { [ -z "$wd" ] || [ ! -d "$wd/data/filters" ]; } && return 0
+    for f in "$wd"/data/filters/*.txt; do
+        [ -f "$f" ] || continue
+        id=$(basename "$f" .txt)
+        case "$id" in ''|*[!0-9]*) continue ;; esac
+        grep -qE "^[[:space:]]*id:[[:space:]]*${id}[[:space:]]*$" "$cfg" 2>/dev/null || rm -f "$f"
+    done
+}
+
 manage_agh_lists() {
-    LIST_REGISTRY="1|Phantasm22's Blocklist|Blocklist|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/blocklist.txt
-2|HaGeZi's Pro++ Blocklist|Blocklist|https://cdn.jsdelivr.net/gh/hagezi/dns-blocklists@latest/adblock/pro.plus.txt
-3|Phantasm22's CDN Allow List|Allowlist|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/allowlist.txt
-4|Phantasm22's Apps and User Flow Allow List|Allowlist|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/allowlist2.txt"
+    # Curated, sectioned roster.  Fields: section|name|type|approx_rules|url
+    # Recommended => ★ default Install+Enable.  AdGuard-catalog lists use AdGuard's
+    # HostlistsRegistry mirror; Phantasm lists use their GitHub raw URLs.
+    AGH_ROSTER="Recommended|Phantasm22's Blocklist|Blocklist|50|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/blocklist.txt
+Recommended|HaGeZi's Pro++ Blocklist|Blocklist|250000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_51.txt
+Recommended|Malicious URL Blocklist (URLHaus)|Blocklist|3000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_11.txt
+Recommended|Phishing URL Blocklist (PhishTank and OpenPhish)|Blocklist|30000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_30.txt
+Recommended|Phantasm22's CDN Allow List|Allowlist|50|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/allowlist.txt
+Recommended|Phantasm22's Apps and User Flow Allow List|Allowlist|50|https://raw.githubusercontent.com/phantasm22/AdGuardHome-Lists/refs/heads/main/allowlist2.txt
+General|OISD Blocklist Small|Blocklist|50000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_5.txt
+General|OISD Blocklist Big|Blocklist|250000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_27.txt
+General|HaGeZi's Normal Blocklist|Blocklist|120000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_34.txt
+General|HaGeZi's Pro Blocklist|Blocklist|180000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_48.txt
+General|HaGeZi's Ultimate Blocklist|Blocklist|275000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_49.txt
+General|Steven Black's List|Blocklist|130000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_33.txt
+General|AdGuard DNS filter|Blocklist|60000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_1.txt
+General|1Hosts (Lite)|Blocklist|70000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_24.txt
+General|Peter Lowe's Blocklist|Blocklist|3500|https://adguardteam.github.io/HostlistsRegistry/assets/filter_3.txt
+General|Dan Pollock's List|Blocklist|15000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_4.txt
+General|AWAvenue Ads Rule|Blocklist|30000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_53.txt
+Security|Phishing Army|Blocklist|15000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_18.txt
+Security|NoCoin Filter List|Blocklist|5000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_8.txt
+Security|HaGeZi's Badware Hoster Blocklist|Blocklist|2000|https://adguardteam.github.io/HostlistsRegistry/assets/filter_55.txt
+Security|HaGeZi's DNS Rebind Protection|Blocklist|200|https://adguardteam.github.io/HostlistsRegistry/assets/filter_71.txt
+Allowlist|HaGeZi's Allowlist Referral|Allowlist|500|https://adguardteam.github.io/HostlistsRegistry/assets/filter_45.txt"
+
+    local RULE; RULE=$(printf '─%.0s' $(seq 1 106))
+    local PAGE_SIZE=12
+
+    # Build LISTS_DATA (idx|section|name|type|o_i|o_e|t_i|t_e|rules|url|est).
+    # Spinner while filter files are counted (can take ~2s on MIPS).
+    _agh_build_lists() {
+        local workdir idx r_sec r_name r_type r_est r_url stat oi oe ti te rc est cbase c_type c_name _id cest
+        workdir=$(get_agh_workdir)
+        : > "$LISTS_DATA"
+        idx=1
+        while IFS='|' read -r r_sec r_name r_type r_est r_url; do
+            [ -z "$r_name" ] && continue
+            stat=$(agh_list_status "$r_name" "$AGH_CONFIG")
+            oi=0; oe=0
+            case "$stat" in 1) oi=1; oe=0 ;; 2) oi=1; oe=1 ;; esac
+            if [ "$r_sec" = "Recommended" ]; then ti=1; te=1; else ti=$oi; te=$oe; fi
+            # est=0 only when a real downloaded file exists; a list enabled in config
+            # but with no file (never fetched, or a failed ENOSPC download) is est=1
+            # (shown "~" and excluded from the loaded-memory meter).
+            _id=$(agh_list_id "$r_name" "$AGH_CONFIG")
+            if [ -n "$_id" ] && [ -s "$workdir/data/filters/$_id.txt" ]; then
+                rc=$(grep -vc '^!\|^#\|^[[:space:]]*$' "$workdir/data/filters/$_id.txt"); est=0
+            else
+                rc="$r_est"; est=1
+            fi
+            printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" \
+                "$idx" "$r_sec" "$r_name" "$r_type" "$oi" "$oe" "$ti" "$te" "$rc" "$r_url" "$est" >> "$LISTS_DATA"
+            idx=$((idx + 1))
+        done <<EOF
+$AGH_ROSTER
+EOF
+        cbase=$idx
+        awk '
+            /^filters:/ || /^whitelist_filters:/ {in_sec=1; type=($1=="filters:"?"Blocklist":"Allowlist")}
+            /^[a-z_]+:/ && !/^filters:/ && !/^whitelist_filters:/ {in_sec=0}
+            in_sec && /name: / { gsub(/^[[:space:]]*name:[[:space:]]*/, ""); gsub(/^"|",?$/, ""); if ($0 != "") print type "|" $0 }
+        ' "$AGH_CONFIG" | while IFS='|' read -r c_type c_name; do
+            if ! grep -Fq "|$c_name|" "$LISTS_DATA"; then
+                stat=$(agh_list_status "$c_name" "$AGH_CONFIG")
+                oi=1; oe=0; [ "$stat" = 2 ] && oe=1
+                _id=$(agh_list_id "$c_name" "$AGH_CONFIG")
+                if [ -n "$_id" ] && [ -s "$workdir/data/filters/$_id.txt" ]; then
+                    rc=$(grep -vc '^!\|^#\|^[[:space:]]*$' "$workdir/data/filters/$_id.txt"); cest=0
+                else
+                    rc=0; cest=1
+                fi
+                printf "%s|Your Other Lists|%s|%s|%s|%s|%s|%s|%s|CUSTOM|%s\n" \
+                    "$cbase" "$c_name" "$c_type" "$oi" "$oe" "$oi" "$oe" "$rc" "$cest" >> "$LISTS_DATA"
+                cbase=$((cbase + 1))
+            fi
+        done
+    }
 
     while true; do
         clear
         print_centered_header "AdGuardHome Lists Manager"
-
         AGH_CONFIG=$(get_agh_config)
         [ -z "$AGH_CONFIG" ] && { print_error "Config not found"; press_any_key; return; }
-        
         LISTS_DATA=$(mktemp -t agh_data.XXXXXX)
+        spin_run "Reading list sizes" _agh_build_lists
 
-        # ---------------------------------------------------------
-        # 1. PARSING (Fixed for + signs and quotes)
-        # ---------------------------------------------------------
-        while IFS='|' read -r r_id r_name r_type r_url; do
-			status_val=$(awk -v n="$r_name" '
-                BEGIN { RS = "[[:space:]]*- "; FS = "\n" }
-                # index() does a literal string search. It ignores plus signs and quotes.
-                index($0, "name: " n) || index($0, "name: \"" n "\"") {
-                    if ($0 ~ "enabled: true") { print "true"; exit }
-                    if ($0 ~ "enabled: false") { print "false"; exit }
-                }
-			' "$AGH_CONFIG")
-    		status=0; [ "$status_val" = "false" ] && status=1; [ "$status_val" = "true" ] && status=2
-    		printf "%s|%s|%s|%s|1|1|%s\n" "$r_id" "$r_name" "$r_type" "$status" "$r_url" >> "$LISTS_DATA"
-done <<EOF
-$LIST_REGISTRY
-EOF
-
-        local next_idx=$(($(echo "$LIST_REGISTRY" | wc -l) + 1))
-        awk '
-            /^filters:/ || /^whitelist_filters:/ {in_sec=1; type=($1=="filters:"?"Blocklist":"Allowlist")}
-            /^[a-z_]+:/ && !/^filters:/ && !/^whitelist_filters:/ {in_sec=0}
-            in_sec && /name: / {
-                gsub(/^[[:space:]]*name:[[:space:]]*/, "");
-                gsub(/^"|",?$/, "");
-                if ($0 != "") print type "|" $0
-            }
-        ' "$AGH_CONFIG" | while IFS='|' read -r c_type c_name; do
-			if ! grep -q "|$c_name|" "$LISTS_DATA"; then
-                status_val=$(awk -v n="$c_name" '
-                    BEGIN { RS = "[[:space:]]*- "; FS = "\n" } 
-                    $0 ~ "name: [\" ]*" n "[\" ]*" {
-                        if ($0 ~ "enabled: true") { print "true"; exit }
-                        if ($0 ~ "enabled: false") { print "false"; exit }
-                    }
-                ' "$AGH_CONFIG")
-				status=1; [ "$status_val" = "true" ] && status=2
-                printf "%s|%s|%s|%s|0|0|CUSTOM\n" "$next_idx" "$c_name" "$c_type" "$status" >> "$LISTS_DATA"
-                next_idx=$((next_idx + 1))
-            fi
-        done
-
-        # ---------------------------------------------------------
-        # 2. UI LOOP
-        # ---------------------------------------------------------
+        page=1
         while true; do
+            total=$(wc -l < "$LISTS_DATA" 2>/dev/null | tr -dc '0-9'); : "${total:=0}"
+            pages=$(( (total + PAGE_SIZE - 1) / PAGE_SIZE )); [ "$pages" -lt 1 ] && pages=1
+            [ "$page" -gt "$pages" ] && page=$pages
+            start=$(( (page - 1) * PAGE_SIZE + 1 )); end=$(( page * PAGE_SIZE )); [ "$end" -gt "$total" ] && end=$total
+
             clear
             print_centered_header "AdGuardHome Lists Manager"
-            printf " %-5s %-12s %-50s %-20s\n" "Sel." "Type" "Name" "Status"
-            printf " ──────────────────────────────────────────────────────────────────────────────────────────\n"
-            while IFS='|' read -r idx name type stat sel rec url; do
-                s_box="[ ]  "; [ "$sel" -eq 1 ] && s_box="[✓]  "
-                case "$stat" in 0) s_txt="Missing" ;; 1) s_txt="Installed (inactive)" ;; 2) s_txt="Installed (active)" ;; esac
-                label="$idx. $name"; [ "$rec" -eq 1 ] && label="$label ★"
-                [ "$rec" -eq 1 ] && label=$(printf "%-52s" "$label") || label=$(printf "%-50s" "$label")
-                printf " %-5s %-12s %-50s %-20s\n" "$s_box" "$type" "$label" "$s_txt"
-            done < "$LISTS_DATA"
-            printf " ──────────────────────────────────────────────────────────────────────────────────────────\n"
-            printf " [A] All   [N] None   [#] Toggle   [C] Confirm   [0] Cancel   [?] Help\n"
-            lists_count=$(wc -l < "$LISTS_DATA" 2>/dev/null | tr -dc '0-9')
-            printf "\n Choose [%s/A/N/C/0/?]: " "$(picker_range "$lists_count")"
+            agh_memory_meter "$LISTS_DATA"
+            printf "\n"
+            printf "       %-7s %-7s %-6s %-48s %-9s %s\n" "Install" "Enable" "Type" "Name" "Size" "Planned Action"
+            printf " %s\n" "$RULE"
+            last_sec=""
+            sed -n "${start},${end}p" "$LISTS_DATA" | while IFS='|' read -r c_idx c_sec c_name c_type c_oi c_oe c_ti c_te c_rules c_url c_est; do
+                if [ "$c_sec" != "$last_sec" ]; then
+                    [ -n "$last_sec" ] && printf "\n"
+                    printf " %b%s%b\n" "$HDR2" "$c_sec" "$RESET"
+                    last_sec="$c_sec"
+                fi
+                i_box="  [ ]  "; [ "$c_ti" = 1 ] && i_box="  [✓]  "
+                e_box="  [ ]  "; [ "$c_te" = 1 ] && e_box="  [✓]  "
+                ty="Block"; [ "$c_type" = "Allowlist" ] && ty="Allow"
+                action=$(get_agh_action_text "$c_ti" "$c_te" "$c_oi" "$c_oe")
+                case "$action" in
+                    "No Change")        acol="$GREY" ;;
+                    *Remove*|*Disable*) acol="$RED" ;;
+                    *)                  acol="$GREEN" ;;
+                esac
+                dn="$c_name"; [ "${#dn}" -gt 48 ] && dn="$(printf '%.45s' "$dn")..."
+                if [ "$c_est" = 1 ]; then sz="~$(agh_fmt_rules "$c_rules")"; else sz="$(agh_fmt_rules "$c_rules")"; fi
+                printf " %-5s %s %s %-6s %-48s %-9s %b%s%b\n" "$c_idx." "$i_box" "$e_box" "$ty" "$dn" "$sz" "$acol" "$action" "$RESET"
+            done
+            printf " %s\n" "$RULE"
+            printf " [P] Previous   Page %s of %s   [N] Next   [#] Toggle   [C] Confirm   [0] Back   [?] Help\n" "$page" "$pages"
+            printf "\n Choose [%s-%s/N/P/C/0/?]: " "$start" "$end"
             read -r input
 
             case "$input" in
-                a|A) sed -i 's/\(.*|.*|.*|.*|\)0\(|.*|.*\)/\11\2/' "$LISTS_DATA" ;;
-                n|N) sed -i 's/\(.*|.*|.*|.*|\)1\(|.*|.*\)/\10\2/' "$LISTS_DATA" ;;
-                [0-9]*)
-                    if [ "$input" != "0" ]; then
-                        num="$input"
-                        awk -F'|' -v t="$num" 'BEGIN{OFS="|"} {if($1==t) $5=($5==1?0:1); print}' "$LISTS_DATA" > "$LISTS_DATA.tmp" && mv "$LISTS_DATA.tmp" "$LISTS_DATA"
-                    else
-                        # If it is exactly 0, handle it as the cancel command
-                        rm -f "$LISTS_DATA"; return
-                    fi
-                    ;;
+                "") ;;
+                p|P) [ "$page" -gt 1 ] && page=$((page - 1)) ;;
+                n|N) [ "$page" -lt "$pages" ] && page=$((page + 1)) ;;
+                0) rm -f "$LISTS_DATA"; return ;;
                 c|C)
-                    to_install=$(awk -F'|' '$5==1 && $4==0' "$LISTS_DATA")
-                    to_remove=$(awk -F'|' '$5==0 && $4!=0' "$LISTS_DATA")
-                    
-					if [ -z "$to_install" ] && [ -z "$to_remove" ]; then
-                        print_warning "No changes to apply (Selection matches current status)"
-                        sleep 2
-                        break 
+                    ci=""; cinst=""; cen=""; cdis=""; crem=""
+                    while IFS='|' read -r i sec n ty oi oe ti te rules url est; do
+                        [ -z "$n" ] && continue
+                        act=$(get_agh_action_text "$ti" "$te" "$oi" "$oe")
+                        case "$act" in
+                            "> Install + Enable") ci="${ci}  + ${n}
+" ;;
+                            "> Install")  cinst="${cinst}  + ${n} (installed, left disabled)
+" ;;
+                            "> Enable")   cen="${cen}  + ${n}
+" ;;
+                            "> Disable")  cdis="${cdis}  - ${n}
+" ;;
+                            "> Remove")   crem="${crem}  - ${n}
+" ;;
+                        esac
+                    done < "$LISTS_DATA"
+                    if [ -z "${ci}${cinst}${cen}${cdis}${crem}" ]; then
+                        print_warning "No changes to apply (all planned actions are 'No Change')"
+                        sleep 2; continue
                     fi
 
-					# 3. CONFIRMATION SCREEN
-					clear
+                    clear
                     print_centered_header "Confirm List Changes"
-                    [ -n "$to_install" ] && { printf "${GREEN}TO BE INSTALLED:${RESET}\n"; echo "$to_install" | cut -d'|' -f2 | sed 's/^/  + /'; }
-                    [ -n "$to_remove" ] && { printf "\n${RED}TO BE REMOVED:${RESET}\n"; echo "$to_remove" | cut -d'|' -f2 | sed 's/^/  - /'; }
-                    
-                    printf "\nProceed with changes? [y/N]: "; read -r confirm
-                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && break
+                    [ -n "$ci" ]    && printf "%bInstall + Enable:%b\n%s" "$GREEN" "$RESET" "$ci"
+                    [ -n "$cinst" ] && printf "%bInstall (left disabled):%b\n%s" "$GREEN" "$RESET" "$cinst"
+                    [ -n "$cen" ]   && printf "%bEnable:%b\n%s" "$GREEN" "$RESET" "$cen"
+                    [ -n "$cdis" ]  && printf "%bDisable:%b\n%s" "$YELLOW" "$RESET" "$cdis"
+                    [ -n "$crem" ]  && printf "%bRemove:%b\n%s" "$RED" "$RESET" "$crem"
 
-                    # 4. BACKUP CREATION
+                    agh_lists_guard_rails "$LISTS_DATA"
+
+                    printf "\nProceed with list changes? [y/N]: "; read -r confirm
+                    [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+
                     stamp=$(date +%Y%m%d%H%M%S)
                     BACKUP_FILE="${AGH_CONFIG}.backup.${stamp}"
                     cp "$AGH_CONFIG" "$BACKUP_FILE"
-
                     agh_was_running=0; is_agh_running && agh_was_running=1
                     [ "$agh_was_running" -eq 1 ] && { $AGH_INIT stop >/dev/null 2>&1; sleep 1; }
 
-                   	# 5. REMOVAL (Your logic, hardened for line order)
-					echo "$to_remove" | while IFS='|' read -r i n t s sel rec u; do
-						
-						# 1. Find the exact line number of the name escaping special chars (e.g. +) and optional quotes
-						n=$(echo "$n" | sed 's/+/\\+/g; s/\./\\./g')
-						name_line=$(grep -nE "name: \"?$n\"?" "$AGH_CONFIG" | cut -d: -f1 | head -n1)
-						
-						if [ -n "$name_line" ]; then
-							# 2. Find the nearest "- enabled:" ABOVE that name line
-							# This ensures we hit the start of THE SPECIFIC block
-							start_del=$(sed -n "1,${name_line}p" "$AGH_CONFIG" | grep -n "enabled:" | tail -n1 | cut -d: -f1)
-							
-							# 3. Delete 4 lines starting from that "- enabled" line
-							if [ -n "$start_del" ]; then
-								sed -i "${start_del},$((start_del + 3))d" "$AGH_CONFIG"
-							fi
-						fi
-					done
+                    count=0
+                    while IFS='|' read -r i sec n ty oi oe ti te rules url est; do
+                        [ -z "$n" ] && continue
+                        act=$(get_agh_action_text "$ti" "$te" "$oi" "$oe")
+                        case "$act" in
+                            "> Install + Enable") agh_add_block "$n" "$ty" "$url" "$count" "$AGH_CONFIG"; count=$((count + 1)) ;;
+                            "> Install")          agh_add_block "$n" "$ty" "$url" "$count" "$AGH_CONFIG"; agh_set_enabled "$n" false "$AGH_CONFIG"; count=$((count + 1)) ;;
+                            "> Enable")           agh_set_enabled "$n" true "$AGH_CONFIG" ;;
+                            "> Disable")          agh_set_enabled "$n" false "$AGH_CONFIG" ;;
+                            "> Remove")           agh_delete_block "$n" "$AGH_CONFIG" ;;
+                        esac
+                    done < "$LISTS_DATA"
 
-                    # 6. INSTALLATION
-					if [ -n "$to_install" ]; then
-						count=0
-						echo "$to_install" | while IFS='|' read -r i n t s sel rec u; do
-							[ -z "$u" ] || [ "$u" = "CUSTOM" ] && continue
-							
-							ts="$(( $(date +%s) - 1769040000 ))$count"
-							
-							new_block="- enabled: true\\
-url: $u\\
-name: \"$n\"\\
-id: $ts"
+                    for head in "filters" "whitelist_filters"; do
+                        if grep -qE "^$head:|^  $head:" "$AGH_CONFIG"; then
+                            next_line=$(grep -A 1 -E "^$head:|^  $head:" "$AGH_CONFIG" | tail -n 1)
+                            if ! echo "$next_line" | grep -q "\- enabled:"; then
+                                sed -i "/^$head:/ s/.*/$head: []/" "$AGH_CONFIG"
+                                sed -i "/^  $head:/ s/.*/  $head: []/" "$AGH_CONFIG"
+                            fi
+                        fi
+                    done
 
-							target_head="filters:"
-							[ "$t" = "Allowlist" ] && target_head="whitelist_filters:"
+                    # Reclaim disk: drop filter files for lists no longer in the config
+                    # (AGH leaves them behind), so removals actually free the partition.
+                    agh_clean_orphan_filters "$AGH_CONFIG" "$(get_agh_workdir)"
 
-							# Remove empty array brackets if they exist
-							sed -i "s/^$target_head \[\]/$target_head/" "$AGH_CONFIG"
-							
-							# Append the new block directly after the header line
-							sed -i "/^$target_head/a $new_block" "$AGH_CONFIG"
-
-							# Force 2 spaces for dash, 4 for children
-							sed -i "s/^- enabled:/  - enabled:/" "$AGH_CONFIG"
-							sed -i "s/^url:/    url:/" "$AGH_CONFIG"
-							sed -i "s/^name:/    name:/" "$AGH_CONFIG"
-							sed -i "s/^id:/    id:/" "$AGH_CONFIG"
-							
-							count=$((count + 1))
-						done
-					fi
-
-					# 7. CLEANUP (Strict Header Matching)
-					for head in "filters" "whitelist_filters"; do
-						# Match the header only at the start of a line to avoid 'filtering_enabled' etc.
-						if grep -qE "^$head:|^  $head:" "$AGH_CONFIG"; then
-							# Check the line immediately following the specific header
-							# We use -A 1 to see the 'After' line
-							next_line=$(grep -A 1 -E "^$head:|^  $head:" "$AGH_CONFIG" | tail -n 1)
-							
-							# If the next line isn't a list item (- enabled), the section is empty or broken
-							if ! echo "$next_line" | grep -q "\- enabled:"; then
-								# Force the header to empty array and ensure no hanging fragments remain
-								sed -i "/^$head:/ s/.*/$head: []/" "$AGH_CONFIG"
-								sed -i "/^  $head:/ s/.*/  $head: []/" "$AGH_CONFIG"
-							fi
-						fi
-					done
-
-                    # 8. APPLY: restart only if AGH was running (preserve run-state)
                     if agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONFIG" "Changes applied."; then
                         print_success "Backup file created: $(basename "$BACKUP_FILE")"
                     fi
-                    press_any_key; rm -f "$LISTS_DATA"; break 1
+
+                    # If the capped partition stayed too small, AGH's downloads can fail
+                    # silently with ENOSPC - verify the active lists actually landed rather
+                    # than imply success (config saved != list working).
+                    if [ "${_agh_storage_over:-0}" = 1 ]; then
+                        _wd=$(get_agh_workdir); _tries=0; _failed=""
+                        while [ "$_tries" -lt 6 ]; do
+                            _failed=""
+                            while IFS='|' read -r _i _sec _n _ty _oi _oe _ti _te _r _u _e; do
+                                { [ "$_ti" = 1 ] && [ "$_te" = 1 ]; } || continue
+                                _id=$(agh_list_id "$_n" "$AGH_CONFIG")
+                                { [ -n "$_id" ] && [ -s "$_wd/data/filters/$_id.txt" ]; } || _failed="${_failed}  - ${_n}
+"
+                            done < "$LISTS_DATA"
+                            [ -z "$_failed" ] && break
+                            sleep 2; _tries=$((_tries + 1))
+                        done
+                        if [ -n "$_failed" ]; then
+                            # The failed lists are installed+enabled in config but empty on disk.
+                            # Remove them so we don't leave an orphaned state (there is no clean
+                            # "re-apply" from installed+enabled-but-no-space); the user re-adds
+                            # them after freeing space.
+                            while IFS='|' read -r _i _sec _n _ty _oi _oe _ti _te _r _u _e; do
+                                { [ "$_ti" = 1 ] && [ "$_te" = 1 ]; } || continue
+                                _id=$(agh_list_id "$_n" "$AGH_CONFIG")
+                                { [ -n "$_id" ] && [ -s "$_wd/data/filters/$_id.txt" ]; } && continue
+                                agh_delete_block "$_n" "$AGH_CONFIG"
+                            done < "$LISTS_DATA"
+                            agh_clean_orphan_filters "$AGH_CONFIG" "$_wd"
+                            $AGH_INIT restart >/dev/null 2>&1
+                            printf "\n"
+                            print_error "These lists could NOT download - lists storage is full - and were removed:"
+                            printf "%s\n" "$_failed"
+                            print_info "Free space in Advanced Settings -> Filter Storage Space Limit, then add them again."
+                        fi
+                    fi
+
+                    cached_rules=""   # force the Control Center to recount rules after a change
+                    press_any_key; rm -f "$LISTS_DATA"; break
                     ;;
-                \?|h|H|❓)
-                    show_agh_lists_help ;;
+                \?|h|H|❓) show_agh_lists_help ;;
+                [0-9]*)
+                    if [ "$input" -ge "$start" ] 2>/dev/null && [ "$input" -le "$end" ] 2>/dev/null; then
+                        awk -F'|' -v t="$input" 'BEGIN{OFS="|"} {
+                            if($1==t){
+                                oi=$5+0; oe=$6+0; ti=$7+0; te=$8+0;
+                                cur=2*ti+te;                                  # (0,0)=0 (1,0)=2 (1,1)=3
+                                if(oi==0 && oe==0)      split("0 3 2",ord," ");   # missing:  none -> install+enable -> install
+                                else if(oi==1 && oe==1) split("3 0 2",ord," ");   # active:   nochange -> remove -> disable
+                                else                    split("2 3 0",ord," ");   # inactive: nochange -> enable -> remove
+                                idx=1; for(k=1;k<=3;k++) if(ord[k]==cur) idx=k;
+                                nx=ord[(idx % 3)+1];
+                                $7=int(nx/2); $8=nx%2;
+                            }
+                            print
+                        }' "$LISTS_DATA" > "$LISTS_DATA.tmp" && mv "$LISTS_DATA.tmp" "$LISTS_DATA"
+                    else
+                        print_error "Item $input is not on this page"; sleep 1
+                    fi
+                    ;;
                 *) print_error "Invalid option"; sleep 1 ;;
             esac
         done
@@ -3378,8 +3708,8 @@ SERVICE: Start, restart or stop the AdGuardHome daemon. Listed first because
 
 ALLOW/BLOCKLISTS: Add or remove filter subscriptions (block and allow lists).
 
-SETUP & ACCESS: UI entry points (Direct Access), binary lifecycle (Updates),
-   and storage thresholds (10MB Limit).
+ADVANCED SETTINGS: the filter storage-space limit, Zram Swap, Direct Access
+   (UI entry points), and UI Updates (binary lifecycle).
 
 BACKUP SUITE:
    - SAVE: Generates timestamped sync points for Config and Binary.
@@ -3639,16 +3969,18 @@ delete_agh_backups() {
 }
 
 show_agh_setup_help() {
-    show_paged "AdGuardHome Setup & Access - Help" << 'HELPEOF'
-AdGuardHome Setup, Access & UI Updates - Quick Help
+    show_paged "AdGuardHome Advanced Settings - Help" << 'HELPEOF'
+AdGuardHome Advanced Settings - Quick Help
 
 What it does
 ────────────
 Groups the AdGuardHome settings that aren't day-to-day filtering:
 
-  • Storage / filter-space limit - how much room its filter data may use
-  • Direct Access & Web UI login - reach the dashboard directly, with its own
-    username and password
+  • Filter Storage Space Limit - how much room its filter data may use
+  • Zram Swap - compressed RAM swap; adds memory headroom so more/larger
+    lists can load without exhausting RAM
+  • UI Direct Access & Web UI login - reach the dashboard directly, with its
+    own username and password
   • UI Updates - whether AdGuardHome may update its own web interface
 
 Each item opens its own screen with full details and its own help.
@@ -3658,19 +3990,21 @@ HELPEOF
 sub_setup_config() {
     while true; do
         clear
-        print_centered_header "AdGuardHome Setup, Access & UI Updates"
+        print_centered_header "AdGuardHome Advanced Settings"
         printf "%s%sFilter Storage Space Limit\n" "$N1" "$NSEP"
-        printf "%s%sUI Direct Access\n" "$N2" "$NSEP"
-        printf "%s%sUI Updates\n" "$N3" "$NSEP"
+        printf "%s%sZram Swap\n" "$N2" "$NSEP"
+        printf "%s%sUI Direct Access\n" "$N3" "$NSEP"
+        printf "%s%sUI Updates\n" "$N4" "$NSEP"
         printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-3/0/?]: "
+        printf "\nChoose [1-4/0/?]: "
         read -r s_opt
         case "$s_opt" in
             \?|h|H|❓) show_agh_setup_help ;;
             1) manage_agh_storage ;;
-            2) manage_agh_direct_access ;;
-            3) manage_agh_ui_updates ;;
+            2) manage_zram ;;
+            3) manage_agh_direct_access ;;
+            4) manage_agh_ui_updates ;;
             0) break ;;
             *) print_error "Invalid option"; sleep 1;;
         esac
@@ -3891,7 +4225,15 @@ get_agh_stats() {
     local data_dir="${workdir:-/etc/AdGuardHome}/data"
 
     # 3. List & Rules Logic
-    list_count=$(grep -c "url:" "$AGH_CONFIG" 2>/dev/null || echo "0")
+    # Count ENABLED lists only (installed + enabled), matching the rules count which
+    # reflects what AGH actually loaded - a disabled list contributes neither.
+    list_count=$(awk '
+        /^filters:/ || /^whitelist_filters:/ {in_sec=1}
+        /^[a-z_]+:/ && !/^filters:/ && !/^whitelist_filters:/ {in_sec=0}
+        in_sec && /- enabled: true/ {c++}
+        END {print c+0}
+    ' "$AGH_CONFIG" 2>/dev/null)
+    case "$list_count" in ''|*[!0-9]*) list_count=0 ;; esac
     if [ -z "$cached_rules" ]; then
         local raw_val=$(find "$data_dir/filters" -type f 2>/dev/null | xargs cat 2>/dev/null | wc -l)
         cached_rules=$(printf "$raw_val" | awk '{len=length($0); for(i=len-3;i>0;i-=3) $0=substr($0,1,i) "," substr($0,i+1); print $0}')
@@ -3900,6 +4242,7 @@ get_agh_stats() {
     # 4. Storage Metric: Filters
     filt_u=$(du -sh "$data_dir/filters" 2>/dev/null | awk '{print $1}')
     filt_f=$(get_free_space "$data_dir/filters")
+    [ "$filt_f" = "0" ] && filt_f="0B"   # df prints a bare "0" at zero free; keep a unit
 
     # 5. Storage Metric: Query Logs (DBs + JSON)
     local q_bytes=0
@@ -3948,7 +4291,7 @@ agh_control_center() {
         is_agh_running && svc_label="Restart / Stop AdGuardHome"
         printf "%s%s%s\n" "$N1" "$NSEP" "$svc_label"
         printf "%s%sManage Allow/Blocklists\n" "$N2" "$NSEP"
-        printf "%s%sSetup, Access & UI Updates\n" "$N3" "$NSEP"
+        printf "%s%sAdvanced Settings\n" "$N3" "$NSEP"
         printf "%s%sBackup & Recovery Suite\n" "$N4" "$NSEP"
         printf "%s%sLogs & Maintenance\n" "$N5" "$NSEP"
         printf "%s Reset to Factory Settings (Start Over)\n" "$NCL"
@@ -4006,12 +4349,38 @@ Important notes:
 • Data in zram is lost on reboot (normal for swap)
 • Routers with 512MB flash or less will have a forced limit for AdGuardHome allow/block lists.
 
+Reach this screen from System Tweaks, or from AdGuardHome -> Advanced Settings
+-> Zram Swap (it pairs with the filter storage-space limit).
+
 In this menu you can:
 1. Install & enable zram swap
 2. Disable it (stops and disables on boot)
 3. Enable/Disable Persistence - survives firmware updates
 4. Completely uninstall the package
 HELPEOF
+}
+
+# Install and enable zram swap (shared by the Zram menu and the AGH Lists Manager
+# onboarding so the two never diverge). Prints its own progress.
+# Returns 0 if zram swap ends up active, 1 otherwise.
+zram_install_enable() {
+    if ! pkg_is_installed zram-swap; then
+        install_package zram-swap || return 1
+    fi
+    if [ ! -f /etc/init.d/zram ]; then
+        print_error "Zram init script not found"
+        return 1
+    fi
+    print_info "Enabling and starting zram swap"
+    /etc/init.d/zram enable >/dev/null 2>&1; sleep 1
+    /etc/init.d/zram start >/dev/null 2>&1; sleep 2
+    print_success "Zram swap enabled and started"
+    if swapon -s 2>/dev/null | grep -q zram; then
+        print_success "Zram swap is working correctly"
+        return 0
+    fi
+    print_warning "Zram swap may not be working properly"
+    return 1
 }
 
 manage_zram() {
@@ -4070,24 +4439,7 @@ manage_zram() {
         
         case $zram_choice in
             1)
-                if ! pkg_is_installed zram-swap; then
-                    install_package zram-swap || { press_any_key; continue; }
-                fi
-                
-                if [ -f /etc/init.d/zram ]; then
-                    print_info "Enabling and starting zram swap"
-                    /etc/init.d/zram enable >/dev/null 2>&1; sleep 1
-                    /etc/init.d/zram start >/dev/null 2>&1; sleep 2
-                    print_success "Zram swap enabled and started"
-
-                    if swapon -s 2>/dev/null | grep -q zram; then
-                        print_success "Zram swap is working correctly"
-                    else
-                        print_warning "Zram swap may not be working properly"
-                    fi
-                else
-                    print_error "Zram init script not found"
-                fi
+                zram_install_enable
                 press_any_key
                 ;;
             2)

@@ -4,6 +4,27 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-08-28
+- Rebuilt the **AdGuardHome Lists Manager** as a two-column editor modeled on the Package & Persistence
+  Manager: each list has an **Install** and an **Enable** toggle, typing its number cycles through the valid
+  actions for its state, and a **Planned Action** column shows exactly what will happen before you Confirm.
+- Added a curated, sectioned catalog — **Recommended** (Phantasm22's lists + HaGeZi Pro++ + URLHaus +
+  PhishTank/OpenPhish), plus **General**, **Security**, and **Allowlist** picks — alongside any lists you
+  already have; the recommended set installs and enables by default.
+- Added a **Memory Impact** meter showing the rules AdGuardHome will actually load against the router's RAM
+  (and zram swap), turning amber/red as a selection approaches what the box can hold — so big lists can't
+  silently exhaust memory.
+- Added guard rails for constrained routers: it offers to enable **zram swap** when memory would run high,
+  and — on models with a filter-storage cap — warns when a selection won't fit and offers to remove the cap.
+- After applying, it now **verifies each enabled list actually downloaded**; lists that couldn't (filter
+  storage full) are reported and removed instead of being left installed-but-empty.
+- Fixed: removing a list now reclaims its disk space (AdGuardHome leaves orphaned filter files behind), and
+  re-adding a list reuses its file instead of accumulating orphans that can fill a capped filter partition.
+- Fixed: filter-storage-limit removal (Advanced Settings, and the Lists Manager guard rail) now verifies the
+  partition actually unmounted before reporting success, and recovers from a half-removed state.
+- Added a **Zram Swap** shortcut and renamed the AdGuardHome "Setup, Access & UI Updates" submenu to
+  **Advanced Settings**.
+
 ## 2026-08-27
 - Fixed: the Package & Persistence Manager could show a package as "persisted" while it wasn't installed,
   and "Disable Persistence" silently did nothing. Persistence now follows installation — a package that

@@ -4,6 +4,20 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-09-01
+- **AdGuardHome Lists Manager:** after applying changes it now shows an animated **download-progress**
+  spinner ("Downloading lists N of M") while AdGuardHome fetches the newly-enabled lists, instead of
+  sitting silently — so a large add no longer looks hung, and the Memory Impact meter is accurate when
+  the screen returns. Lists that finish are confirmed; lists that can't fit (filter storage full) are
+  reported and removed; lists still downloading are called out as in-progress rather than as failures.
+- **Filter Storage Space Limit:** re-enabling the cap now **warns when your current lists won't fit**
+  (showing space used vs. available) and asks you to confirm, since lists that don't fit silently stop
+  loading. The AdGuardHome Control Center rule count also refreshes correctly now after the storage
+  limit is turned on or off.
+- Multi-line **info / warning / error messages** now indent their continuation lines automatically, so
+  wrapped advisories line up cleanly under the icon across the toolkit; converted the last raw advisory
+  block on the storage screen to the standard message style.
+
 ## 2026-08-28
 - Rebuilt the **AdGuardHome Lists Manager** as a two-column editor modeled on the Package & Persistence
   Manager: each list has an **Install** and an **Enable** toggle, typing its number cycles through the valid

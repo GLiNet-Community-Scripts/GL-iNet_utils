@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-08-28
+# Version: 2026-09-01
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -769,10 +769,12 @@ _TERM_RESTORED=""
 # Message helpers. Defined HERE rather than further down because
 # terminal_size_advisory runs before that point and needs them; the ${VARS} they
 # reference are resolved at call time, so an early definition is safe.
-print_success() { printf "%b\n" "${BOLD}${GREEN}${_S_OK}${RESET}${GREEN}$1${RESET}"; }
-print_error()   { printf "%b\n" "${BOLD}${RED}${_S_ERR}${RESET}${RED}$1${RESET}"; }
-print_warning() { printf "%b\n" "${BOLD}${YELLOW}${_S_WARN}${RESET}${YELLOW}$1${RESET}"; }
-print_info()    { printf "%b\n" "${BOLD}${BLUE}${_S_INFO}${RESET}${BLUE}$1${RESET}"; }
+# Continuation lines in a message (written as "\n" by the caller) are auto-indented
+# to align under the text, past the leading glyph - callers no longer add spaces.
+print_success() { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${GREEN}${_S_OK}${RESET}${GREEN}${m}${RESET}"; }
+print_error()   { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${RED}${_S_ERR}${RESET}${RED}${m}${RESET}"; }
+print_warning() { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${YELLOW}${_S_WARN}${RESET}${YELLOW}${m}${RESET}"; }
+print_info()    { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${BLUE}${_S_INFO}${RESET}${BLUE}${m}${RESET}"; }
 
 # Standardized "hard refresh your browser" advisory - shown after any change that patches the Web UI.
 # A print_info heading + 3-space-indented per-browser continuation lines (reserved indent for wrapped
@@ -2602,7 +2604,7 @@ manage_agh_ui_updates() {
                 agh_was_running=0; is_agh_running && agh_was_running=1
                 if [ "$ui_action" = "enable" ]; then
                     if [ "$updates_persist" -eq 0 ]; then
-                        print_warning "UI updates are currently set to not persist across firmware updates.\n   Enabling UI updates may cause compatibility issues during firmware\n   updates due to legacy binaries being reinstalled. Consider enabling\n   update persistence to avoid this problem.\n"
+                        print_warning "UI updates are currently set to not persist across firmware updates.\nEnabling UI updates may cause compatibility issues during firmware\nupdates due to legacy binaries being reinstalled. Consider enabling\nupdate persistence to avoid this problem."
                     else
                         print_info "UI updates are currently set to persist across firmware updates."
                         printf "\n"
@@ -2678,6 +2680,12 @@ and is safe for most GL.iNet 512MB devices. The Lists Manager also offers to
 enable zram automatically when a selection would run memory high.
 
 Only remove the limit after zram is active.
+
+Re-enabling the limit
+─────────────────────
+If your installed lists are already larger than the cap, turning the limit back
+on will warn you (space used vs. available) and ask you to confirm - lists that
+don't fit silently stop loading, so remove some first or leave the limit off.
 HELPEOF
 }
 
@@ -2804,14 +2812,9 @@ manage_agh_storage() {
                     press_any_key; continue
                 fi
                 
-                cat << 'WARNEOF'
-GL.iNet (MT3600BE & similar models) limits AdGuardHome filter cache to 10MB 
-by creating a small tmpfs/loop-mounted partition at /etc/AdGuardHome/data/filters.
+                print_info "GL.iNet caps the AGH filter cache (~9MB loop partition) to protect RAM on ~512MB models."
+                print_info "Removing it allows larger/more lists, but raises RAM use and can destabilize small-RAM routers."
 
-Removing this limit allows larger/more filter lists, but may cause high RAM usage 
-and instability on 512MB devices when filters are big or many are enabled.
-WARNEOF
-                
                 if ! swapon -s 2>/dev/null | grep -q zram; then
                     printf "\n"
                     print_warning "WARNING: Zram swap is NOT enabled!"
@@ -2819,16 +2822,17 @@ WARNEOF
                     print_info "It is strongly recommended to enable zram swap before adding aditional filter lists."
                 fi
                 
-                printf "Remove the 10MB limit anyway? [y/N]: "
+                printf "Remove the filter storage limit anyway? [y/N]: "
                 read -r confirm
                 printf "\n"
                 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-                    printf "Operation cancelled.\n"
+                    print_info "Operation cancelled."
                     press_any_key
                     continue
                 fi
-                
+
                 agh_remove_filter_limit
+                cached_rules=""   # AGH re-loads filters -> Control Center must recount
                 press_any_key
                 ;;
             2)
@@ -2852,7 +2856,28 @@ WARNEOF
                     print_error "Could not find a feature call to re-enable."
                     press_any_key; continue
                 fi
-                
+
+                # Warn if the current filter lists won't fit once the cap is back - the ones
+                # that don't fit will silently fail to load (effectively disabled). The cap
+                # size comes from the (commented) mount_filter_img call: bs x count, ext4 ~90%.
+                _mfi=$(grep -oE "mount_filter_img[[:space:]]+[0-9]+[A-Za-z]?[[:space:]]+[0-9]+" "$AGH_INIT" | head -1)
+                _sz=$(echo "$_mfi" | awk '{print $2}'); _cnt=$(echo "$_mfi" | awk '{print $3}')
+                _num=$(echo "$_sz" | grep -oE '[0-9]+'); _unit=$(echo "$_sz" | grep -oE '[A-Za-z]' | head -1)
+                case "$_unit" in G|g) _mul=1048576 ;; K|k) _mul=1 ;; *) _mul=1024 ;; esac
+                _cap_kb=0; [ -n "$_num" ] && [ -n "$_cnt" ] && _cap_kb=$(( _num * _mul * _cnt ))
+                _usable_kb=$(( _cap_kb * 9 / 10 ))
+                _use_kb=$(du -sk "$AGH_WORKDIR/data/filters" 2>/dev/null | awk '{print $1}')
+                case "$_use_kb" in ''|*[!0-9]*) _use_kb=0 ;; esac
+                if [ "$_cap_kb" -gt 0 ] && [ "$_use_kb" -gt "$_usable_kb" ]; then
+                    print_warning "Your filter lists use ~$(( _use_kb / 1024 ))MB, but this limit only holds ~$(( _usable_kb / 1024 ))MB."
+                    print_info "Lists that don't fit won't load - remove some, or leave the limit off for full space."
+                    printf "Re-enable the filter storage limit anyway? [y/N]: "; read -r _reyn
+                    printf "\n"
+                    if [ "$_reyn" != "y" ] && [ "$_reyn" != "Y" ]; then
+                        print_info "Operation cancelled."; press_any_key; continue
+                    fi
+                fi
+
                 if is_agh_running; then
                     agh_pid=$(pidof AdGuardHome)
                     $AGH_INIT stop >/dev/null 2>&1; sleep 1
@@ -2872,7 +2897,7 @@ WARNEOF
                         print_error "Failed to restart AdGuardHome"
                     fi
                 fi
-                
+                cached_rules=""   # AGH re-loads filters -> Control Center must recount
                 press_any_key
                 ;;
             \?|h|H|❓)
@@ -2929,9 +2954,11 @@ Before applying a heavy set, the manager can:
   • warn - on models with a filter-storage cap - when the selection won't fit,
     offering to remove the cap (also under Advanced Settings).
 
-After applying, it verifies each enabled list actually downloaded; any that
-could not (storage full) are reported and removed, so nothing is left
-half-installed.
+After applying, it waits for the newly-enabled lists to download - showing
+progress - so the screen doesn't look hung and the Memory Impact meter is
+accurate on return. Lists that finish are confirmed; any that could not fit
+(storage full) are reported and removed so nothing is left half-installed; any
+still downloading are noted as in-progress (AdGuardHome keeps retrying).
 HELPEOF
 }
 
@@ -3362,27 +3389,50 @@ EOF
                         print_success "Backup file created: $(basename "$BACKUP_FILE")"
                     fi
 
-                    # If the capped partition stayed too small, AGH's downloads can fail
-                    # silently with ENOSPC - verify the active lists actually landed rather
-                    # than imply success (config saved != list working).
-                    if [ "${_agh_storage_over:-0}" = 1 ]; then
-                        _wd=$(get_agh_workdir); _tries=0; _failed=""
-                        while [ "$_tries" -lt 6 ]; do
-                            _failed=""
-                            while IFS='|' read -r _i _sec _n _ty _oi _oe _ti _te _r _u _e; do
-                                { [ "$_ti" = 1 ] && [ "$_te" = 1 ]; } || continue
-                                _id=$(agh_list_id "$_n" "$AGH_CONFIG")
-                                { [ -n "$_id" ] && [ -s "$_wd/data/filters/$_id.txt" ]; } || _failed="${_failed}  - ${_n}
+                    # AGH fetches enabled lists asynchronously after the restart, so "config
+                    # saved" != "list loaded". Wait for the newly-enabled lists to download,
+                    # with progress, so the screen doesn't look hung and the Memory Impact meter
+                    # is accurate on return.  A pending list = active target with no file yet ($11=1).
+                    _wd=$(get_agh_workdir)
+                    _pending=$(awk -F'|' '$7==1 && $8==1 && $11==1 {c++} END{print c+0}' "$LISTS_DATA")
+                    if [ "$agh_was_running" -eq 1 ] && [ "$_pending" -gt 0 ]; then
+                        printf "\n"
+                        # Spin smoothly at ~0.1s/frame (like spin_run) while re-checking the
+                        # filter files only every ~2s, so the spinner animates instead of ticking
+                        # once per file check.  Cap ~50s (500 frames).
+                        _spin='-\|/'; _frame=0; _prev=-1; _stall=0; _done=0; _failed=""
+                        while [ "$_frame" -lt 500 ]; do
+                            if [ $((_frame % 20)) -eq 0 ]; then
+                                _done=0; _failed=""
+                                while IFS='|' read -r _i _sec _n _ty _oi _oe _ti _te _r _u _e; do
+                                    { [ "$_ti" = 1 ] && [ "$_te" = 1 ] && [ "$_e" = 1 ]; } || continue
+                                    _id=$(agh_list_id "$_n" "$AGH_CONFIG")
+                                    if [ -n "$_id" ] && [ -s "$_wd/data/filters/$_id.txt" ]; then
+                                        _done=$((_done + 1))
+                                    else
+                                        _failed="${_failed}  - ${_n}
 "
-                            done < "$LISTS_DATA"
-                            [ -z "$_failed" ] && break
-                            sleep 2; _tries=$((_tries + 1))
+                                    fi
+                                done < "$LISTS_DATA"
+                                [ "$_done" -ge "$_pending" ] && break
+                                # Stop early only if nothing progressed AND nothing is mid-download
+                                # (AGH writes a hidden temp file while fetching); ENOSPC fails instantly.
+                                if [ "$_done" = "$_prev" ] && ! ls "$_wd"/data/filters/.*.txt* >/dev/null 2>&1; then
+                                    _stall=$((_stall + 1)); [ "$_stall" -ge 3 ] && break
+                                else _stall=0; fi
+                                _prev=$_done
+                            fi
+                            _c=${_spin%"${_spin#?}"}; _spin=${_spin#?}$_c
+                            printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}Downloading lists %s of %s${RESET} %s " "$_done" "$_pending" "$_c"
+                            usleep 100000 2>/dev/null || sleep 1
+                            _frame=$((_frame + 1))
                         done
-                        if [ -n "$_failed" ]; then
-                            # The failed lists are installed+enabled in config but empty on disk.
-                            # Remove them so we don't leave an orphaned state (there is no clean
-                            # "re-apply" from installed+enabled-but-no-space); the user re-adds
-                            # them after freeing space.
+                        printf "\r\033[K"
+                        if [ -z "$_failed" ]; then
+                            print_success "Downloaded $_pending list(s)."
+                        elif [ "${_agh_storage_over:-0}" = 1 ]; then
+                            # ENOSPC: these cannot fit - remove them so nothing is left
+                            # installed+enabled-but-empty (there is no clean re-apply from that state).
                             while IFS='|' read -r _i _sec _n _ty _oi _oe _ti _te _r _u _e; do
                                 { [ "$_ti" = 1 ] && [ "$_te" = 1 ]; } || continue
                                 _id=$(agh_list_id "$_n" "$AGH_CONFIG")
@@ -3391,10 +3441,13 @@ EOF
                             done < "$LISTS_DATA"
                             agh_clean_orphan_filters "$AGH_CONFIG" "$_wd"
                             $AGH_INIT restart >/dev/null 2>&1
-                            printf "\n"
                             print_error "These lists could NOT download - lists storage is full - and were removed:"
                             printf "%s\n" "$_failed"
                             print_info "Free space in Advanced Settings -> Filter Storage Space Limit, then add them again."
+                        else
+                            print_warning "These lists have not finished downloading:"
+                            printf "%s\n" "$_failed"
+                            print_info "AdGuardHome keeps retrying - check back shortly, or check your connection."
                         fi
                     fi
 
@@ -5511,7 +5564,7 @@ EOF
             3) case "$wb" in
                  blocked|partial) spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 1 ;;
                  full)            spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 0 ;;
-                 open)            print_info "Router access for '$name' is governed by its firewall zone (input policy =\n   ACCEPT), not by this limiter. To change it, edit the '$zone' zone in the firewall."
+                 open)            print_info "Router access for '$name' is governed by its firewall zone (input policy =\nACCEPT), not by this limiter. To change it, edit the '$zone' zone in the firewall."
                                   press_any_key ;;
                  *)               print_info "This network has no firewall zone, so router access can't be toggled here."
                                   press_any_key ;;
@@ -5936,10 +5989,10 @@ manage_web_terminal() {
                     # Detect HTTPS mode and prompt for connection mode
                     redirect_https=$(uci -q get uhttpd.main.redirect_https 2>/dev/null)
                     if [ "$redirect_https" = "1" ]; then
-                        print_warning "The GL Admin Panel is set to force HTTPS. ttyd will be installed in HTTPS mode so the\n   embedded terminal loads correctly in your browser.\n"
+                        print_warning "The GL Admin Panel is set to force HTTPS. ttyd will be installed in HTTPS mode so the\nembedded terminal loads correctly in your browser."
                         ttyd_proto="https"
                     else
-                        print_info "ttyd runs over HTTP by default and will not work when accessing the Admin Panel via HTTPS.\n   ttyd over HTTPS works when accessing the Admin Panel via HTTP or HTTPS but requires a\n   one-time browser cert acceptance."
+                        print_info "ttyd runs over HTTP by default and will not work when accessing the Admin Panel via HTTPS.\nttyd over HTTPS works when accessing the Admin Panel via HTTP or HTTPS but requires a\none-time browser cert acceptance."
                         printf "   Use HTTPS? [y/N]: "
                         read -r proto_choice
                         printf "\n"

@@ -4,6 +4,48 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-09-09
+- **New: Switch Position Indicator** (System Tweaks ▸ Switch Position Indicator). On models with a
+  physical toggle switch, it shows which way the switch is actually flipped, right on the Admin Panel's
+  **Toggle Button Settings** page — it fills the active side's toggle **green**, greens its LEFT/RIGHT
+  label, and tags it "current position". Read-only; it never moves the switch or changes a setting.
+  Position and ON/OFF are **derived from the logical switch state the way GL's own button handler does**
+  (physical GPIO level XOR the model's active-low flag), so LEFT/RIGHT and ON/OFF always agree — no
+  guessing, no manual invert. Status screen (hardware / live position / toggle function / overlay /
+  service / persistence), Install / Remove (context aware), `[?]` help, `[0]` exit. Live position comes
+  from a tiny Procd backend (`gl_switchpos`) that reads the switch GPIO and publishes it to a static
+  file the overlay polls (written only on change — negligible flash wear).
+- **Set the toggle-button function from the toolkit.** Assign what the physical switch does, with the
+  options derived GL's own way from its `/etc/gl-switch.d` handlers (plus VPN tunnels from route_policy
+  and main/guest Wi-Fi) — a flat inline list, empty groups omitted. Wi-Fi assignment warns first (a
+  flip can drop the Wi-Fi you manage the router over).
+- **Shared Web-UI injection registry (`glwebui`).** The Web-UI Terminal button, the Fan slider-range
+  patch, and the Switch indicator all paint the same admin-panel bundle. They go through one registry
+  that rebuilds the bundle from the pristine copy and re-applies **every active** overlay on each change
+  — so installing or removing one no longer wipes the others (the old ttyd↔fan collision is gone).
+  Existing ttyd/fan installs are migrated into the registry automatically on first use.
+- **New: persist Web-UI tweaks across firmware updates.** Each Web-UI feature (Web Terminal, Fan
+  control, Switch indicator) gains an **Enable/Disable persistence** action and a Persistence status
+  row. When enabled, the feature's registry + a small boot service are kept on `/etc/sysupgrade.conf`;
+  after a firmware update **or a same-version factory reset/reflash** wipes the overlay, the service
+  re-applies the enabled overlays from the new firmware's pristine bundle on first boot (it detects a
+  wipe from the missing overlay itself, not just a version bump). Re-apply is **backend-first and
+  fail-stock** — if GL restructured the bundle so an injection no longer fits, that panel is left
+  stock (never corrupted) and reported as a failure. The result is shown once on the next launch.
+- **Web-UI overlays no longer need a manual hard-refresh.** Patching the admin-panel bundle in
+  place kept the same filename, so the browser served its cached (stale) copy until the user
+  hard-refreshed. The registry now gives the patched bundle a new content hash and repoints the
+  single reference in the SPA entry (served no-cache, always re-fetched) — so the browser fetches
+  the patched bundle fresh on its own, exactly the way a firmware update busts the cache. This
+  matters most for persistence: after an update the overlays come back *and* show up without the
+  user knowing to hard-refresh.
+- **Consistent persistence messaging + a data-loss guard.** All persistence toggles across the
+  toolkit (Web-UI tweaks, Zram, SSH keys, OpenSpeedTest, LibreSpeed, AdGuardHome updates, Toolkit
+  Management) now confirm with one standard line — `Persistence enabled/disabled for <thing>.` — and
+  no longer leak a `sysupgrade.conf` path. Disabling persistence for something that would cause
+  **irrecoverable data loss** (SSH keys) now warns and asks for confirmation first, rather than a
+  quiet info line; recoverable functionality stays a one-line confirm.
+
 ## 2026-09-06_20:06
 - **OpenSpeedTest Server is now a native, fully integrated tool.** Host the OpenSpeedTest web app on
   the router (its own nginx on port 8888) to measure LAN / Wi-Fi speed between a device and the router

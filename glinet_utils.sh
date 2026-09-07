@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-09-06_20:06
+# Version: 2026-09-09
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -776,14 +776,68 @@ print_error()   { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${RED}${_S_E
 print_warning() { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${YELLOW}${_S_WARN}${RESET}${YELLOW}${m}${RESET}"; }
 print_info()    { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${BLUE}${_S_INFO}${RESET}${BLUE}${m}${RESET}"; }
 
-# Standardized "hard refresh your browser" advisory - shown after any change that patches the Web UI.
-# A print_info heading + 3-space-indented per-browser continuation lines (reserved indent for wrapped
-# body under a heading, per the UX standard); each line stays within the 110-col window.
-_hard_refresh_hint() {
-    print_info "Hard-refresh your browser to load the change:"
-    printf "   Chrome / Edge / Firefox:  Ctrl+F5, or Ctrl/Cmd + Shift + R\n"
-    printf "   Safari:                   Cmd + Option + R\n"
+
+# Standardized persistence-toggle confirmation. Names the subject but no more - each screen's
+# [?] help explains what survives an update, and no sysupgrade.conf path is leaked. $1 = on|off,
+# $2 = subject noun phrase (e.g. "fan control", "the Web Terminal").
+_persist_msg() {
+    [ "$1" = on ] && print_success "Persistence enabled for $2." || print_success "Persistence disabled for $2."
 }
+
+# ============================================================================
+# Feature lifecycle - the ONE model for installable features (ttyd, zram,
+# LibreSpeed, OpenSpeedTest, Switch indicator). See the ui-feature-lifecycle
+# standard. A feature supplies check callbacks; these helpers compute the state
+# and drive an identical status VALUE + identical context-aware ACTIONS, so no
+# two features drift. States: NOT_INSTALLED (package absent) / DISABLED (present,
+# off) / ENABLED (on, healthy) / SERVICE_DOWN (on, backend service dead).
+# ============================================================================
+
+# _lc_state <pkg_backed 0|1> <pkg_installed_fn> <enabled_fn> <service_up_fn>
+# Echoes the lifecycle state. service_up_fn may be "" (feature has no service).
+_lc_state() {
+    local pkgb="$1" pf="$2" ef="$3" sf="$4"
+    if [ "$pkgb" = 1 ] && ! "$pf"; then echo NOT_INSTALLED; return; fi
+    if ! "$ef"; then echo DISABLED; return; fi
+    if [ -n "$sf" ] && ! "$sf"; then echo SERVICE_DOWN; return; fi
+    echo ENABLED
+}
+
+# _lc_value <state> - coloured ALL-CAPS status value. Colour carries the
+# DISABLED (you turned it off, yellow) vs SERVICE_DOWN (it broke, red) split.
+_lc_value() {
+    case "$1" in
+        NOT_INSTALLED) printf '%bNOT INSTALLED%b' "$GREY" "$RESET" ;;
+        DISABLED)      printf '%bDISABLED%b' "$YELLOW" "$RESET" ;;
+        ENABLED)       printf '%bENABLED%b' "$GREEN" "$RESET" ;;
+        SERVICE_DOWN)  printf '%bSERVICE DOWN%b' "$RED" "$RESET" ;;
+    esac
+}
+
+# _lc_actions <state> <pkg_backed 0|1> - space-separated action keys, in menu order.
+# Reinstall is GATED to SERVICE_DOWN only; Uninstall only where a package exists.
+_lc_actions() {
+    case "$1" in
+        NOT_INSTALLED) echo "install_enable" ;;
+        DISABLED)      [ "$2" = 1 ] && echo "enable uninstall" || echo "enable" ;;
+        ENABLED)       [ "$2" = 1 ] && echo "disable uninstall" || echo "disable" ;;
+        SERVICE_DOWN)  [ "$2" = 1 ] && echo "reinstall disable uninstall" || echo "reinstall disable" ;;
+    esac
+}
+
+# _lc_label <action_key> - the standard, feature-independent menu label.
+_lc_label() {
+    case "$1" in
+        install_enable) echo "Install and enable" ;;
+        enable)         echo "Enable" ;;
+        disable)        echo "Disable" ;;
+        reinstall)      echo "Reinstall" ;;
+        uninstall)      echo "Uninstall" ;;
+    esac
+}
+
+# _lc_num <n> - the $N<n> keycap macro for menu number n.
+_lc_num() { eval "printf '%s' \"\$N$1\""; }
 print_action()  { printf "%b\n" "${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}$1${RESET}"; }
 
 terminal_setup() {
@@ -915,23 +969,35 @@ terminal_restore() {
 # `clear` is ESC[H ESC[J, which erases the visible screen but NOT the
 # scrollback - so remnants of the previous run land ABOVE whatever was already
 # drawn, which no amount of clearing beforehand can prevent.
-#
-# The first clear is for detect_output_mode: on first run it installs
-# coreutils-stty, and its "Setting up terminal support..." spinner should have a
-# clean screen to appear on. It has to run before terminal_setup, which needs
-# the detected profile to decide whether asking for a resize is worthwhile.
-command -v clear >/dev/null 2>&1 && clear
-detect_output_mode
+# Headless entrypoints (the persistence boot service, tests): source every function but
+# SKIP the interactive terminal setup, self-installer, self-update and menu - run the
+# requested task from the dispatch block at the very bottom instead.
+case "${1:-}" in
+    --webui-persist-run) __GL_HEADLESS=1 ;;
+esac
 
-# Widen + dark-theme the terminal for this session; restore it all on exit.
-terminal_setup
-terminal_size_advisory
+if [ -z "${__GL_HEADLESS:-}" ]; then
+    # The first clear is for detect_output_mode: on first run it installs
+    # coreutils-stty, and its "Setting up terminal support..." spinner should have a
+    # clean screen to appear on. It has to run before terminal_setup, which needs
+    # the detected profile to decide whether asking for a resize is worthwhile.
+    command -v clear >/dev/null 2>&1 && clear
+    detect_output_mode
 
-command -v clear >/dev/null 2>&1 && clear
-printf "%b\n" "$SPLASH"
-trap 'terminal_restore' EXIT
-trap 'terminal_restore; exit 130' INT
-trap 'terminal_restore; exit 143' TERM
+    # Widen + dark-theme the terminal for this session; restore it all on exit.
+    terminal_setup
+    terminal_size_advisory
+
+    command -v clear >/dev/null 2>&1 && clear
+    printf "%b\n" "$SPLASH"
+fi
+# Headless runs never touched the terminal, so there is nothing to restore - and emitting the
+# restore escape sequences would dirty the boot log / captured output.
+if [ -z "${__GL_HEADLESS:-}" ]; then
+    trap 'terminal_restore' EXIT
+    trap 'terminal_restore; exit 130' INT
+    trap 'terminal_restore; exit 143' TERM
+fi
 
 # -----------------------------
 # Cleanup any previous updates
@@ -2628,7 +2694,7 @@ manage_agh_ui_updates() {
                     sed -i "/\/usr\/bin\/AdGuardHome/d" /etc/sysupgrade.conf
                     sed -i "/\/etc\/init.d\/adguardhome/d" /etc/sysupgrade.conf
                     sed -i "/\/etc\/AdGuardHome\/config.yaml/d" /etc/sysupgrade.conf
-                    print_success "Update persistence disabled in $up_conf"
+                    _persist_msg off "AdGuardHome updates"
                 else
                     printf "Enable update persistence across firmware updates? [y/N]: "; read -r confirm ; printf "\n"
                     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
@@ -2636,7 +2702,7 @@ manage_agh_ui_updates() {
                     for entry in "/usr/bin/AdGuardHome" "/etc/init.d/adguardhome" "/etc/AdGuardHome/config.yaml"; do
                         grep -qFx "$entry" "$up_conf" || echo "$entry" >> "$up_conf"
                     done
-                    print_success "Update persistence enabled in $up_conf"
+                    _persist_msg on "AdGuardHome updates"
                 fi
                 press_any_key
                 ;;
@@ -4517,13 +4583,13 @@ manage_zram() {
                         done
                         grep -qFx "zram-swap" "$laz_list" 2>/dev/null || echo "zram-swap" >> "$laz_list"
                         create_lazarus_hook
-                        print_success "Zram persistence enabled."
+                        _persist_msg on "Zram swap"
                     else
                         for p in $z_paths; do
                             sed -i "\|$p|d" "$up_conf" 2>/dev/null
                         done
                         sed -i "\|zram-swap|d" "$laz_list" 2>/dev/null
-                        print_warning "Zram persistence disabled."
+                        _persist_msg off "Zram swap"
                     fi
                 fi
                 press_any_key
@@ -4595,170 +4661,125 @@ Dynamic vs. Manual Mode:
 
 Safety Warning:
 ────────────────
-Extending limits beyond 100°C can lead to hardware throttling or 
-emergency shutdowns. Most silicon is rated for ~105°C. Use 110°C+ 
+Extending limits beyond 100°C can lead to hardware throttling or
+emergency shutdowns. Most silicon is rated for ~105°C. Use 110°C+
 only if you understand the thermal risks to your specific model.
+
+Web-UI note:
+────────────
+The Max "unlock" patches the Admin Panel bundle that the Web-UI Terminal
+button and the Switch-Position indicator also use. They share one injection
+registry now, so changing Fan settings re-paints those overlays rather than
+wiping them (and a factory reset drops only the Fan patch). The panel picks up
+the change on your next visit - no refresh needed (the bundle is re-hashed so the
+browser fetches it fresh).
+
+Persistence (option 8):
+───────────────────────
+A firmware upgrade resets the Admin Panel, dropping the fan setpoint patch.
+Turn on "Enable persistence" and a small boot service re-applies your fan
+settings from the new firmware's bundle on first boot, reporting the result on
+the next launch. If the new panel changed so the patch no longer fits, it is
+left stock (never corrupted) and reported as unable to restore.
 HELPEOF
+}
+
+# Restore ONLY the fan-owned files from ROM (gl_util library, glfan config, overview VIEW
+# bundle + i18n). The shared app.*.js.gz is owned by the glwebui registry, so this does NOT
+# touch it - the caller re-applies the combined set via glwebui_enable/disable. Extracted to
+# top level so BOTH the Fan menu and the persistence re-apply (post firmware update) share it.
+_fan_reset_to_factory() {
+    [ -f "/rom/lib/functions/gl_util.sh" ] && cp "/rom/lib/functions/gl_util.sh" "/lib/functions/gl_util.sh"
+    [ -f "/rom/etc/config/glfan" ] && cp "/rom/etc/config/glfan" "/etc/config/glfan"
+    . /lib/functions/gl_util.sh
+    fan_init
+    uci commit glfan
+    [ -f "/rom/www/views/gl-sdk4-ui-overview.common.js.gz" ] && \
+        cp "/rom/www/views/gl-sdk4-ui-overview.common.js.gz" "/www/views/gl-sdk4-ui-overview.common.js.gz"
+    [ -f "/rom/www/i18n/gl-sdk4-ui-overview.en.json" ] && \
+        cp "/rom/www/i18n/gl-sdk4-ui-overview.en.json" "/www/i18n/gl-sdk4-ui-overview.en.json"
+    /etc/init.d/gl_fan restart >/dev/null 2>&1
+}
+
+# _fan_apply <min> <cur> <wrn> <max> - patch the fan control library, uci, the overview view
+# bundle, and (via the glwebui registry) the shared app bundle to pin the given setpoints.
+# Top-level so the persistence re-apply can call it headlessly with the same code the menu uses.
+_fan_apply() {
+    _fan_reset_to_factory
+    local n_min=$1  # Minimum (The Floor)
+    local n_cur=$2  # Fan-On (The current target)
+    local n_wrn=$3  # Warning (The visual/system trigger)
+    local n_max=$4  # Maximum (The Ceiling)
+    local current_model=$(cat /proc/gl-hw-info/model 2>/dev/null)
+    local b_min=$((n_min - 1))
+    local b_max=$((n_max + 1))
+    local util_file="/lib/functions/gl_util.sh"
+
+    # --- 1. System Logic & Backend Variable Sync ---
+    sed -i "s/-lt 6[0-9]/-lt $n_min/g" "$util_file"
+    sed -i "s/-lt 7[0-9]/-lt $n_min/g" "$util_file"
+    if awk "/$current_model[)]/,/;;/" "$util_file" | grep -q "temperature="; then
+        sed -i "/$current_model[)]/,/;;/ s/\(minimum_temperature=\)[0-9]*/\1$n_min/" "$util_file"
+        sed -i "/$current_model[)]/,/;;/ s/\([[:space:]]temperature=\)[0-9]*/\1$n_cur/" "$util_file"
+    else
+        sed -i "s/\(local minimum_temperature=\)[0-9]*/\1$n_min/" "$util_file"
+        sed -i "s/\(local temperature=\)[0-9]*/\1$n_cur/" "$util_file"
+    fi
+    sed -i "s/warn_temperature=.*$/warn_temperature=\"$n_wrn\"/" "$util_file"
+
+    # --- 2. UCI Persistence ---
+    uci set glfan.globals.minimum_temperature="$n_min"
+    uci set glfan.globals.temperature="$n_cur"
+    uci set glfan.globals.warn_temperature="$n_wrn"
+    uci commit glfan
+
+    # --- 3. View Component Patching (UI Logic & Visuals) ---
+    local view_gz="/www/views/gl-sdk4-ui-overview.common.js.gz"
+    [ ! -f "$view_gz" ] && cp "/rom$view_gz" "$view_gz"
+    gunzip -f "$view_gz"
+    local v="/www/views/gl-sdk4-ui-overview.common.js"
+    sed -i "s/minimum_temperature:t/minimum_temperature:ignore,t=$n_min/g" "$v"
+    sed -i "s/maximum_temperature:t/maximum_temperature:ignore,t=$n_max/g" "$v"
+    sed -i "s/maximumTemperature:()=>[0-9]*/maximumTemperature:()=>$n_max/g" "$v"
+    sed -i "s/t<70/t<$n_min/g" "$v"
+    sed -i "s/t>90/t>$n_max/g" "$v"
+    sed -i "s/ature=70/ature=$n_min/g" "$v"
+    sed -i "s/ature=90/ature=$n_max/g" "$v"
+    sed -i "s/t<this.minimumTemperature/t<$n_min/g" "$v"
+    sed -i "s/t>this.maximumTemperature/t>$n_max/g" "$v"
+    sed -i "s/this.temperature=this.minimumTemperature/this.temperature=$n_min/g" "$v"
+    sed -i "s/this.temperature=this.maximumTemperature/this.temperature=$n_max/g" "$v"
+    sed -i "s/attrs:{min:[^,]*[0-9a-zA-Z.-]*,max:[0-9a-zA-Z.+-]*/attrs:{min:$b_min,max:$b_max/g" "$v"
+    local marks_obj="${n_min}:'${n_min}°C'"
+    local span=$((n_max - n_min))
+    local interval=10
+    [ "$span" -le 50 ] && interval=5
+    for i in $(seq $((n_min + $interval)) "$interval" "$n_max"); do
+        marks_obj="$marks_obj,$i:'$i°C'"
+    done
+    sed -i "s/marks:t.tMarks/marks:{$marks_obj}/g" "$v"
+    local info_pattern="fan start is [^.]*"
+    local info_replacement="fan start is $n_min °C ~ $n_max °C "
+    sed -i "s/$info_pattern/$info_replacement/g" "$v"
+    [ -f "/www/i18n/gl-sdk4-ui-overview.en.json" ] && \
+    sed -i "s/$info_pattern/$info_replacement/g" "/www/i18n/gl-sdk4-ui-overview.en.json"
+
+    # --- 4. Global Application Controller Patch (shared app bundle via registry) ---
+    glwebui_enable fan "$n_min $n_max $n_cur"
+
+    # 5. Deployment
+    gzip -f "$v"
+    /etc/init.d/gl_fan restart
 }
 
 manage_fan_settings() {
     current_model=$(cat /proc/gl-hw-info/model)
     nav_choice=""
 
-    reset_to_factory(){
-        # The app bundle restored below is the SAME file the Web-UI Terminal
-        # button is injected into, so this reset wipes the button. Note WHETHER
-        # it was there before we clobber it, then put it back at the end - so a
-        # fan change never silently removes the terminal. (This function runs on
-        # every fan setpoint change, not just the explicit factory reset.)
-        local _rtf_had_term=0
-        local _rtf_app=$(find /www/js/ -name "app.*.js.gz" -type f | head -n 1)
-        [ -n "$_rtf_app" ] && zcat "$_rtf_app" 2>/dev/null | grep -q "term-wrapper" && _rtf_had_term=1
+    # Thin delegators to the top-level fan functions (shared with the persistence re-apply).
+    reset_to_factory(){ _fan_reset_to_factory; }
+    sync_system_and_ui() { _fan_apply "$1" "$2" "$3" "$4"; }
 
-        # 1. Restore the 'Engine' (The Library) and the 'Seed' (The ROM config)
-        if [ -f "/rom/lib/functions/gl_util.sh" ]; then 
-            cp "/rom/lib/functions/gl_util.sh" "/lib/functions/gl_util.sh"
-        fi
-
-        if [ -f "/rom/etc/config/glfan" ]; then 
-            cp "/rom/etc/config/glfan" "/etc/config/glfan"
-        fi
-        
-        # 2. Trigger the Internal Provisioner
-        # This populates UCI with the REAL factory defaults for THIS specific model
-        . /lib/functions/gl_util.sh
-        fan_init
-        uci commit glfan
-        
-        # 3. Restore Web UI Visuals & Logic from ROM
-        if [ -f "/rom/www/views/gl-sdk4-ui-overview.common.js.gz" ]; then
-            cp "/rom/www/views/gl-sdk4-ui-overview.common.js.gz" "/www/views/gl-sdk4-ui-overview.common.js.gz"
-        fi
-        
-        local app_rom_gz=$(find /rom/www/js/ -name "app.*.js.gz" -type f | head -n 1)
-        if [ -n "$app_rom_gz" ]; then
-            cp "$app_rom_gz" "/www/js/$(basename "$app_rom_gz")"
-        fi
-
-        if [ -f "/rom/www/i18n/gl-sdk4-ui-overview.en.json" ]; then
-            cp "/rom/www/i18n/gl-sdk4-ui-overview.en.json" "/www/i18n/gl-sdk4-ui-overview.en.json"
-        fi
-        
-        /etc/init.d/gl_fan restart >/dev/null 2>&1
-
-        # Put the Web-UI Terminal button back if it was there before the restore.
-        # from_rom=0: append onto the bundle we just restored, so this coexists
-        # with any fan patches a caller applies afterwards rather than resetting
-        # the file yet again.
-        if [ "$_rtf_had_term" = 1 ] && [ -n "$_rtf_app" ]; then
-            _inject_terminal_into "$_rtf_app" \
-                "$(grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && echo https || echo http)" 0
-        fi
-    }
-
-    sync_system_and_ui() {
-        # Start at a good working state
-        reset_to_factory       
-        
-        local n_min=$1  # Minimum (The Floor)
-        local n_cur=$2  # Fan-On (The current target)
-        local n_wrn=$3  # Warning (The visual/system trigger)
-        local n_max=$4  # Maximum (The Ceiling)
-        
-        local b_min=$((n_min - 1)) 
-        local b_max=$((n_max + 1))
-        local util_file="/lib/functions/gl_util.sh"
-
-        # --- 1. System Logic & Backend Variable Sync ---
-        # Patch the hardware floor comparisons in the fan control library
-        sed -i "s/-lt 6[0-9]/-lt $n_min/g" "$util_file"
-        sed -i "s/-lt 7[0-9]/-lt $n_min/g" "$util_file"
-
-        # Use the model identifier to target the correct code block for assignments
-        if awk "/$current_model[)]/,/;;/" "$util_file" | grep -q "temperature="; then
-            sed -i "/$current_model[)]/,/;;/ s/\(minimum_temperature=\)[0-9]*/\1$n_min/" "$util_file"
-            sed -i "/$current_model[)]/,/;;/ s/\([[:space:]]temperature=\)[0-9]*/\1$n_cur/" "$util_file"
-        else
-            sed -i "s/\(local minimum_temperature=\)[0-9]*/\1$n_min/" "$util_file"
-            sed -i "s/\(local temperature=\)[0-9]*/\1$n_cur/" "$util_file"
-        fi
-        sed -i "s/warn_temperature=.*$/warn_temperature=\"$n_wrn\"/" "$util_file"
-
-        # --- 2. UCI Persistence ---
-        uci set glfan.globals.minimum_temperature="$n_min"
-        uci set glfan.globals.temperature="$n_cur"
-        uci set glfan.globals.warn_temperature="$n_wrn"
-        uci commit glfan
-
-        # --- 3. View Component Patching (UI Logic & Visuals) ---
-        local view_gz="/www/views/gl-sdk4-ui-overview.common.js.gz"
-        [ ! -f "$view_gz" ] && cp "/rom$view_gz" "$view_gz"
-        gunzip -f "$view_gz"
-        local v="/www/views/gl-sdk4-ui-overview.common.js"
-
-        # SECTION A: Computed Property Overrides (Dynamic Shadowing)
-        sed -i "s/minimum_temperature:t/minimum_temperature:ignore,t=$n_min/g" "$v"
-        sed -i "s/maximum_temperature:t/maximum_temperature:ignore,t=$n_max/g" "$v"
-        sed -i "s/maximumTemperature:()=>[0-9]*/maximumTemperature:()=>$n_max/g" "$v"
-
-        # SECTION B: Literal Logic Guards (Integer Boundaries)
-        sed -i "s/t<70/t<$n_min/g" "$v"
-        sed -i "s/t>90/t>$n_max/g" "$v"
-        sed -i "s/ature=70/ature=$n_min/g" "$v"
-        sed -i "s/ature=90/ature=$n_max/g" "$v"
-
-        # SECTION C: Universal Component Logic (Snap-Back Prevention)
-        sed -i "s/t<this.minimumTemperature/t<$n_min/g" "$v"
-        sed -i "s/t>this.maximumTemperature/t>$n_max/g" "$v"
-        sed -i "s/this.temperature=this.minimumTemperature/this.temperature=$n_min/g" "$v"
-        sed -i "s/this.temperature=this.maximumTemperature/this.temperature=$n_max/g" "$v"
-
-        # SECTION D: Physical Slider Attributes (Visual Buffer)
-        sed -i "s/attrs:{min:[^,]*[0-9a-zA-Z.-]*,max:[0-9a-zA-Z.+-]*/attrs:{min:$b_min,max:$b_max/g" "$v"
-
-        # SECTION E: Slider Scale & Step Labels
-        local marks_obj="${n_min}:'${n_min}°C'"
-        local span=$((n_max - n_min))
-        local interval=10
-        [ "$span" -le 50 ] && interval=5
-        for i in $(seq $((n_min + $interval)) "$interval" "$n_max"); do
-            marks_obj="$marks_obj,$i:'$i°C'"
-        done
-        sed -i "s/marks:t.tMarks/marks:{$marks_obj}/g" "$v"
-
-        # SECTION F: Information Strings (Info Box / Localization)
-        # The pristine string is a template - "fan start is $$$$ ~ $$$$ ." - so
-        # replacing it with literals is what pins the displayed range.
-        #
-        # The view-bundle sed below currently matches nothing: 0 occurrences on
-        # every firmware we have (4.3.25 through OpenWrt 25) versus exactly 1 in
-        # the i18n JSON. It is KEPT DELIBERATELY - our oldest device is fanless,
-        # so the fan path has never been exercised on early firmware and we
-        # cannot show the phrase was never in the view there. It costs nothing.
-        local info_pattern="fan start is [^.]*"
-        local info_replacement="fan start is $n_min °C ~ $n_max °C "
-        sed -i "s/$info_pattern/$info_replacement/g" "$v"
-        [ -f "/www/i18n/gl-sdk4-ui-overview.en.json" ] && \
-        sed -i "s/$info_pattern/$info_replacement/g" "/www/i18n/gl-sdk4-ui-overview.en.json"
-
-        # --- 4. Global Application Controller Patch (Validator Range) ---
-        local app_gz=$(find /www/js/ -name "app.*.js.gz" -type f | head -n 1)
-        if [ -n "$app_gz" ]; then
-            gunzip -f "$app_gz"
-            local app_file="${app_gz%.gz}"
-            # Unlock the global validator range
-            sed -i "s/[0-9]\{1,3\}||i<[0-9]\{2,3\}/${n_min}||i<$((n_max + 1))/g" "$app_file"
-            # Prevent initial state snap-back on page load
-            sed -i "s/temperature:6[90]/temperature:$n_cur/g" "$app_file"
-            sed -i "s/temperature:76/temperature:$n_cur/g" "$app_file"
-            gzip -f "$app_file"
-        fi
-
-        # 5. Deployment
-        gzip -f "$v"
-        /etc/init.d/gl_fan restart
-    }
-    
     clear
     printf '\033[?25l'
     
@@ -4827,13 +4848,19 @@ manage_fan_settings() {
         printf "   Minimum Setpoint:  %s°C\033[K\n" "${u_min:-UNKNOWN}"
         printf "   Fan-On Setpoint:   %s°C\033[K\n" "${u_cur:-UNKNOWN}"
         printf "   Warning Setpoint:  %s°C\033[K\n" "${u_wrn:-UNKNOWN}"
-        printf "   Max Setpoint:      %b%s°C%b\033[K\n\n" "${YELLOW}" "$ui_max" "${RESET}"
+        printf "   Max Setpoint:      %b%s°C%b\033[K\n" "${YELLOW}" "$ui_max" "${RESET}"
+        if [ "$has_fan" = "true" ]; then
+            glpersist_is_on fan && fan_per="${GREEN}ENABLED${RESET}" || fan_per="${YELLOW}DISABLED${RESET}"
+            printf "   Persistence:       %b\033[K\n" "$fan_per"
+        fi
+        printf "\033[K\n"
 
         if [ "$has_fan" = "false" ]; then
             print_warning "Fan settings are disabled on fanless hardware.\033[K"
             printf "%s%sBack\033[K\n" "$N0" "$NSEP"
             printf "\nChoose [0/?]: \033[K"
         else
+            if glpersist_is_on fan; then fan_l8="Disable persistence"; else fan_l8="Enable persistence"; fi
             printf "%s%sSet Static Fan Speed (0-100%%)\033[K\n" "$N1" "$NSEP"
             printf "%s%sEnable Dynamic Fan Control\033[K\n" "$N2" "$NSEP"
             printf "%s%sSet Minimum Setpoint\033[K\n" "$N3" "$NSEP"
@@ -4841,9 +4868,10 @@ manage_fan_settings() {
             printf "%s%sSet Warning Setpoint\033[K\n" "$N5" "$NSEP"
             printf "%s%sSet Maximum Setpoint\033[K\n" "$N6" "$NSEP"
             printf "%s%sReset to Factory Defaults\033[K\n" "$N7" "$NSEP"
+            printf "%s%s%s\033[K\n" "$N8" "$NSEP" "$fan_l8"
             printf "%s%sBack\033[K\n" "$N0" "$NSEP"
             printf "%s Help\033[K\n" "$NQ"
-            printf "\nChoose [1-7/0/?]: \033[K"
+            printf "\nChoose [1-8/0/?]: \033[K"
         fi
                
         printf '\033[?25h'
@@ -4890,7 +4918,6 @@ manage_fan_settings() {
                         sync_system_and_ui "$val" "$u_cur" "$u_wrn" "$ui_max"
                         printf "\n"
                         print_success "Minimum setpoint updated to ${val}°C (System & UI)."
-                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be a number and ≤ Fan-On ($u_cur°C)"
@@ -4905,7 +4932,6 @@ manage_fan_settings() {
                         sync_system_and_ui "$u_min" "$val" "$u_wrn" "$ui_max"
                         printf "\n"
                         print_success "Fan-On setpoint updated"
-                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be between Min ($u_min°C) and Max ($ui_max°C)"
@@ -4920,7 +4946,6 @@ manage_fan_settings() {
                         sync_system_and_ui "$u_min" "$u_cur" "$val" "$ui_max"
                         printf "\n"
                         print_success "Warning setpoint updated"
-                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be between Min ($u_min°C) and Max ($ui_max°C)"
@@ -4941,7 +4966,6 @@ manage_fan_settings() {
                         sync_system_and_ui "$u_min" "$u_cur" "$u_wrn" "$val"
                         printf "\n"
                         print_success "Max setpoint updated to ${val}°C."
-                        print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
                     else
                         printf "\n"
                         print_error "Must be between Fan-On ($u_cur°C) and 120°C"
@@ -4950,9 +4974,24 @@ manage_fan_settings() {
                 7)
                     print_warning "Restoring to Factory Defaults"
                     reset_to_factory
+                    glwebui_disable fan   # drop the fan app-bundle patch, re-paint terminal/switch if active
+                    glpersist_is_on fan && glpersist_disable fan   # nothing left to persist
                     printf "\n"
                     print_success "Factory defaults restored."
-                    print_info "Hard-refresh the admin panel (Ctrl/Cmd-Shift-R) to see it - a plain reload may serve the cached copy."
+                    press_any_key; clear ;;
+                8)
+                    if ! glwebui_is_on fan; then
+                        print_warning "Set a fan value first so the Web-UI patch is active, then enable persistence."
+                        press_any_key; clear; continue
+                    fi
+                    if glpersist_is_on fan; then
+                        glpersist_disable fan
+                        _persist_msg off "fan control"
+                    elif glpersist_enable fan; then
+                        _persist_msg on "fan control"
+                    else
+                        print_error "Could not enable persistence (no installable toolkit copy found)."
+                    fi
                     press_any_key; clear ;;
                 0) return ;;
                 \?|h|H|❓) show_fan_help; clear; continue ;;
@@ -5936,6 +5975,471 @@ manage_netlimit() {
     done
 }
 
+# ============================================================================
+# Switch-Position Indicator (Web-UI overlay + GPIO backend)
+# ----------------------------------------------------------------------------
+# Shows which way the physical toggle switch is flipped, right on the stock
+# Toggle Button Settings page. Backend = a tiny Procd poller publishing the
+# position to /www/gl-switchpos.json; frontend = a glwebui overlay that paints
+# the active side green. See [[webui-switch-position-indicator-backlog]].
+# ============================================================================
+SWITCH_NODE="/proc/gl-hw-info/switch-button"
+SWITCH_JSON="/www/gl-switchpos.json"
+SWITCH_DAEMON="/usr/bin/gl_switchpos"
+SWITCH_INIT="/etc/init.d/gl_switchpos"
+
+_switch_supported() { [ -n "$(cat "$SWITCH_NODE" 2>/dev/null)" ]; }   # procfs reports size 0, so check content
+
+# Locate the switch's line in debugfs. The number in /proc/gl-hw-info/switch-button is
+# NOT reliably the kernel's global GPIO number shown here (MT1300 reports gpio-16 but the
+# kernel line is gpio-496; MT3000 reports 455 vs 512; only MT3600BE happens to match). Every
+# model labels the line "switch", so match on THAT, and fall back to the reported number.
+_switch_dbgline() {
+    local g line
+    line=$(grep -i 'switch' /sys/kernel/debug/gpio 2>/dev/null | grep -iE ' (hi|lo) ' | head -n 1)
+    [ -n "$line" ] && { printf '%s\n' "$line"; return 0; }
+    g=$(grep -oE '[0-9]+' "$SWITCH_NODE" 2>/dev/null | head -n 1)
+    [ -n "$g" ] && grep -E "gpio-$g " /sys/kernel/debug/gpio 2>/dev/null | head -n 1
+}
+
+# _switch_gpio -> the kernel GPIO number actually read (from the matched line), or the
+# number GL reports if debugfs can't be read. For display only.
+_switch_gpio() {
+    local n; n=$(_switch_dbgline | grep -oE 'gpio-[0-9]+' | grep -oE '[0-9]+' | head -n 1)
+    [ -n "$n" ] && { printf '%s' "$n"; return 0; }
+    grep -oE '[0-9]+' "$SWITCH_NODE" 2>/dev/null | head -n 1
+}
+
+# _switch_raw -> 0 (physical low) | 1 (physical high); non-zero return if unreadable.
+# The physical line level is the switch's position; per-model orientation is handled by
+# the LEFT/RIGHT swap, not here.
+_switch_raw() {
+    local line; line=$(_switch_dbgline); [ -n "$line" ] || return 1
+    case "$line" in
+        *" hi "*) echo 1; return 0 ;;
+        *" lo "*) echo 0; return 0 ;;
+    esac
+    return 1
+}
+
+# _switch_pos -> LEFT|RIGHT, derived the way GL's webUI labels the two slots: LEFT is the
+# function's ON (pressed) position, RIGHT is OFF (released). So it maps the LOGICAL state
+# (physical XOR active-low), NOT the raw physical level - guess-free, and always consistent
+# with the on/off state. Non-zero return if unreadable.
+_switch_pos() {
+    local raw logical; raw=$(_switch_raw) || return 1
+    if _switch_active_low; then logical=$((1 - raw)); else logical=$raw; fi
+    [ "$logical" = 1 ] && echo LEFT || echo RIGHT
+}
+
+# _switch_vpn_name -> GL's display name for a VPN tunnel_id (the switch's sub_func when
+# func=vpn). GL stores the name alongside the id in route_policy.@rule[] (tunnel_id 1180 ->
+# name "Tunnel 3"), so resolve it there instead of showing the raw id. Empty if not found.
+_switch_vpn_name() {
+    local tid="$1" i=0 t
+    while t=$(uci -q get "route_policy.@rule[$i].tunnel_id" 2>/dev/null); do
+        [ "$t" = "$tid" ] && { uci -q get "route_policy.@rule[$i].name" 2>/dev/null; return 0; }
+        i=$((i + 1)); [ "$i" -gt 50 ] && break
+    done
+    return 1
+}
+
+# _switch_func -> the action the switch is assigned to in GL's config (the stock
+# "Toggle Button Function"), as a friendly name, or "None" when unset. The sub_func is
+# resolved the way GL's webUI resolves it (a VPN tunnel_id -> its "Tunnel N" name).
+_switch_func() {
+    local f s t
+    f=$(uci -q get switch-button.@main[0].func 2>/dev/null)
+    s=$(uci -q get switch-button.@main[0].sub_func 2>/dev/null)
+    case "$f" in
+        wireguard)   f="WireGuard" ;;
+        openvpn)     f="OpenVPN" ;;
+        vpn)         f="VPN" ;;
+        tor)         f="Tor" ;;
+        adguardhome) f="AdGuard Home" ;;
+        repeater)    f="Repeater" ;;
+        cellular)    f="Cellular" ;;
+        wifi)        f="Wi-Fi" ;;
+        led)         f="LED" ;;
+        "")          echo "None"; return 0 ;;
+    esac
+    if [ "$f" = "VPN" ] && [ -n "$s" ]; then
+        t=$(_switch_vpn_name "$s")
+        [ -n "$t" ] && f="VPN ($t)" || f="VPN (tunnel $s)"
+    else
+        case "$s" in "") ;; main_wifi) f="$f (main)" ;; guest_wifi) f="$f (guest)" ;; *) f="$f ($s)" ;; esac
+    fi
+    echo "$f"
+}
+
+# _switch_active_low -> true when the switch GPIO is ACTIVE LOW. This VARIES by model
+# (MT1300 / MG1300 are active-low; MT3000 / MT3600BE are not), so it must be read, not
+# assumed - read straight from the debugfs line's flag.
+_switch_active_low() { _switch_dbgline 2>/dev/null | grep -qi 'ACTIVE LOW'; }
+
+# _switch_state -> ON|OFF : the LOGICAL switch state - the same value GL's own button
+# handler (/etc/rc.button/switch) acts on. The kernel delivers pressed(1)/released(0),
+# which is the physical level XOR the GPIO's active-low flag; pressed = function ON. This
+# is GL's derivation basis, not a guess, and it is why the raw physical level alone was
+# wrong across models. Independent of the cosmetic LEFT/RIGHT label. Non-zero return (no
+# output) when no function is assigned or the GPIO is unreadable.
+_switch_state() {
+    [ -n "$(uci -q get switch-button.@main[0].func 2>/dev/null)" ] || return 1
+    local raw logical; raw=$(_switch_raw) || return 1
+    if _switch_active_low; then logical=$((1 - raw)); else logical=$raw; fi
+    [ "$logical" = 1 ] && echo ON || echo OFF
+}
+
+_switch_service_running() { pgrep -f "$SWITCH_DAEMON" >/dev/null 2>&1; }
+# Installed = the overlay is registered AND its backend service is up.
+_switch_installed() { glwebui_is_on switch && _switch_service_running; }
+
+# Enable + start the poller and wait until it publishes a position. 0 on success. Wrapped
+# by spin_run in the install path so the wait shows a spinner and resolves to success/error.
+_switch_start_service() {
+    "$SWITCH_INIT" enable  >/dev/null 2>&1
+    "$SWITCH_INIT" restart >/dev/null 2>&1
+    local i
+    for i in 1 2 3 4 5; do
+        _switch_service_running && [ -f "$SWITCH_JSON" ] && return 0
+        sleep 1
+    done
+    return 1
+}
+
+# Stop + disable the poller and remove its files. Wrapped by spin_run in the remove path.
+_switch_stop_service() {
+    [ -f "$SWITCH_INIT" ] && { "$SWITCH_INIT" stop >/dev/null 2>&1; "$SWITCH_INIT" disable >/dev/null 2>&1; }
+    rm -f "$SWITCH_INIT" "$SWITCH_DAEMON" "$SWITCH_JSON"
+}
+
+# ---- Set the toggle-button function (mirrors GL's Toggle Button Settings dropdown) --------
+# _switch_gl_funcs -> the functions GL supports on THIS device, from its own handlers in
+# /etc/gl-switch.d/. When the consolidated "vpn" handler exists, the wireguard/openvpn
+# handlers are its backends (GL's webUI shows one "VPN" entry + a tunnel picker) so hide
+# them; on models without vpn.sh (e.g. MT1300) they ARE the VPN options, so show them.
+_switch_gl_funcs() {
+    local d f has_vpn=0
+    [ -e /etc/gl-switch.d/vpn.sh ] && has_vpn=1
+    for d in /etc/gl-switch.d/*.sh; do
+        [ -e "$d" ] || continue
+        f=$(basename "$d" .sh)
+        [ "$has_vpn" = 1 ] && case "$f" in wireguard|openvpn) continue ;; esac
+        echo "$f"
+    done
+}
+
+_switch_func_label() {
+    case "$1" in
+        none) echo "No Function (clear)" ;;   wireguard) echo "WireGuard" ;;
+        openvpn) echo "OpenVPN" ;;            vpn) echo "VPN" ;;
+        tor) echo "Tor" ;;                    adguardhome) echo "AdGuard Home" ;;
+        repeater) echo "Repeater" ;;          wifi) echo "Wi-Fi" ;;
+        led) echo "LED" ;;                    cellular) echo "Cellular" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+# is <func> one of GL's handlers on this device?
+_switch_has_func() { _switch_gl_funcs | grep -qx "$1"; }
+
+# guest Wi-Fi present? (any AP iface on the guest network)
+_switch_has_guest_wifi() {
+    local i=0 net
+    while uci -q get "wireless.@wifi-iface[$i]" >/dev/null 2>&1; do
+        net=$(uci -q get "wireless.@wifi-iface[$i].network" 2>/dev/null)
+        [ "$net" = guest ] && return 0
+        i=$((i + 1)); [ "$i" -gt 30 ] && break
+    done
+    return 1
+}
+
+# Assign what the physical switch does. Printed INLINE (this is the execution of the parent
+# menu's option, not a new screen) so the parent STATUS stays visible above. One flat list:
+# selectable leaves are numbered; VPN / Wi-Fi are unnumbered group headers with numbered
+# children; empty groups are omitted. Each selectable line maps to "func|subid" so a single
+# numeric pick resolves both. Writes uci switch-button; GL applies it on the next flip/reboot.
+_switch_set_function() {
+    local n=0 f choice sel subid ti tid tname vpnhdr=0 pick
+    print_info "Assign the switch's function:"
+    for f in none $(_switch_gl_funcs); do
+        case "$f" in vpn|wifi) continue ;; esac
+        n=$((n + 1)); eval "SWF_${n}=\"$f|\""
+        printf "   %s. %s\n" "$n" "$(_switch_func_label "$f")"
+    done
+    if _switch_has_func vpn; then
+        ti=0
+        while tid=$(uci -q get "route_policy.@rule[$ti].tunnel_id" 2>/dev/null); do
+            tname=$(uci -q get "route_policy.@rule[$ti].name" 2>/dev/null)
+            [ "$vpnhdr" = 0 ] && { printf "   VPN\n"; vpnhdr=1; }
+            n=$((n + 1)); eval "SWF_${n}=\"vpn|$tid\""
+            printf "      %s. %s\n" "$n" "${tname:-tunnel $tid}"
+            ti=$((ti + 1)); [ "$ti" -gt 50 ] && break
+        done
+    fi
+    if _switch_has_func wifi; then
+        printf "   Wi-Fi\n"
+        n=$((n + 1)); eval "SWF_${n}=\"wifi|main_wifi\""; printf "      %s. Main Wi-Fi\n" "$n"
+        _switch_has_guest_wifi && { n=$((n + 1)); eval "SWF_${n}=\"wifi|guest_wifi\""; printf "      %s. Guest Wi-Fi\n" "$n"; }
+    fi
+    [ "$n" -eq 0 ] && { print_warning "No assignable functions found on this device."; press_any_key; return; }
+    printf "\nChoose function [1-%s/0]: " "$n"; read -r choice; printf "\n"
+    case "$choice" in 0|"") return ;; *[!0-9]*) print_error "Invalid choice"; sleep 1; return ;; esac
+    { [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; } || { print_error "Out of range"; sleep 1; return; }
+    eval "pick=\$SWF_${choice}"
+    sel=${pick%%|*}; subid=${pick#*|}
+
+    # A Wi-Fi assignment can drop your own management path when the switch is flipped - confirm.
+    if [ "$sel" = wifi ]; then
+        print_warning "This makes the switch toggle Wi-Fi - a physical flip can drop the Wi-Fi you\nmanage the router over."
+        printf "Assign it anyway? [y/N]: "; read -r choice; printf "\n"
+        case "$choice" in y|Y) : ;; *) print_info "Cancelled - function unchanged."; press_any_key; return ;; esac
+    fi
+
+    if [ "$sel" = none ]; then
+        uci -q delete switch-button.@main[0].func 2>/dev/null
+        uci -q delete switch-button.@main[0].sub_func 2>/dev/null
+    else
+        uci set switch-button.@main[0].func="$sel"
+        if [ -n "$subid" ]; then uci set switch-button.@main[0].sub_func="$subid"; else uci -q delete switch-button.@main[0].sub_func 2>/dev/null; fi
+    fi
+    uci commit switch-button
+    print_success "Toggle button function set to: $(_switch_func)."
+    print_info "Takes effect the next time the switch is flipped (or on reboot)."
+    press_any_key
+}
+
+# Write the backend poller + its Procd init script.
+_switch_write_backend() {
+    cat << 'DAEMONEOF' > "$SWITCH_DAEMON"
+#!/bin/sh
+# gl_switchpos - poll the physical switch GPIO and publish LEFT/RIGHT to a static
+# JSON the injected admin-panel indicator fetches. Writes ONLY on change (a physical
+# switch moves rarely), so flash wear is negligible. Installed by glinet_utils.
+NODE=/proc/gl-hw-info/switch-button
+OUT=/www/gl-switchpos.json
+# Match the switch line by its "switch" LABEL - the number in $NODE is not reliably the
+# kernel's global gpio number in debugfs (varies by model). Fall back to the number.
+gpio=$(grep -oE '[0-9]+' "$NODE" 2>/dev/null | head -n 1)
+last=""
+while :; do
+    raw=""
+    line=$(grep -i 'switch' /sys/kernel/debug/gpio 2>/dev/null | grep -iE ' (hi|lo) ' | head -n 1)
+    [ -n "$line" ] || line=$(grep -E "gpio-$gpio " /sys/kernel/debug/gpio 2>/dev/null | head -n 1)
+    case "$line" in
+        *" hi "*) raw=1 ;;
+        *" lo "*) raw=0 ;;
+    esac
+    if [ -n "$raw" ]; then
+        # Publish the SLOT the way GL labels it: logical pressed (physical XOR active-low)
+        # = ON = LEFT slot; released = OFF = RIGHT slot. Matches the toolkit's _switch_pos.
+        case "$line" in *"ACTIVE LOW"*) logical=$((1 - raw)) ;; *) logical=$raw ;; esac
+        [ "$logical" = 1 ] && pos=left || pos=right
+        if [ "$pos" != "$last" ]; then
+            printf '{"pos":"%s","raw":%s,"logical":%s,"gpio":%s,"ts":%s}\n' "$pos" "$raw" "$logical" "$gpio" "$(date +%s 2>/dev/null)" > "$OUT"
+            last="$pos"
+        fi
+    fi
+    sleep 3
+done
+DAEMONEOF
+    chmod +x "$SWITCH_DAEMON"
+    cat << 'INITEOF' > "$SWITCH_INIT"
+#!/bin/sh /etc/rc.common
+# gl_switchpos backend for the glinet_utils Switch-Position indicator.
+START=96
+STOP=10
+USE_PROCD=1
+start_service() {
+    procd_open_instance
+    procd_set_param command /usr/bin/gl_switchpos
+    procd_set_param respawn
+    procd_close_instance
+}
+INITEOF
+    chmod +x "$SWITCH_INIT"
+}
+
+show_switch_indicator_help() {
+    show_paged "Switch Position Indicator - Help" << 'HELPEOF'
+Switch Position Indicator – Quick Help
+
+What it does
+────────────
+Many GL.iNet routers have a physical toggle / slide switch. The stock admin panel's
+Toggle Button Settings page lets you ASSIGN a function to it, but never shows which
+way it is actually flipped. This overlay fills that gap: on that page it fills the
+currently-selected side's toggle GREEN, greens its LEFT/RIGHT label, and tags it
+"current position". The overlay itself never moves the switch or changes a setting;
+option 3 below lets you ASSIGN the switch's function, the same as GL's own page.
+
+The STATUS lines
+────────────────
+• Hardware: whether this model has a switch (and the GPIO it uses).
+• Position: which side the switch is on now (LEFT / RIGHT). Derived the way GL labels
+  the two slots - LEFT = the function's ON (pressed) side, RIGHT = OFF (released) -
+  from the logical state (GPIO level XOR active-low), not a raw guess.
+• Toggle function: what the switch is set to DO, read from GL's own config (e.g.
+  WireGuard, VPN, Tor) - "None" if none is assigned. When a function IS assigned it
+  also shows (ON)/(OFF): the same logical pressed/released state GL's own button
+  handler acts on, derived the way GL derives it.
+• Web-UI overlay: whether the green indicator is currently injected into the panel.
+• Live updates: whether the background reader is running so the panel's indicator
+  stays current when you flip the switch (ON = live, OFF = it would go stale).
+• Persistence: whether the indicator is re-applied automatically after a firmware
+  update (ENABLED) or would need a manual re-install (DISABLED). See option 4.
+
+How it works
+────────────
+• Backend (gl_switchpos): a tiny Procd service reads the switch GPIO and publishes
+  the position to /www/gl-switchpos.json (only on change - negligible flash wear).
+  That is the "Live updates" line above.
+• Frontend (JS overlay): the shared glwebui registry appends a small script to the
+  admin-panel bundle that polls that file and paints the active side. It draws only
+  on the Toggle Button Settings page.
+
+Options
+───────
+• Install in Web-UI: writes + starts the backend service and injects the overlay.
+  Once installed this option reads "Reinstall / re-apply overlay" - handy after a
+  firmware upgrade resets the panel; it re-applies without a fresh install.
+• Remove from Web-UI: removes the overlay and stops/removes the backend service.
+• Set toggle button function: assign what the switch does (No Function, Repeater,
+  Wi-Fi, a VPN tunnel, LED, ...). The choices come from GL's own handlers + tunnel
+  list - the same set as GL's Toggle Button Settings dropdown. It takes effect on
+  the next flip / reboot (GL's behavior), so nothing toggles the moment you set it.
+  Assigning Wi-Fi warns first, since a flip can then drop the Wi-Fi you manage over.
+• Enable persistence: keep the indicator across firmware updates. A firmware upgrade
+  wipes the overlay; with persistence on, a small boot service re-applies it from the
+  new firmware's bundle on first boot, and the result is shown on the next launch. If
+  the new firmware changed the panel so the overlay no longer fits, it is left stock
+  (never corrupted) and reported as unable to restore.
+
+Coexists with other Web-UI tweaks
+─────────────────────────────────
+The Web-UI Terminal button, the Fan slider range, and this indicator all paint the
+same admin-panel bundle. The shared registry re-applies every ACTIVE overlay from
+the pristine bundle on each change, so installing or removing one never wipes the
+others.
+
+Notes
+─────
+• Install/remove appears on your next visit to the panel - no refresh needed
+  (the toolkit re-hashes the bundle so the browser fetches it fresh).
+• The overlay survives a reboot; a firmware UPGRADE resets the panel. Turn on
+  "Enable persistence" (option 4) to have it re-applied automatically, or re-install
+  by hand after upgrading (same as the other Web-UI tweaks).
+HELPEOF
+}
+
+manage_switch_indicator() {
+    local sw_choice sup pos inj svc _fn _st _fnval l1 l2 per
+    while true; do
+        clear
+        print_centered_header "Switch Position Indicator"
+
+        if _switch_supported; then sup="${GREEN}DETECTED${RESET} ${GREY}(gpio-$(_switch_gpio))${RESET}"; else sup="${RED}NOT DETECTED${RESET}"; fi
+        glwebui_is_on switch && inj="${GREEN}ENABLED${RESET}" || inj="${YELLOW}DISABLED${RESET}"
+        _switch_service_running && svc="${GREEN}ON${RESET}" || svc="${RED}OFF${RESET}"
+        glpersist_is_on switch && per="${GREEN}ENABLED${RESET}" || per="${YELLOW}DISABLED${RESET}"
+
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        printf "   %-18s %b\n" "Hardware:" "$sup"
+        if _switch_supported; then
+            pos=$(_switch_pos 2>/dev/null)
+            if [ -n "$pos" ]; then printf "   %-18s %b\n" "Position:" "${WHITE}${pos}${RESET}"; else printf "   %-18s %b\n" "Position:" "${GREY}UNKNOWN${RESET}"; fi
+            _fn=$(_switch_func); _st=$(_switch_state 2>/dev/null)
+            if [ "$_st" = ON ]; then _fnval="${WHITE}${_fn}${RESET} ${GREEN}(ON)${RESET}"
+            elif [ "$_st" = OFF ]; then _fnval="${WHITE}${_fn}${RESET} ${GREY}(OFF)${RESET}"
+            else _fnval="${WHITE}${_fn}${RESET}"; fi
+            printf "   %-18s %b\n" "Toggle function:" "$_fnval"
+            printf "   %-18s %b\n" "Web-UI overlay:" "$inj"
+            printf "   %-18s %b\n" "Live updates:" "$svc"
+            printf "   %-18s %b\n" "Persistence:" "$per"
+        fi
+        printf "\n"
+
+        if ! _switch_supported; then
+            print_warning "This model has no physical toggle switch, so a position indicator can't be shown."
+            printf "%s%sBack\n" "$N0" "$NSEP"
+            printf "%s Help\n" "$NQ"
+            printf "\nChoose [0/?]: "
+            read -r sw_choice; printf "\n"
+            case "$sw_choice" in 0) return ;; \?|h|H|❓) show_switch_indicator_help ;; *) : ;; esac
+            continue
+        fi
+
+        if _switch_installed; then l1="Reinstall / re-apply overlay"; else l1="Install in Web-UI"; fi
+        if glpersist_is_on switch; then l2="Disable persistence"; else l2="Enable persistence"; fi
+        printf "%s%s%s\n" "$N1" "$NSEP" "$l1"
+        printf "%s%sRemove from Web-UI\n" "$N2" "$NSEP"
+        printf "%s%sSet toggle button function\n" "$N3" "$NSEP"
+        printf "%s%s%s\n" "$N4" "$NSEP" "$l2"
+        printf "%s%sBack\n" "$N0" "$NSEP"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-4/0/?]: "
+        read -r sw_choice; printf "\n"
+
+        case "$sw_choice" in
+            1)
+                if [ -z "$(glwebui_appjs)" ] || [ -z "$(ls /rom/www/js/app.*.js.gz 2>/dev/null)" ]; then
+                    print_error "Admin-panel bundle or its ROM base was not found; can't inject."
+                    press_any_key; continue
+                fi
+                if _switch_installed; then print_info "Already installed - re-applying the overlay and backend."; printf "\n"; fi
+                mkdir -p /etc/glinet_utils
+                _switch_write_backend
+                if ! spin_run "Starting switch-position backend service" _switch_start_service; then
+                    print_error "The backend service did not start or did not publish a position."
+                    print_info "Check ${GREY}logread | grep gl_switchpos${RESET} and whether ${GREY}$SWITCH_JSON${RESET} exists."
+                    press_any_key; continue
+                fi
+                spin_run "Patching Web-UI overlay into the admin panel" glwebui_enable switch
+                if glwebui_is_on switch && zcat "$(glwebui_appjs)" 2>/dev/null | grep -q "gl-switchpos-ind"; then
+                    print_success "Switch-position indicator $([ "$l1" = "Install in Web-UI" ] && echo installed || echo re-applied) (position now: $(_switch_pos))."
+                else
+                    print_error "The overlay did not take - the admin-panel bundle may lack a ROM base."
+                    press_any_key; continue
+                fi
+                press_any_key ;;
+            2)
+                if ! glwebui_is_on switch && [ ! -f "$SWITCH_INIT" ]; then
+                    print_warning "The switch-position indicator isn't installed - nothing to remove."
+                    press_any_key; continue
+                fi
+                if [ -n "$(glwebui_appjs)" ] && [ -n "$(ls /rom/www/js/app.*.js.gz 2>/dev/null)" ]; then
+                    spin_run "Removing the Web-UI overlay" glwebui_disable switch
+                    print_success "Overlay removed from the Web-UI (terminal/fan re-painted if active)."
+                else
+                    print_warning "ROM base not found; skipped the bundle restore."
+                fi
+                spin_run "Stopping and removing the backend service" _switch_stop_service
+                print_success "Backend service stopped and removed."
+                glpersist_is_on switch && glpersist_disable switch   # nothing left to persist
+                press_any_key ;;
+            3)
+                _switch_set_function ;;
+            4)
+                if ! _switch_installed; then
+                    print_warning "Install the switch-position indicator first, then enable persistence."
+                    press_any_key; continue
+                fi
+                if glpersist_is_on switch; then
+                    glpersist_disable switch
+                    _persist_msg off "the switch position indicator"
+                elif glpersist_enable switch; then
+                    _persist_msg on "the switch position indicator"
+                else
+                    print_error "Could not enable persistence (no installable toolkit copy found)."
+                fi
+                press_any_key ;;
+            0) return ;;
+            \?|h|H|❓) show_switch_indicator_help ;;
+            *) print_error "Invalid choice"; sleep 1 ;;
+        esac
+    done
+}
+
 # --- Web-UI Terminal Manager ---
 show_terminal_help() {
     show_paged "Web Terminal Management - Help" << 'HELPEOF'
@@ -5962,55 +6466,269 @@ How it Works (The Technical Bit):
   router's model (e.g., gl-be3600) from the browser's LocalStorage 
   to match a native macOS/Linux terminal feel.
 
-Usage in this Menu:
-───────────────────
-1. Install & Deploy: Automatically installs the 'ttyd' package, 
-   configures the black-background theme via UCI, starts the service, 
-   and injects the Web UI button.
-2. Disable Service & UI: Stops the background process and reverts the 
-   Admin Panel JS to its original ROM state. The 'ttyd' package 
-   remains installed for quick re-activation.
-3. Completely Uninstall: Stops the service, uninstalls the 'ttyd' 
-   binary, deletes its config, and restores the factory UI.
+Status + actions (the menu is context-aware - it shows only what applies):
+─────────────────────────────────────────────────────────────────────────
+The Web Terminal line shows one of:
+• NOT INSTALLED - the ttyd package isn't installed.
+• DISABLED      - installed, but the terminal is off (the package is kept).
+• ENABLED       - on and running.
+• SERVICE DOWN  - it's on but the ttyd service died (the terminal won't load).
+
+Actions by state:
+• Install and enable - installs the ttyd package, configures it, starts the
+  service, and adds the terminal button. (Shown when NOT INSTALLED.)
+• Enable  - turns it back on (instant - the package is already there).
+• Disable - stops the service and removes the button, but KEEPS the package
+  and config, so re-enabling is instant and lossless.
+• Reinstall - the fix for SERVICE DOWN: reinstalls the package, restarts the
+  service, and re-adds the button. (Shown only when SERVICE DOWN.)
+• Uninstall - removes the ttyd package and its config entirely.
+
+Coexists with other Web-UI tweaks:
+──────────────────────────────────
+The terminal button, the Fan slider range, and the Switch-Position indicator
+all paint the same Admin Panel bundle. They share one injection registry, so
+enabling or disabling the terminal re-paints the others rather than wiping
+them - you no longer need to re-apply Fan settings afterward.
 
 Important UX Notes:
 ────────────────────
-• Hard Refresh: After deploying or disabling, you MUST perform a 
-  "Hard Refresh" (Chrome/Edge/Firefox: Ctrl+F5 or Ctrl/Cmd + Shift + R; Safari:
-  Cmd + Option + R) in your browser. This
-  clears the Nginx cache ( /var/lib/nginx ) and forces the new UI.
+• Auto-refresh: install/disable changes appear the next time you open the admin
+  panel - no manual refresh needed. The toolkit re-hashes the bundle (and clears
+  the Nginx cache) so the browser fetches the new UI on its own.
 • Security: The service is bound to the 'LAN' interface by default. 
   It is not accessible from the WAN (Internet) unless you manually 
   open Port 7681 in the firewall.
-• Persistence: Configuration is handled via UCI (/etc/config/ttyd), 
-  ensuring your terminal settings survive a reboot.
+• Persistence (reboot): terminal settings are stored in UCI (/etc/config/ttyd),
+  so they survive a reboot.
+• Enable persistence (firmware update): a firmware upgrade wipes the Web-UI button.
+  Turn on "Enable persistence" and a small boot service re-applies the button from
+  the new firmware's bundle on first boot, reporting the result on the next launch;
+  if the new panel changed so the button no longer fits it is left stock and reported
+  as unable to restore.
 
-Note: If the icon does not appear after a refresh, ensure "Network 
+Note: If the icon does not appear after a refresh, ensure "Network
 Acceleration" isn't preventing the UI from updating, though the 
 script attempts to force this by clearing the Nginx cache.
 HELPEOF
 }
 
-# _inject_terminal_into <app.js.gz> [proto] [from_rom]
-# Appends the Web-UI terminal button to the app bundle. Guarded against a
-# double injection, so it is safe to call unconditionally.
+# ============================================================================
+# Shared Web-UI injection registry (glwebui_*)
+# ----------------------------------------------------------------------------
+# Several toolkit features paint the SAME admin-panel bundle (/www/js/app.*.js.gz):
+# the Web-UI Terminal button, the Fan slider-range patch, and the Switch-Position
+# indicator. When each edited that file on its own, a feature's "restore from ROM"
+# step silently wiped the others (the old ttyd<->fan collision, patched over with
+# one-directional re-injects).
 #
-# from_rom=1 starts from a pristine ROM copy - the enable path wants a clean
-# base. from_rom=0 appends to the CURRENT file, so the button can be restored
-# on top of another feature's edits to the SAME bundle. That matters because
-# the fan feature also rewrites app.*.js.gz; restoring it from ROM (which both
-# a fan reset and every fan setpoint change do) would otherwise silently wipe
-# this button while the toolkit still reports the terminal as enabled.
-_inject_terminal_into() {
-    _iti_gz="$1"; _iti_proto="${2:-http}"; _iti_fromrom="${3:-0}"
-    [ -n "$_iti_gz" ] || return 1
-    if [ "$_iti_fromrom" = 1 ] && [ -f "/rom$_iti_gz" ]; then
-        cp -f "/rom$_iti_gz" "$_iti_gz"
+# This registry ends the collision. Every install/remove records intent in a small
+# PERSISTENT state dir, then rebuilds the bundle from the pristine ROM copy and
+# re-applies EVERY still-active injector. So whatever is enabled is always painted
+# together and no feature can clobber another.
+#
+#   state dir:  /etc/glinet_utils/webui/<feature>   (file present = active)
+#     ttyd   -> file holds the proto (http|https)
+#     fan    -> file holds "MIN MAX CUR" for the validator/setpoint patch
+#     switch -> empty marker
+#
+# Providers (glwebui_prov_*) operate on an UNCOMPRESSED app.js and must be
+# idempotent (guard on their own marker). glwebui_rebuild owns the gunzip/gzip,
+# the pristine-ROM restore, apply-order and nginx-cache clear.
+# ============================================================================
+GLWEBUI_DIR="/etc/glinet_utils/webui"
+
+# GLWEBUI_APPJS / GLWEBUI_ROM env overrides exist ONLY so the test harness can point
+# the registry at fixture bundles off-router; unset in normal use.
+glwebui_appjs() { [ -n "$GLWEBUI_APPJS" ] && { printf '%s\n' "$GLWEBUI_APPJS"; return 0; }; ls /www/js/app.*.js.gz 2>/dev/null | head -n 1; }
+glwebui_is_on() { [ -f "$GLWEBUI_DIR/$1" ]; }
+
+# glwebui_enable <feature> [data]  /  glwebui_disable <feature>
+glwebui_enable()  { glwebui_migrate; mkdir -p "$GLWEBUI_DIR"; printf '%s' "${2:-}" > "$GLWEBUI_DIR/$1"; glwebui_rebuild; }
+glwebui_disable() { glwebui_migrate; rm -f "$GLWEBUI_DIR/$1"; glwebui_rebuild; }
+
+# One-time migration: ttyd/fan installs made BEFORE this registry existed leave no
+# state file, so seed the state dir from whatever is currently painted into the bundle
+# before the first rebuild - otherwise that rebuild (from pristine ROM) would silently
+# drop the un-registered overlay. Runs once (guarded by a marker file).
+glwebui_migrate() {
+    mkdir -p "$GLWEBUI_DIR"
+    [ -f "$GLWEBUI_DIR/.migrated" ] && return 0
+    local gz rom curv romv fmin fmax fcur
+    gz=$(glwebui_appjs)
+    if [ -n "$gz" ]; then
+        if ! glwebui_is_on ttyd && zcat "$gz" 2>/dev/null | grep -q "term-wrapper"; then
+            printf '%s' "$(grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && echo https || echo http)" > "$GLWEBUI_DIR/ttyd"
+        fi
+        if ! glwebui_is_on switch && zcat "$gz" 2>/dev/null | grep -q "gl-switchpos-ind"; then
+            : > "$GLWEBUI_DIR/switch"
+        fi
+        # fan: if the bundle's global validator range differs from the pristine ROM's, a
+        # fan patch is live - re-register it (params from uci) so the rebuild keeps it.
+        if ! glwebui_is_on fan && [ -f /etc/config/glfan ]; then
+            rom="${GLWEBUI_ROM:-$(ls /rom/www/js/app.*.js.gz 2>/dev/null | head -n 1)}"
+            [ -n "$rom" ] || rom="/rom$gz"
+            if [ -f "$rom" ]; then
+                curv=$(zcat "$gz"  2>/dev/null | grep -oE '[0-9]{1,3}\|\|i<[0-9]{2,3}' | head -n 1)
+                romv=$(zcat "$rom" 2>/dev/null | grep -oE '[0-9]{1,3}\|\|i<[0-9]{2,3}' | head -n 1)
+                if [ -n "$curv" ] && [ "$curv" != "$romv" ]; then
+                    fmin=$(uci -q get glfan.globals.minimum_temperature); : "${fmin:=70}"
+                    fcur=$(uci -q get glfan.globals.temperature);         : "${fcur:=75}"
+                    fmax=$(echo "$curv" | grep -oE '[0-9]{2,3}$'); fmax=$((fmax - 1)); [ "$fmax" -gt 0 ] || fmax=90
+                    printf '%s' "$fmin $fmax $fcur" > "$GLWEBUI_DIR/fan"
+                fi
+            fi
+        fi
     fi
-    zcat "$_iti_gz" 2>/dev/null | grep -q "term-wrapper" && return 0
-    _iti_js="${_iti_gz%.gz}"
-    zcat "$_iti_gz" > "$_iti_js"
-    cat << 'EOF' >> "$_iti_js"
+    touch "$GLWEBUI_DIR/.migrated"
+}
+
+# Rebuild app.*.js.gz from the pristine ROM copy, then apply every active injector
+# in a fixed order: fan seds first (they target GL's untouched minified body), then
+# the appended IIFEs. Refuses if no ROM base exists rather than stacking blindly.
+glwebui_rebuild() {
+    local gz rom js
+    gz=$(glwebui_appjs); [ -n "$gz" ] || return 1
+    rom="${GLWEBUI_ROM:-$(ls /rom/www/js/app.*.js.gz 2>/dev/null | head -n 1)}"
+    [ -n "$rom" ] || rom="/rom$gz"
+    [ -f "$rom" ] || return 1
+    cp -f "$rom" "$gz"
+    js="${gz%.gz}"
+    gunzip -f "$gz"
+    if glwebui_is_on fan; then
+        # shellcheck disable=SC2046
+        set -- $(cat "$GLWEBUI_DIR/fan" 2>/dev/null)
+        glwebui_prov_fan "$js" "${1:-70}" "${2:-90}" "${3:-75}"
+    fi
+    glwebui_is_on ttyd   && glwebui_prov_ttyd   "$js" "$(cat "$GLWEBUI_DIR/ttyd" 2>/dev/null || echo http)"
+    glwebui_is_on switch && glwebui_prov_switch "$js"
+    gzip -f "$js"
+    glwebui_cachebust "$gz"          # rename to a content hash so the browser loads it fresh (no hard-refresh)
+    rm -rf /var/lib/nginx/* 2>/dev/null
+    return 0
+}
+
+# glwebui_cachebust <app.js.gz> - give the just-patched bundle a NEW content-derived hash and
+# repoint the single HTML reference (the SPA entry, e.g. gl_home.html, which is served no-cache
+# and thus always re-fetched) to the new name. Because the filename changes, the browser fetches
+# the patched bundle fresh - no manual hard-refresh - exactly the way a firmware update busts the
+# cache. Our old bug: patching in place kept the same filename, so the browser served the stale
+# cached copy. No-op (leaves the bundle as-is) if it can't find the referencing HTML.
+# GLWEBUI_HOME overrides the entry file for the test harness; unset in normal use.
+glwebui_cachebust() {
+    local gz="$1" dir base oldhash newhash home ref
+    [ -f "$gz" ] || return 0
+    base=$(basename "$gz")
+    case "$base" in app.*.js.gz) : ;; *) return 0 ;; esac
+    dir=$(dirname "$gz")
+    oldhash=${base#app.}; oldhash=${oldhash%.js.gz}
+    newhash=$(md5sum "$gz" 2>/dev/null | cut -c1-8)
+    [ -n "$newhash" ] && [ "$newhash" != "$oldhash" ] || return 0   # unchanged content -> nothing to bust
+    ref="app.$oldhash.js"
+    home="${GLWEBUI_HOME:-$(grep -rl "$ref" /www/*.html 2>/dev/null | head -n 1)}"
+    [ -n "$home" ] && [ -f "$home" ] || return 0                    # can't find the reference -> leave name as-is
+    mv -f "$gz" "$dir/app.$newhash.js.gz"
+    [ -f "$dir/$ref" ] && mv -f "$dir/$ref" "$dir/app.$newhash.js"  # uncompressed twin, if the firmware ships one
+    # temp+mv rewrite (portable across busybox/BSD/GNU - no sed -i, whose in-place flag differs)
+    sed "s|app\.$oldhash\.js|app.$newhash.js|g" "$home" > "$home.gcb.$$" 2>/dev/null && mv "$home.gcb.$$" "$home"
+    return 0
+}
+
+# glwebui_prov_fan <app.js> <min> <max> <cur> - the shared-bundle portion of the
+# fan patch (global validator range + initial-state snap-back guard). The
+# view-file / gl_util / uci parts stay in manage_fan_settings; only this touches
+# the shared app bundle.
+glwebui_prov_fan() {
+    local js="$1" n_min="$2" n_max="$3" n_cur="$4"
+    [ -n "$js" ] || return 1
+    sed -i "s/[0-9]\{1,3\}||i<[0-9]\{2,3\}/${n_min}||i<$((n_max + 1))/g" "$js"
+    sed -i "s/temperature:6[90]/temperature:$n_cur/g" "$js"
+    sed -i "s/temperature:76/temperature:$n_cur/g" "$js"
+}
+
+# glwebui_prov_switch <app.js> - append the Switch-Position indicator IIFE. On the
+# Toggle Button Settings page it fills the physically-selected side's knob green,
+# greens that label, and tags it "current position", reading the live position
+# from /gl-switchpos.json (written by the gl_switchpos backend service).
+glwebui_prov_switch() {
+    local js="$1"
+    [ -n "$js" ] || return 1
+    grep -q "gl-switchpos-ind" "$js" && return 0
+    cat << 'EOF' >> "$js"
+;(function(){
+  // gl-switchpos-ind : glinet_utils Switch-Position indicator
+  if (window.__glSwitchPos) return; window.__glSwitchPos = true;
+  var GREEN = '#22c55e';
+  function sideSpan(side){
+    var s = document.querySelectorAll('span.tips');
+    for (var i=0;i<s.length;i++){ if (s[i].textContent.trim().toUpperCase() === side) return s[i]; }
+    return null;
+  }
+  function paint(labelSpan, on){
+    if (!labelSpan) return;
+    var host = labelSpan.parentElement; if (!host) return;
+    var circle = host.querySelector('svg circle');
+    // Give BOTH sides a tag element (one hidden) so the two columns stay the same
+    // height - otherwise the extra line under the active side lifts its toggle in a
+    // centre-aligned row. visibility:hidden reserves the space without showing text.
+    var tag = host.querySelector('.glsp-tag');
+    if (!tag){
+      tag = document.createElement('div');
+      tag.className = 'glsp-tag';
+      tag.textContent = '▲ current position';
+      tag.style.cssText = 'font-size:11px;font-weight:600;margin-top:6px;text-align:center;white-space:nowrap;letter-spacing:.3px;';
+      host.appendChild(tag);
+    }
+    if (on){
+      if (circle){ circle.style.fill = GREEN; circle.style.transition = 'fill .25s'; }
+      labelSpan.style.color = GREEN; labelSpan.style.fontWeight = '700';
+      tag.style.color = GREEN; tag.style.visibility = 'visible';
+    } else {
+      if (circle){ circle.style.fill = ''; }
+      labelSpan.style.color = ''; labelSpan.style.fontWeight = '';
+      tag.style.visibility = 'hidden';
+    }
+  }
+  var lastPos = null, lastFetch = 0, pending = false;
+  function applyPaint(){
+    if (location.hash.indexOf('btnsettings') === -1) return;
+    if (lastPos !== 'left' && lastPos !== 'right') return;
+    var L = sideSpan('LEFT'), R = sideSpan('RIGHT'); if (!L || !R) return;
+    paint(L, lastPos === 'left'); paint(R, lastPos === 'right');
+  }
+  function tick(force){
+    if (location.hash.indexOf('btnsettings') === -1) return;
+    if (!sideSpan('LEFT') || !sideSpan('RIGHT')) return;
+    applyPaint();                                   // instant repaint from the cached position
+    var now = Date.now();
+    if (!force && now - lastFetch < 700) return;    // throttle network - the observer may call often
+    lastFetch = now;
+    fetch('/gl-switchpos.json?_='+now, {cache:'no-store'})
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){ if (!j || (j.pos !== 'left' && j.pos !== 'right')) return; lastPos = j.pos; applyPaint(); })
+      .catch(function(){});
+  }
+  function schedule(){ if (pending) return; pending = true; requestAnimationFrame(function(){ pending = false; try { tick(); } catch(e){} }); }
+  // Paint the moment GL renders the toggles - a MutationObserver beats waiting for the 1.5s poll
+  // (kills the ~1s "stock screen" flash). Coalesced per frame + throttled fetch so it never storms,
+  // and the cached position lets a re-render repaint instantly (no fetch round-trip).
+  try { new MutationObserver(schedule).observe(document.body || document.documentElement, {childList:true, subtree:true}); } catch(e){}
+  window.addEventListener('hashchange', function(){ try { tick(true); } catch(e){} });
+  setInterval(function(){ try { tick(); } catch(e){} }, 1500);   // live position updates while on the page
+  try { tick(true); } catch(e){}                                 // in case the DOM is already present
+})();
+EOF
+}
+
+# glwebui_prov_ttyd <app.js> [proto] - append the Web-UI Terminal button IIFE.
+# The http->https rewrite is scoped to THIS block (built in a temp, then appended)
+# so it can never touch another injector sharing the bundle.
+glwebui_prov_ttyd() {
+    _iti_js="$1"; _iti_proto="${2:-http}"
+    [ -n "$_iti_js" ] || return 1
+    grep -q "term-wrapper" "$_iti_js" && return 0
+    _iti_tmp="${_iti_js}.ttyd.$$"
+    cat << 'EOF' > "$_iti_tmp"
 ;(function(){
   // Anchor candidates, most to least specific. GL's admin panel markup differs
   // between firmware builds, so binding to a single class means the button
@@ -6166,137 +6884,298 @@ _inject_terminal_into() {
       try { anchor.parentNode.insertBefore(wrapper, anchor); } catch(e2) {}
     }
   };
-  // Retry forever: the panel is a single-page app, so the toolbar is rebuilt on
-  // navigation and the button has to be re-added each time. Errors are contained
-  // per tick so one bad frame cannot stop later attempts.
-  setInterval(() => { try { inject(); } catch(e) {} },1000);
+  // The panel is a single-page app - the toolbar is rebuilt on navigation, so the button
+  // must be re-added each time it re-renders. A MutationObserver adds it the instant the
+  // toolbar appears (kills the ~1s poll-wait flash-in), coalesced per animation frame; the
+  // interval is a safety net. inject() is idempotent (bails if term-wrapper exists) and
+  // error-contained, so calling it often is cheap.
+  function poke(){ try { inject(); } catch(e) {} }
+  var _p = false;
+  function schedule(){ if (_p) return; _p = true; requestAnimationFrame(function(){ _p = false; poke(); }); }
+  try { new MutationObserver(schedule).observe(document.body || document.documentElement, {childList:true, subtree:true}); } catch(e){}
+  setInterval(poke, 1500);   // fallback in case a re-render slips past the observer
+  poke();                    // in case the toolbar is already present
 })();
 EOF
-    [ "$_iti_proto" = "https" ] && sed -i 's|http://|https://|g' "$_iti_js"
-    gzip -c "$_iti_js" > "$_iti_gz"
-    rm -f "$_iti_js"
-    rm -rf /var/lib/nginx/*
+    [ "$_iti_proto" = "https" ] && sed -i 's|http://|https://|g' "$_iti_tmp"
+    cat "$_iti_tmp" >> "$_iti_js"
+    rm -f "$_iti_tmp"
 }
 
-manage_web_terminal() {
-    while true; do
-        clear
-        print_centered_header "Web-UI Terminal Interface"
-        
-        TARGET_GZ=$(ls /www/js/app.*.js.gz | head -n 1)
-        if [ -z "$TARGET_GZ" ]; then
-            print_error "Cannot find target JS file for patching. Exiting"
-            press_any_key
-            return
-        fi
-        
-        # Check Service Status via Procd
-        if pgrep ttyd >/dev/null; then
-            if grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null; then
-                svc_status="${GREEN}RUNNING (HTTPS)${RESET}"
-            else
-                svc_status="${GREEN}RUNNING (HTTP)${RESET}"
-            fi
+# ============================================================================
+# Web-UI tweak persistence across firmware updates
+# ----------------------------------------------------------------------------
+# A firmware update (sysupgrade) empties the overlay and replaces /www, so the
+# three Web-UI overlays (Fan / Web Terminal / Switch indicator) and their
+# backends are wiped. When a feature's persistence is ENABLED, we keep the
+# registry + a tiny boot service on /etc/sysupgrade.conf; on the first boot
+# after /etc/glversion changes, that service calls this toolkit headlessly to
+# RE-APPLY the enabled overlays from the NEW firmware's pristine ROM bundle
+# (glwebui_rebuild already re-bases from /rom). Re-apply is backend-first and
+# FAIL-STOCK per feature: a moved injection anchor leaves the panel stock and
+# is reported as a failure - it never corrupts the freshly-flashed bundle.
+# The result is shown once on the next toolkit launch (_glpersist_show_report).
+# ============================================================================
+GLPERSIST_DIR="/etc/glinet_utils/persist"
+GLPERSIST_INIT="/etc/init.d/glinet_persist"
+GLPERSIST_REPORT="$GLPERSIST_DIR/last_report"
+GLPERSIST_VERFILE="$GLPERSIST_DIR/glversion"
+GLPERSIST_UNSEEN="$GLPERSIST_DIR/.unseen"
+
+glpersist_is_on() { [ -f "$GLPERSIST_DIR/$1" ]; }               # $1 = fan|ttyd|switch
+glpersist_any()   { [ -f "$GLPERSIST_DIR/fan" ] || [ -f "$GLPERSIST_DIR/ttyd" ] || [ -f "$GLPERSIST_DIR/switch" ]; }
+glpersist_curver(){ cat "${GLPERSIST_VERSRC:-/etc/glversion}" 2>/dev/null; }
+
+_glpersist_label() {
+    case "$1" in
+        switch) printf 'switch position indicator' ;;
+        fan)    printf 'fan control' ;;
+        ttyd)   printf 'Web Terminal' ;;
+    esac
+}
+
+# sysupgrade.conf line management (idempotent add / exact-line delete). GLPERSIST_KEEPCONF
+# lets the test harness point at a scratch keep-list; unset in normal use.
+_glpersist_keepconf() { printf '%s' "${GLPERSIST_KEEPCONF:-/etc/sysupgrade.conf}"; }
+_glpersist_keep_add() { local c; c=$(_glpersist_keepconf); [ -f "$c" ] || : > "$c"; grep -qFx "$1" "$c" 2>/dev/null || printf '%s\n' "$1" >> "$c"; }
+# Exact-line delete via grep -vFx + rewrite (portable across busybox/BSD/GNU - no sed -i,
+# whose in-place flag differs between them).
+_glpersist_keep_del() { local c t; c=$(_glpersist_keepconf); [ -f "$c" ] || return 0; t="$c.tmp.$$"; grep -vFx "$1" "$c" > "$t" 2>/dev/null; mv "$t" "$c"; }
+
+# The headless boot service calls the toolkit at INSTALL_PATH, so make sure a real copy
+# lives there (the running script may be /root/...). Guarded by _is_toolkit_file so we never
+# copy a mis-resolved path (see the installer busybox note).
+_glpersist_ensure_toolkit_installed() {
+    _is_toolkit_file "$INSTALL_PATH" && return 0
+    _is_toolkit_file "$SCRIPT_PATH" || return 1
+    cp "$SCRIPT_PATH" "$INSTALL_PATH" 2>/dev/null && chmod +x "$INSTALL_PATH"
+}
+
+_glpersist_install_service() {
+    cat << 'INITEOF' > "$GLPERSIST_INIT"
+#!/bin/sh /etc/rc.common
+# glinet_persist - re-apply glinet_utils Web-UI tweaks (Fan / Web Terminal / Switch
+# indicator) after a firmware update. Runs at boot; the toolkit's headless entrypoint
+# no-ops unless /etc/glversion changed since persistence was last applied. Backgrounded
+# so it never delays boot.
+START=99
+STOP=01
+boot() { start; }
+start() {
+    ( /usr/sbin/glinet_utils --webui-persist-run >/dev/null 2>&1 & )
+}
+INITEOF
+    chmod +x "$GLPERSIST_INIT"
+    "$GLPERSIST_INIT" enable >/dev/null 2>&1
+}
+
+_glpersist_remove_service() {
+    [ -f "$GLPERSIST_INIT" ] && { "$GLPERSIST_INIT" disable >/dev/null 2>&1; rm -f "$GLPERSIST_INIT"; }
+}
+
+# Re-assert every keep-list line this feature-set needs (idempotent). Called on enable and
+# after each re-apply so the NEXT firmware update is covered too.
+_glpersist_reassert_keeplist() {
+    _glpersist_keep_add "$GLWEBUI_DIR"
+    _glpersist_keep_add "$GLPERSIST_DIR"
+    _glpersist_keep_add "$GLPERSIST_INIT"
+    # Keep the rc.d ENABLE symlink too - the init SCRIPT surviving isn't enough, the
+    # S99/K01 symlink is what makes procd run it at boot, and it lives in the overlay
+    # (wiped by a flash). Without this the service comes back DISABLED and never re-applies.
+    # GLPERSIST_RCDIR overrides the rc.d dir for the test harness; unset in normal use.
+    find "${GLPERSIST_RCDIR:-/etc/rc.d}/" -name '[SK]*glinet_persist' 2>/dev/null | while IFS= read -r _l; do _glpersist_keep_add "$_l"; done
+    _glpersist_keep_add "$INSTALL_PATH"
+    if glpersist_is_on ttyd; then
+        _glpersist_keep_add /etc/config/ttyd
+        [ -f /etc/ttyd.crt ] && _glpersist_keep_add /etc/ttyd.crt
+        [ -f /etc/ttyd.key ] && _glpersist_keep_add /etc/ttyd.key
+    fi
+}
+
+# glpersist_enable <feature> - 0 on success, 1 if no installable toolkit copy exists.
+glpersist_enable() {
+    local f="$1"
+    mkdir -p "$GLPERSIST_DIR"
+    _glpersist_ensure_toolkit_installed || return 1
+    touch "$GLPERSIST_DIR/$f"
+    _glpersist_install_service
+    _glpersist_reassert_keeplist
+    glpersist_curver > "$GLPERSIST_VERFILE" 2>/dev/null   # baseline: no spurious re-apply on next reboot
+    return 0
+}
+
+# glpersist_disable <feature> - tears down the shared service + keep-list lines only when
+# the LAST persisted feature is turned off (ref-counted).
+glpersist_disable() {
+    local f="$1"
+    rm -f "$GLPERSIST_DIR/$f"
+    if [ "$f" = ttyd ]; then
+        _glpersist_keep_del /etc/config/ttyd
+        _glpersist_keep_del /etc/ttyd.crt
+        _glpersist_keep_del /etc/ttyd.key
+    fi
+    if ! glpersist_any; then
+        # strip the rc.d symlink keep-line(s) BEFORE remove_service deletes the symlinks
+        # (dir-agnostic: matches the S99/K01 symlink line wherever it lives)
+        local c; c=$(_glpersist_keepconf)
+        [ -f "$c" ] && { grep -v '/[SK][0-9]*glinet_persist$' "$c" > "$c.t.$$" 2>/dev/null && mv "$c.t.$$" "$c"; }
+        _glpersist_remove_service
+        _glpersist_keep_del "$GLPERSIST_INIT"
+        _glpersist_keep_del "$GLWEBUI_DIR"
+        _glpersist_keep_del "$GLPERSIST_DIR"
+        rm -f "$GLPERSIST_VERFILE"
+        # INSTALL_PATH is left on the keep list - Toolkit Management persistence owns it.
+    fi
+    return 0
+}
+
+# Did feature $1's overlay actually land in the live bundle? Best-effort honesty signal for
+# the report - the runtime-anchored ttyd/switch injectors can still be inert if GL moved the
+# DOM anchor, but a present marker is the strongest thing measurable server-side.
+# gzip -dc (not zcat): busybox and GNU read .gz identically, but macOS zcat (the e2e host)
+# is legacy compress and cannot - so gzip -dc keeps this function testable off-router.
+_glwebui_marker_present() {
+    local gz; gz=$(glwebui_appjs); [ -n "$gz" ] || return 1
+    case "$1" in
+        switch) gzip -dc "$gz" 2>/dev/null | grep -q gl-switchpos-ind ;;
+        ttyd)   gzip -dc "$gz" 2>/dev/null | grep -q term-wrapper ;;
+        fan)    local cur rom romv
+                cur=$(gzip -dc "$gz" 2>/dev/null | grep -oE '[0-9]{1,3}\|\|i<[0-9]{2,3}' | head -n 1)
+                rom="${GLWEBUI_ROM:-$(ls /rom/www/js/app.*.js.gz 2>/dev/null | head -n 1)}"; [ -n "$rom" ] || rom="/rom$gz"
+                romv=$(gzip -dc "$rom" 2>/dev/null | grep -oE '[0-9]{1,3}\|\|i<[0-9]{2,3}' | head -n 1)
+                [ -n "$cur" ] && [ "$cur" != "$romv" ] ;;
+        *) return 1 ;;
+    esac
+}
+
+# _glpersist_reapply_all <oldver> <newver> - backend-first, fail-stock re-apply of every
+# ENABLED feature, writing a per-feature result to the report file.
+_glpersist_reapply_all() {
+    local oldv="$1" newv="$2" rmin rmax rcur umin ucur uwrn
+    mkdir -p "$GLPERSIST_DIR"
+    : > "$GLPERSIST_REPORT"
+    printf 'ver|%s|%s\n' "$oldv" "$newv" >> "$GLPERSIST_REPORT"
+
+    # --- backends first (independent of the shared bundle) ---
+    if glpersist_is_on switch; then
+        glwebui_is_on switch || : > "$GLWEBUI_DIR/switch"
+        _switch_write_backend
+        _switch_start_service
+    fi
+    if glpersist_is_on ttyd; then
+        glwebui_is_on ttyd || printf 'http' > "$GLWEBUI_DIR/ttyd"
+        command -v ttyd >/dev/null 2>&1 || install_package ttyd >/dev/null 2>&1
+        [ -x /etc/init.d/ttyd ] && { /etc/init.d/ttyd enable >/dev/null 2>&1; /etc/init.d/ttyd restart >/dev/null 2>&1; }
+    fi
+    if glpersist_is_on fan; then
+        set -- $(cat "$GLWEBUI_DIR/fan" 2>/dev/null); rmin="${1:-70}"; rmax="${2:-90}"; rcur="${3:-75}"
+        umin=$(uci -q get glfan.globals.minimum_temperature); : "${umin:=$rmin}"
+        ucur=$(uci -q get glfan.globals.temperature);         : "${ucur:=$rcur}"
+        uwrn=$(uci -q get glfan.globals.warn_temperature);    : "${uwrn:=$ucur}"
+        _fan_apply "$umin" "$ucur" "$uwrn" "$rmax"
+    fi
+
+    # --- one rebuild re-applies every active overlay from the new ROM base ---
+    glwebui_rebuild
+
+    # --- verify + record per feature (fail = left stock) ---
+    if glpersist_is_on switch; then
+        if _switch_service_running && _glwebui_marker_present switch; then
+            printf 'switch|ok\n' >> "$GLPERSIST_REPORT"
         else
-            svc_status="${RED}STOPPED${RESET}"
+            printf 'switch|fail\n' >> "$GLPERSIST_REPORT"
         fi
-        
-        zcat "$TARGET_GZ" 2>/dev/null | grep -q "term-wrapper" && inj_status="${GREEN}ENABLED${RESET}" || inj_status="${YELLOW}DISABLED${RESET}"
+    fi
+    if glpersist_is_on fan; then
+        if _glwebui_marker_present fan; then printf 'fan|ok\n'; else printf 'fan|fail\n'; fi >> "$GLPERSIST_REPORT"
+    fi
+    if glpersist_is_on ttyd; then
+        if _glwebui_marker_present ttyd; then printf 'ttyd|ok\n'; else printf 'ttyd|fail\n'; fi >> "$GLPERSIST_REPORT"
+    fi
 
-        # Read the port from config rather than assuming 7681 - it is a uci
-        # option and a user may well have changed it.
-        ttyd_port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${ttyd_port:=7681}"
-        grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_url_proto="https" || ttyd_url_proto="http"
-        ttyd_lan_ip=$(get_lan_ip 2>/dev/null)
+    _glpersist_reassert_keeplist
+    rm -rf /var/lib/nginx/* 2>/dev/null
+    return 0
+}
 
-        printf " %b\n" "${CYAN}STATUS${RESET}"
-        printf "   ttyd Service:   %b\n" "$svc_status"
-        printf "   Web UI Button:  %b\n" "$inj_status"
-        # The button depends on the admin panel's markup, which differs between
-        # firmware builds; the direct URL always works when the service is up, so
-        # show it rather than leaving the terminal unreachable if the button is
-        # missing.
-        if pgrep ttyd >/dev/null 2>&1 && [ -n "$ttyd_lan_ip" ]; then
-            printf "   Direct URL:     %b\n\n" "${CYAN}${ttyd_url_proto}://${ttyd_lan_ip}:${ttyd_port}${RESET}"
-        else
-            printf "   Direct URL:     %b\n\n" "${GREY}(service not running)${RESET}"
-        fi
-        
-        printf "%s%sEnable Web-UI Terminal\n" "$N1" "$NSEP"
-        printf "%s%sDisable Web-UI Terminal\n" "$N2" "$NSEP"
-        printf "%s%sCompletely Uninstall\n" "$N3" "$NSEP"
-        printf "%s%sBack\n" "$N0" "$NSEP"
-        printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-3/0/?]: "
-        read -r term_choice
-        printf "\n"
-        
-        case $term_choice in
-            1)
-                ttyd_proto="http"
-                hash -r
-                if pgrep ttyd >/dev/null; then
-                    if [ "$inj_status" = "${GREEN}ENABLED${RESET}" ]; then
-                         print_warning "Web-UI Terminal is already running and patched."
-                         press_any_key
-                         continue
-                    else
-                         grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && ttyd_proto="https"
-                         print_warning "Web-UI Terminal service is running but UI is not patched. Re-patching"
-                    fi
-                else
-                    if ! command -v ttyd >/dev/null 2>&1; then
-                        install_package ttyd
-                    fi
+# _glpersist_wiped - true if any PERSISTED feature's overlay is not currently applied (marker
+# gone from the live bundle, or the switch daemon down). This is the ground-truth "the panel
+# was reset" signal - it catches a same-version factory reset / reflash that a glversion check
+# would miss. Safe because of the invariant that removing an overlay also disables its
+# persistence, so "persisted but missing" always means the firmware wiped it (never the user).
+_glpersist_wiped() {
+    if glpersist_is_on switch; then
+        _glwebui_marker_present switch || return 0
+        _switch_service_running || return 0
+    fi
+    if glpersist_is_on fan;  then _glwebui_marker_present fan  || return 0; fi
+    if glpersist_is_on ttyd; then _glwebui_marker_present ttyd || return 0; fi
+    return 1
+}
 
-                    print_info "Configuring ttyd service"
-                    printf "\n"
+# _glpersist_run - the headless entrypoint the boot service calls. Re-applies when the firmware
+# version changed OR a persisted overlay is missing (a same-version reset wipes the panel without
+# bumping glversion); a normal reboot leaves markers in place and is a cheap no-op.
+_glpersist_run() {
+    glpersist_any || return 0                        # nothing persisted -> no dir churn, no-op
+    mkdir -p "$GLPERSIST_DIR"
+    local cur prev
+    cur=$(glpersist_curver)
+    prev=$(cat "$GLPERSIST_VERFILE" 2>/dev/null)
+    if _glpersist_wiped || { [ -n "$prev" ] && [ -n "$cur" ] && [ "$cur" != "$prev" ]; }; then
+        _glpersist_reapply_all "${prev:-$cur}" "$cur"
+        : > "$GLPERSIST_UNSEEN"                       # arm the on-launch report
+    fi
+    [ -n "$cur" ] && printf '%s' "$cur" > "$GLPERSIST_VERFILE"   # keep the baseline current
+    return 0
+}
 
-                    # Detect HTTPS mode and prompt for connection mode
-                    redirect_https=$(uci -q get uhttpd.main.redirect_https 2>/dev/null)
-                    if [ "$redirect_https" = "1" ]; then
-                        print_warning "The GL Admin Panel is set to force HTTPS. ttyd will be installed in HTTPS mode so the\nembedded terminal loads correctly in your browser."
-                        ttyd_proto="https"
-                    else
-                        print_info "ttyd runs over HTTP by default and will not work when accessing the Admin Panel via HTTPS.\nttyd over HTTPS works when accessing the Admin Panel via HTTP or HTTPS but requires a\none-time browser cert acceptance."
-                        printf "   Use HTTPS? [y/N]: "
-                        read -r proto_choice
-                        printf "\n"
-                        [ "$proto_choice" = "y" ] || [ "$proto_choice" = "Y" ] && ttyd_proto="https"
-                    fi
+# _glpersist_show_report - shown once on toolkit launch after a persist re-apply. Pure info
+# (no actions): success is a quiet confirmation, failure is an honest error. The retry path
+# lives in each feature's own manage screen.
+_glpersist_show_report() {
+    [ -f "$GLPERSIST_UNSEEN" ] || return 0
+    if [ ! -f "$GLPERSIST_REPORT" ]; then rm -f "$GLPERSIST_UNSEEN"; return 0; fi
+    local tag a b oldv newv
+    while IFS='|' read -r tag a b; do
+        [ "$tag" = ver ] && { oldv="$a"; newv="$b"; }
+    done < "$GLPERSIST_REPORT"
+    clear
+    print_centered_header "Web-UI Persistence"
+    print_info "Firmware update detected (${oldv:-?} -> ${newv:-?}). Restoring Web-UI tweaks:"
+    printf "\n"
+    while IFS='|' read -r tag a b; do
+        case "$tag|$a" in
+            switch\|ok)   print_success "Switch position indicator restored." ;;
+            switch\|fail) print_error   "Unable to restore switch position indicator." ;;
+            fan\|ok)      print_success "Fan control restored." ;;
+            fan\|fail)    print_error   "Unable to restore fan control." ;;
+            ttyd\|ok)     print_success "Web Terminal restored." ;;
+            ttyd\|fail)   print_error   "Unable to restore Web Terminal." ;;
+        esac
+    done < "$GLPERSIST_REPORT"
+    press_any_key
+    rm -f "$GLPERSIST_UNSEEN"
+}
 
-                    # Generate cert if HTTPS chosen
-                    if [ "$ttyd_proto" = "https" ]; then
-                        if [ ! -f /etc/ttyd.crt ] || [ ! -f /etc/ttyd.key ]; then
-                            if ! require_cmd openssl openssl-util "OpenSSL command-line tools"; then
-                                print_error "OpenSSL isn't available, so an HTTPS certificate can't be generated."
-                                print_info "Using HTTP for the Web-UI Terminal instead."
-                                printf "\n"
-                                ttyd_proto="http"
-                            else
-                                print_info "Generating self-signed certificate for ttyd"
-                                printf "\n"
-                                if openssl req -x509 -nodes -newkey rsa:2048 \
-                                        -keyout /etc/ttyd.key -out /etc/ttyd.crt -days 3650 \
-                                        -subj "/CN=gl-router" >/dev/null 2>&1 && [ -s /etc/ttyd.crt ] && [ -s /etc/ttyd.key ]; then
-                                    print_success "Generated /etc/ttyd.crt and /etc/ttyd.key"
-                                    printf "\n"
-                                else
-                                    rm -f /etc/ttyd.crt /etc/ttyd.key
-                                    print_error "Certificate generation failed; using HTTP for the Web-UI Terminal instead."
-                                    printf "\n"
-                                    ttyd_proto="http"
-                                fi
-                            fi
-                        else
-                            print_info "SSL certificates already exist, reusing."
-                            printf "\n"
-                        fi
-                    fi
+# Stop + disable the ttyd service; 0 when it is no longer running. Wrapped by spin_run so the
+# working step shows the gear+spinner (per the UI spinner convention) instead of static lines.
+# Stop + disable the ttyd service; 0 when no longer running.
+_ttyd_stop_service() {
+    [ -f /etc/init.d/ttyd ] && { /etc/init.d/ttyd stop >/dev/null 2>&1; /etc/init.d/ttyd disable >/dev/null 2>&1; }
+    killall ttyd >/dev/null 2>&1
+    sleep 1
+    ! pgrep ttyd >/dev/null 2>&1
+}
 
-                    # Write UCI config
-                    if [ "$ttyd_proto" = "https" ]; then
-                        cat << 'UCIEOF' > /etc/config/ttyd
+# ---- ttyd feature-lifecycle callbacks (drive the shared _lc_* helpers) --------
+_ttyd_pkg_installed() { command -v ttyd >/dev/null 2>&1; }
+_ttyd_enabled()       { glwebui_is_on ttyd; }
+_ttyd_service_up()    { pgrep ttyd >/dev/null 2>&1; }
+
+_ttyd_write_config() {   # <http|https>
+    if [ "$1" = https ]; then
+        cat << 'UCIEOF' > /etc/config/ttyd
 config ttyd
 	option enable '1'
 	option port '7681'
@@ -6308,20 +7187,10 @@ config ttyd
 	list client_option 'scrollback=10000'
 	list client_option 'theme={"background":"#000000"}'
 	list client_option 'titleFixed="Terminal"'
-	# Pinned so the modal's pixel size maps predictably onto columns x rows.
-	# Without it the cell size follows the browser's default monospace font
-	# and the same window yields a different terminal geometry per machine.
-	# This does NOT stop the user resizing: xterm.js refits on every container
-	# change, so drag-resize, maximise and minimise all still work.
 	list client_option 'fontSize=12'
 UCIEOF
-                        lan_ip=$(get_lan_ip)
-                        print_warning "Before using the terminal, open a new tab and visit: ${CYAN}https://${lan_ip}:7681${RESET}"
-                        print_warning "You must accept the certificate warning, then return to the Admin Panel."
-                        print_warning "The terminal will not load until this is done!"
-                        printf "\n"
-                    else
-                        cat << 'UCIEOF' > /etc/config/ttyd
+    else
+        cat << 'UCIEOF' > /etc/config/ttyd
 config ttyd
 	option enable '1'
 	option port '7681'
@@ -6330,154 +7199,183 @@ config ttyd
 	list client_option 'scrollback=10000'
 	list client_option 'theme={"background":"#000000"}'
 	list client_option 'titleFixed="Terminal"'
-	# Pinned so the modal's pixel size maps predictably onto columns x rows.
-	# Without it the cell size follows the browser's default monospace font
-	# and the same window yields a different terminal geometry per machine.
-	# This does NOT stop the user resizing: xterm.js refits on every container
-	# change, so drag-resize, maximise and minimise all still work.
 	list client_option 'fontSize=12'
 UCIEOF
-                    fi
+    fi
+}
 
-                    /etc/init.d/ttyd enable
-                    /etc/init.d/ttyd restart >/dev/null 2>&1
+# Enable+restart ttyd and wait until it is actually listening. 0 on success.
+_ttyd_start_service() {
+    /etc/init.d/ttyd enable >/dev/null 2>&1
+    /etc/init.d/ttyd restart >/dev/null 2>&1
+    local port i; port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${port:=7681}"
+    for i in 1 2 3 4 5; do
+        { netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null; } | grep -q ":${port} " && return 0
+        sleep 1
+    done
+    return 1
+}
 
-                    # Verify ttyd actually came up before patching the UI + claiming success. The restart
-                    # can fail SILENTLY (a bad/invalid SSL cert, a wrong system clock, or the port already
-                    # in use), which otherwise leaves a "Web-UI Terminal Installed" message + a dead page.
-                    _ttyd_port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${_ttyd_port:=7681}"
-                    _ttyd_up=0
-                    for _i in 1 2 3 4 5; do
-                        if { netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null; } | grep -q ":${_ttyd_port} "; then _ttyd_up=1; break; fi
-                        sleep 1
-                    done
-                    if [ "$_ttyd_up" -ne 1 ]; then
-                        printf "\n"
-                        print_error "ttyd did not start - nothing is listening on port ${_ttyd_port}."
-                        _why=$(logread 2>/dev/null | grep -i ttyd | tail -3)
-                        [ -n "$_why" ] && { print_info "Last ttyd log lines:"; printf '%s\n' "$_why" | sed 's/^/   /'; printf "\n"; }
-                        print_info "Common causes: an invalid certificate, a wrong system clock, or port ${_ttyd_port} already in use."
-                        print_info "Run ${GREY}/etc/init.d/ttyd restart${RESET} to see the error, and check ${GREY}date${RESET} against the certificate."
-                        print_warning "The Web-UI was not patched (the terminal button would lead to a dead page)."
-                        press_any_key
-                        continue
-                    fi
+_ttyd_gen_cert() {
+    openssl req -x509 -nodes -newkey rsa:2048 -keyout /etc/ttyd.key -out /etc/ttyd.crt \
+        -days 3650 -subj "/CN=gl-router" >/dev/null 2>&1
+    [ -s /etc/ttyd.crt ] && [ -s /etc/ttyd.key ]
+}
 
-                fi
+_ttyd_service_failure_report() {
+    local port why; port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${port:=7681}"
+    print_error "ttyd did not start - nothing is listening on port ${port}."
+    why=$(logread 2>/dev/null | grep -i ttyd | tail -3)
+    [ -n "$why" ] && { print_info "Last ttyd log lines:"; printf '%s\n' "$why" | sed 's/^/   /'; }
+    print_info "Common causes: an invalid certificate, a wrong system clock, or port ${port} already in use."
+    print_warning "The terminal button was not added (it would open a dead page)."
+}
 
-                # UI Injection
-                print_info "Patching Web-UI"
-                printf "\n"
-                _inject_terminal_into "$TARGET_GZ" "$ttyd_proto" 1
-                print_success "Web-UI Terminal installed."
-                printf "\n"
-                _hard_refresh_hint
-                press_any_key
-                ;;
+# _ttyd_disable / _ttyd_uninstall - wrapped by spin_run. Disable KEEPS the package
+# + config (lossless re-enable); Uninstall removes the package + config entirely.
+_ttyd_disable() {
+    _ttyd_stop_service
+    glwebui_disable ttyd
+    glpersist_is_on ttyd && glpersist_disable ttyd
+    return 0
+}
+_ttyd_uninstall() {
+    _ttyd_stop_service
+    pkg_remove ttyd >/dev/null 2>&1
+    rm -f /etc/config/ttyd /etc/ttyd.crt /etc/ttyd.key
+    glwebui_disable ttyd
+    glpersist_is_on ttyd && glpersist_disable ttyd
+    return 0
+}
+_ttyd_reinstall_pkg() { pkg_install ttyd >/dev/null 2>&1 || install_package ttyd >/dev/null 2>&1; return 0; }
 
-            2)
-                print_info "Disabling Web Terminal"
-                printf "\n"
-                
-                # Only attempt to stop/disable if the service script exists
-                
-                if [ -f "/etc/init.d/ttyd" ]; then
-                    if pgrep ttyd >/dev/null; then
-                        print_info "Stopping ttyd service"
-                        printf "\n"
-                        /etc/init.d/ttyd stop 2>/dev/null
-                        /etc/init.d/ttyd disable 2>/dev/null
-                        killall ttyd >/dev/null 2>&1
-                        print_success "Service stopped."
-                        printf "\n"
-                    else
-                        print_warning "ttyd service is not running."
-                        printf "\n"
-                    fi
-                else
-                    print_warning "ttyd service not found; skipping service stop."
-                    printf "\n"
-                fi
+# ---- ttyd action flows (dispatched from the lifecycle menu) -------------------
+_ttyd_enable_flow() {
+    local proto ans ip
+    if ! _ttyd_pkg_installed; then
+        install_package ttyd
+        _ttyd_pkg_installed || { print_error "The ttyd package could not be installed."; return; }
+    fi
+    if grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null; then proto=https
+    elif [ -f /etc/config/ttyd ]; then proto=http
+    elif [ "$(uci -q get uhttpd.main.redirect_https 2>/dev/null)" = 1 ]; then
+        print_info "The Admin Panel forces HTTPS, so the terminal will use HTTPS."
+        proto=https
+    else
+        print_info "HTTP is simplest. HTTPS works too but needs a one-time browser certificate acceptance."
+        printf "Use HTTPS? [y/N]: "; read -r ans; printf "\n"
+        case "$ans" in y|Y) proto=https ;; *) proto=http ;; esac
+    fi
+    if [ "$proto" = https ] && { [ ! -s /etc/ttyd.crt ] || [ ! -s /etc/ttyd.key ]; }; then
+        if require_cmd openssl openssl-util "OpenSSL command-line tools" \
+           && spin_run "Generating a self-signed certificate" _ttyd_gen_cert; then :; else
+            print_warning "A certificate is unavailable - using HTTP instead."; proto=http
+        fi
+    fi
+    _ttyd_write_config "$proto"
+    if spin_run "Starting the ttyd service" _ttyd_start_service; then
+        spin_run "Adding the terminal button to the Web-UI" glwebui_enable ttyd "$proto"
+        print_success "Web Terminal enabled."
+        if [ "$proto" = https ]; then
+            ip=$(get_lan_ip)
+            print_warning "HTTPS terminal: visit ${CYAN}https://${ip}:7681${RESET} once and accept the\ncertificate, or the embedded terminal stays blank."
+        fi
+    else
+        _ttyd_service_failure_report
+    fi
+}
+_ttyd_disable_flow() {
+    spin_run "Disabling the Web Terminal" _ttyd_disable
+    print_success "Web Terminal disabled (the package is kept - Enable is instant)."
+}
+_ttyd_reinstall_flow() {
+    local proto; grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && proto=https || proto=http
+    spin_run "Reinstalling the ttyd package" _ttyd_reinstall_pkg
+    if spin_run "Starting the ttyd service" _ttyd_start_service; then
+        spin_run "Re-adding the terminal button to the Web-UI" glwebui_enable ttyd "$proto"
+        print_success "Web Terminal reinstalled and running."
+    else
+        _ttyd_service_failure_report
+    fi
+}
+_ttyd_uninstall_flow() {
+    local ans
+    printf "This removes the ttyd package and its config. Uninstall? [y/N]: "; read -r ans; printf "\n"
+    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed."; return ;; esac
+    spin_run "Uninstalling the ttyd package" _ttyd_uninstall
+    print_success "Web Terminal uninstalled."
+}
+_ttyd_toggle_persistence() {
+    if glpersist_is_on ttyd; then glpersist_disable ttyd; _persist_msg off "the Web Terminal"
+    elif glpersist_enable ttyd; then _persist_msg on "the Web Terminal"
+    else print_error "Could not enable persistence (no installable toolkit copy found)."; fi
+}
+_ttyd_do() {   # <action_key>
+    case "$1" in
+        install_enable|enable) _ttyd_enable_flow ;;
+        disable)               _ttyd_disable_flow ;;
+        reinstall)             _ttyd_reinstall_flow ;;
+        uninstall)             _ttyd_uninstall_flow ;;
+    esac
+}
 
-                # Restore UI to stock regardless of service status
-                if [ -f "/rom$TARGET_GZ" ]; then
-                    cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
-                    rm -rf /var/lib/nginx/*
-                    print_success "Web UI button removed and cache cleared."
-                    # Restoring app.*.js.gz from ROM also drops any fan-slider
-                    # range patch, since both features edit the same file. The
-                    # fan's actual behaviour (uci glfan) is untouched; only the
-                    # web-UI slider range reverts. Tell the user rather than
-                    # silently reverting it.
-                    # Only on devices that actually have a fan - /etc/config/glfan
-                    # is absent on fanless models (e.g. MT1300), so this stays
-                    # quiet there.
-                    if [ -f /etc/config/glfan ]; then
-                        print_info "If you customised Fan settings, re-apply them - the panel was reset to stock here."
-                    fi
-                    printf "\n"
-                    _hard_refresh_hint
-                else
-                    print_error "ROM backup not found. Manual UI restoration required."
-                fi
-                press_any_key
-                ;;
+manage_web_terminal() {
+    local state acts n a key per_status proto port ip
+    while true; do
+        clear
+        print_centered_header "Web-UI Terminal Interface"
+        if [ -z "$(glwebui_appjs)" ]; then
+            print_error "The admin-panel bundle was not found; can't manage the Web Terminal."
+            press_any_key; return
+        fi
 
-            3)
-                print_warning "Completely Uninstalling ttyd"
-                printf "\n"
-                
-                # Stop service before removal if it exists
-                if command -v ttyd >/dev/null 2>&1 || [ -f "/etc/init.d/ttyd" ]; then
-                    if pgrep ttyd >/dev/null; then
-                        print_info "Stopping ttyd service"
-                        printf "\n"
-                        /etc/init.d/ttyd stop 2>/dev/null
-                        killall ttyd >/dev/null 2>&1
-                        print_success "Service stopped."
-                        printf "\n"
-                    else
-                        print_warning "ttyd service is not running."
-                        printf "\n"
-                    fi
-                    pkg_remove ttyd >/dev/null 2>&1
-                    rm -f /etc/config/ttyd
-                    if [ -f /etc/ttyd.crt ] || [ -f /etc/ttyd.key ]; then
-                        print_info "Removing ttyd SSL certificates"
-                        printf "\n"
-                        rm -f /etc/ttyd.crt /etc/ttyd.key
-                        print_success "SSL certificates removed."
-                        printf "\n"
-                    fi
-                    print_success "ttyd package uninstalled."
-                    printf "\n"
-                fi
+        state=$(_lc_state 1 _ttyd_pkg_installed _ttyd_enabled _ttyd_service_up)
+        glpersist_is_on ttyd && per_status="${GREEN}ENABLED${RESET}" || per_status="${YELLOW}DISABLED${RESET}"
 
-                # Always ensure the UI is restored
-                if [ -f "/rom$TARGET_GZ" ]; then
-                    cp -f "/rom$TARGET_GZ" "$TARGET_GZ"
-                    rm -rf /var/lib/nginx/*
-                    print_success "Web UI button removed and cache cleared."
-                    # Restoring app.*.js.gz from ROM also drops any fan-slider
-                    # range patch, since both features edit the same file. The
-                    # fan's actual behaviour (uci glfan) is untouched; only the
-                    # web-UI slider range reverts. Tell the user rather than
-                    # silently reverting it.
-                    # Only on devices that actually have a fan - /etc/config/glfan
-                    # is absent on fanless models (e.g. MT1300), so this stays
-                    # quiet there.
-                    if [ -f /etc/config/glfan ]; then
-                        print_info "If you customised Fan settings, re-apply them - the panel was reset to stock here."
-                    fi
-                else
-                    print_error "ROM backup not found. Manual UI restoration required."
-                fi
-                press_any_key
-                ;;
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        printf "   %-14s %b\n" "Web Terminal:" "$(_lc_value "$state")"
+        if _ttyd_service_up; then
+            port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${port:=7681}"
+            grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && proto=https || proto=http
+            ip=$(get_lan_ip 2>/dev/null)
+            printf "   %-14s %b\n" "Direct URL:" "${CYAN}${proto}://${ip}:${port}${RESET}"
+        fi
+        printf "   %-14s %b\n" "Persistence:" "$per_status"
+        printf "\n"
+
+        acts=$(_lc_actions "$state" 1); n=0
+        for a in $acts; do
+            n=$((n + 1)); eval "TTYD_ACT_${n}=\"$a\""
+            printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$(_lc_label "$a")"
+        done
+        n=$((n + 1)); TTYD_PERSIST_N=$n
+        if glpersist_is_on ttyd; then a="Disable persistence"; else a="Enable persistence"; fi
+        printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
+        printf "%s%sBack\n" "$N0" "$NSEP"
+        printf "%s Help\n" "$NQ"
+        printf "\nChoose [1-%s/0/?]: " "$n"
+        read -r choice; printf "\n"
+
+        case "$choice" in
             0) return ;;
-            \?|h|H|❓) show_terminal_help ;;
-            *) print_error "Invalid choice"; sleep 1 ;;
+            \?|h|H|❓) show_terminal_help; continue ;;
+            *[!0-9]*|"") print_error "Invalid choice"; sleep 1; continue ;;
         esac
+        if [ "$choice" = "$TTYD_PERSIST_N" ]; then
+            if [ "$state" = NOT_INSTALLED ] || [ "$state" = DISABLED ]; then
+                print_warning "Enable the Web Terminal first, then enable persistence."
+            else
+                _ttyd_toggle_persistence
+            fi
+            press_any_key; continue
+        fi
+        if [ "$choice" -ge 1 ] && [ "$choice" -lt "$TTYD_PERSIST_N" ]; then
+            eval "key=\$TTYD_ACT_${choice}"
+            _ttyd_do "$key"
+            press_any_key
+        else
+            print_error "Invalid choice"; sleep 1
+        fi
     done
 }
 
@@ -7188,11 +8086,17 @@ manage_ssh_keys() {
             3) # TOGGLE PERSISTENCE
                 printf "\n"
                 if grep -qFx "$auth_file" "$up_conf" 2>/dev/null; then
-                    sed -i "\|$auth_file|d" "$up_conf"
-                    print_warning "Persistence disabled. Keys will be lost on firmware upgrade."
+                    # Disabling here risks DATA loss (SSH keys are not recoverable if wiped),
+                    # so warn + confirm first - unlike functionality-only persistence toggles.
+                    print_warning "Your SSH keys would then be lost on the next firmware upgrade, with no way\nto recover them from the router."
+                    printf "Disable persistence for SSH keys anyway? [y/N]: "; read -r confirm; printf "\n"
+                    case "$confirm" in
+                        y|Y) sed -i "\|$auth_file|d" "$up_conf"; _persist_msg off "SSH keys" ;;
+                        *)   print_info "Cancelled - persistence unchanged." ;;
+                    esac
                 else
                     echo "$auth_file" >> "$up_conf"
-                    print_success "Persistence enabled. Keys will survive firmware upgrades."
+                    _persist_msg on "SSH keys"
                 fi
                 press_any_key ;;
                 
@@ -7226,18 +8130,27 @@ Options
    Embed a draggable terminal (powered by ttyd) into the GL.iNet
    Admin Panel as a ">_" icon in the navigation bar.
 
-4. Package and Persistence Manager
+4. Switch Position Indicator
+   Show which way the physical toggle switch is flipped, right on the
+   Admin Panel's Toggle Button Settings page (fills the active side
+   green). Only on models with a hardware switch.
+
+5. Package and Persistence Manager
    Install useful CLI tools (htop, tcpdump, etc.) and configure them
    to survive firmware upgrades via the sysupgrade keep-list.
 
-5. Package System Repair
+6. Package System Repair
    Fix a corrupted package system (the "Missing new line character at
    end of file" opkg error) by rebuilding the feed cache and/or
    repairing the installed database, with backups.
 
-6. Toolkit Management
+7. Toolkit Management
    Install this script to /usr/sbin/glinet_utils so it can be run
    from anywhere. Manage sysupgrade persistence and updates.
+
+Web-UI overlays (3 and 4) plus the Fan slider range all paint the same
+admin-panel bundle. They share one injection registry, so installing or
+removing one never wipes the others.
 
 Moved: the Bandwidth Limiter (now any network, not just guest) and SSH Key
 Management now live under Network and VPN Tools on the main menu.
@@ -7262,16 +8175,16 @@ set_toolkit_persistence() {
     if [ "$enable" -eq 1 ]; then
         if ! grep -qFx "$INSTALL_PATH" "$keep_conf" 2>/dev/null; then
             printf "%s\n" "$INSTALL_PATH" >> "$keep_conf"
-            print_success "Added to $keep_conf — will survive firmware upgrades."
+            _persist_msg on "the toolkit"
         else
-            print_info "Already persisted in $keep_conf — no change."
+            print_info "Persistence already enabled — no change."
         fi
     else
         if grep -qFx "$INSTALL_PATH" "$keep_conf" 2>/dev/null; then
             sed -i "\|^${INSTALL_PATH}$|d" "$keep_conf" 2>/dev/null
-            print_success "Removed from $keep_conf — will not survive firmware upgrades."
+            _persist_msg off "the toolkit"
         else
-            print_info "Not in $keep_conf — no change."
+            print_info "Persistence already disabled — no change."
         fi
     fi
 }
@@ -10682,21 +11595,23 @@ system_tweaks() {
         printf "%s%sDevice Fan Settings\n" "$N1" "$NSEP"
         printf "%s%sManage Zram Swap\n" "$N2" "$NSEP"
         printf "%s%sWeb-UI Terminal Interface\n" "$N3" "$NSEP"
-        printf "%s%sPackage and Persistence Manager\n" "$N4" "$NSEP"
-        printf "%s%sPackage System Repair\n" "$N5" "$NSEP"
-        printf "%s%sToolkit Management\n" "$N6" "$NSEP"
+        printf "%s%sSwitch Position Indicator\n" "$N4" "$NSEP"
+        printf "%s%sPackage and Persistence Manager\n" "$N5" "$NSEP"
+        printf "%s%sPackage System Repair\n" "$N6" "$NSEP"
+        printf "%s%sToolkit Management\n" "$N7" "$NSEP"
         printf "%s%sMain menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-6/0/?]: "
+        printf "\nChoose [1-7/0/?]: "
         read -r st_choice
         printf "\n"
         case $st_choice in
             1) manage_fan_settings ;;
             2) manage_zram ;;
             3) manage_web_terminal ;;
-            4) manage_packages ;;
-            5) repair_package_system ;;
-            6) manage_toolkit ;;
+            4) manage_switch_indicator ;;
+            5) manage_packages ;;
+            6) repair_package_system ;;
+            7) manage_toolkit ;;
             \?|h|H|❓) show_system_tweaks_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -10892,12 +11807,12 @@ manage_librespeed() {
                         for entry in "/usr/bin/librespeed-go" "/etc/init.d/librespeed-go" "/etc/config/librespeed-go"; do
                             grep -qFx "$entry" "$UP_CONF" || echo "$entry" >> "$UP_CONF"
                         done
-                        print_success "Persistence enabled in $UP_CONF"
+                        _persist_msg on "LibreSpeed"
                     else
                         sed -i "\|/usr/bin/librespeed-go|d" "$UP_CONF"
                         sed -i "\|/etc/init.d/librespeed-go|d" "$UP_CONF"
                         sed -i "\|/etc/config/librespeed-go|d" "$UP_CONF"
-                        print_success "Persistence disabled"
+                        _persist_msg off "LibreSpeed"
                     fi
                 else
                     print_error "Nothing to persist: LibreSpeed is not installed."
@@ -12261,9 +13176,9 @@ _ost_persist_set() {   # <1|0> [quiet] - add/remove OpenSpeedTest paths from sys
     if [ "$on" = 1 ]; then
         for p in "$OST_INSTALL_DIR" "$OST_STARTUP_SCRIPT" "$OST_CONFIG_PATH"; do echo "$p" >> "$sc"; done
         find /etc/rc.d/ -type l -name "[SK]*$svc" 2>/dev/null | while read -r l; do echo "$l" >> "$sc"; done
-        [ "$quiet" = quiet ] || { print_success "Persistence enabled (survives firmware upgrades)."; press_any_key; }
+        [ "$quiet" = quiet ] || { _persist_msg on "OpenSpeedTest"; press_any_key; }
     else
-        [ "$quiet" = quiet ] || { print_success "Persistence disabled."; press_any_key; }
+        [ "$quiet" = quiet ] || { _persist_msg off "OpenSpeedTest"; press_any_key; }
     fi
 }
 
@@ -12349,6 +13264,15 @@ manage_openspeedtest() {
 # -----------------------------
 # Startup
 # -----------------------------
+# Headless dispatch: every function is defined by here, so run the requested headless task
+# and exit BEFORE any interactive startup (installer / AGH checks / menu).
+if [ -n "${__GL_HEADLESS:-}" ]; then
+    case "$1" in
+        --webui-persist-run) _glpersist_run; exit $? ;;
+    esac
+    exit 0
+fi
+
 # Splash + terminal detection already ran at load time (see detect_output_mode).
 check_install_prompt "$@"
 printf "\n"
@@ -12454,4 +13378,5 @@ show_menu() {
 # -----------------------------
 # Start
 # -----------------------------
+_glpersist_show_report        # one-time report if a firmware update re-applied Web-UI tweaks
 show_menu

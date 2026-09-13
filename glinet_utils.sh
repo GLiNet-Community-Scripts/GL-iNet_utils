@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-09-09
+# Version: 2026-09-13
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -781,7 +781,7 @@ print_info()    { local m="${1//\\n/\\n   }"; printf "%b\n" "${BOLD}${BLUE}${_S_
 # [?] help explains what survives an update, and no sysupgrade.conf path is leaked. $1 = on|off,
 # $2 = subject noun phrase (e.g. "fan control", "the Web Terminal").
 _persist_msg() {
-    [ "$1" = on ] && print_success "Persistence enabled for $2." || print_success "Persistence disabled for $2."
+    [ "$1" = on ] && print_success "Persistence enabled for $2" || print_success "Persistence disabled for $2"
 }
 
 # ============================================================================
@@ -816,12 +816,16 @@ _lc_value() {
 
 # _lc_actions <state> <pkg_backed 0|1> - space-separated action keys, in menu order.
 # Reinstall is GATED to SERVICE_DOWN only; Uninstall only where a package exists.
+# SERVICE_DOWN offers Reinstall + the feature's removal (Uninstall for package-backed;
+# Disable for service-only, which has no package). Disable is NOT shown for a package-backed
+# SERVICE_DOWN: with no ENABLED value on screen it has no referent, and the only sensible flows
+# from a broken service are fix (Reinstall) or remove (Uninstall).
 _lc_actions() {
     case "$1" in
         NOT_INSTALLED) echo "install_enable" ;;
         DISABLED)      [ "$2" = 1 ] && echo "enable uninstall" || echo "enable" ;;
         ENABLED)       [ "$2" = 1 ] && echo "disable uninstall" || echo "disable" ;;
-        SERVICE_DOWN)  [ "$2" = 1 ] && echo "reinstall disable uninstall" || echo "reinstall disable" ;;
+        SERVICE_DOWN)  [ "$2" = 1 ] && echo "reinstall uninstall" || echo "reinstall disable" ;;
     esac
 }
 
@@ -934,9 +938,9 @@ terminal_size_advisory() {
         printf '\n'
         print_warning "This window is ${c} x ${r}. Some screens need ${TERM_NEED_COLS} x ${TERM_MIN_ROWS}."
         [ "$c" -lt "$TERM_NEED_COLS" ] && \
-            print_info "Too narrow by $((TERM_NEED_COLS - c)) columns - wide tables will wrap and lose their alignment."
+            print_info "Too narrow by $((TERM_NEED_COLS - c)) columns - wide tables will wrap and lose their alignment"
         [ "$r" -lt "$TERM_MIN_ROWS" ] && \
-            print_info "Too short by $((TERM_MIN_ROWS - r)) rows - full screens will scroll."
+            print_info "Too short by $((TERM_MIN_ROWS - r)) rows - full screens will scroll"
         print_info "This toolkit asks the terminal to resize itself, but some terminals"
         print_info "ignore that. Widen the window by hand, then recheck."
         printf '\n [R] Recheck size   [C] Continue anyway: '
@@ -1272,13 +1276,13 @@ show_changelog() {
 apply_update() {
     if ! spin_run "Downloading update" wget -q -O "$TMP_NEW_SCRIPT" "$SCRIPT_URL"; then
         rm -f "$SPIN_LOG" 2>/dev/null
-        print_warning "Download failed (network or GitHub issue)."
+        print_warning "Download failed (network or GitHub issue)"
         return 1
     fi
     rm -f "$SPIN_LOG" 2>/dev/null
     print_action "Updating"
     if ! cp "$TMP_NEW_SCRIPT" "$SCRIPT_PATH.new" || ! chmod +x "$SCRIPT_PATH.new"; then
-        print_warning "Could not write ${SCRIPT_PATH}.new (permissions?)."
+        print_warning "Could not write ${SCRIPT_PATH}.new (permissions?)"
         rm -f "$TMP_NEW_SCRIPT" 2>/dev/null
         return 1
     fi
@@ -1513,7 +1517,7 @@ check_opkg_updated() {
         rm -f "$SPIN_LOG" 2>/dev/null
         return 1
     fi
-    print_error "Package index update failed."
+    print_error "Package index update failed"
     check_connectivity
     print_info "Collected errors:"
     tail -n 20 "$SPIN_LOG" 2>/dev/null | grep -E '^(\*|\*\*\*|Collected errors:|wget returned)' | sed 's/^/  /'
@@ -1528,7 +1532,7 @@ check_opkg_updated() {
 # parses clean afterwards; deeper corruption is deferred to the standalone Package System Repair tool.
 offer_pkg_db_repair() {
     printf "\n"
-    print_warning "The package database appears to be corrupted."
+    print_warning "The package database appears to be corrupted"
     printf "   opkg can't parse ${GREY}%s${RESET}, so installs and removals will fail until it is fixed.\n" "$(pkg_db_path)"
     printf "   Only a safe end-of-file repair is applied.\n\n"
     printf "Repair the package database now? [y/N]: "; read -r _pdr; printf "\n"
@@ -1539,11 +1543,11 @@ offer_pkg_db_repair() {
     spin_run "Repairing the installed database" pkg_db_repair
     spin_run "Verifying the package index" pkg_update
     if ! tail -n 40 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
-        print_success "Package database repaired."
+        print_success "Package database repaired"
         return 0
     fi
-    print_error "The automatic repair could not resolve it."
-    print_info "Open System Tweaks ▸ Package System Repair to restore a backup or review options."
+    print_error "The automatic repair could not resolve it"
+    print_info "Open System Tweaks ▸ Package System Repair to restore a backup or review options"
     return 1
 }
 
@@ -1560,7 +1564,7 @@ install_package() {
         rm -f "$SPIN_LOG" 2>/dev/null
         return 0
     fi
-    print_error "Failed to install $name."
+    print_error "Failed to install $name"
     check_connectivity
     rm -f "$SPIN_LOG" 2>/dev/null
     return 1
@@ -1875,7 +1879,7 @@ agh_apply_and_restart() {
     $AGH_INIT start >/dev/null 2>&1; sleep 2
     if is_agh_running; then
         print_success "${ctx:-Changes applied.}"
-        print_success "AdGuardHome restarted successfully."
+        print_success "AdGuardHome restarted successfully"
         return 0
     fi
     if [ -n "$backup" ] && [ -n "$target" ]; then
@@ -1884,13 +1888,13 @@ agh_apply_and_restart() {
         cp "$backup" "$target"
         $AGH_INIT start >/dev/null 2>&1; sleep 2
         if is_agh_running; then
-            print_warning "Restored last known good configuration."
+            print_warning "Restored last known good configuration"
             return 1
         fi
-        print_error "Could not restart AdGuardHome even after reverting — check the configuration manually."
+        print_error "Could not restart AdGuardHome even after reverting — check the configuration manually"
         return 1
     fi
-    print_error "AdGuardHome failed to start — check the configuration manually."
+    print_error "AdGuardHome failed to start — check the configuration manually"
     return 1
 }
 
@@ -1899,7 +1903,7 @@ agh_apply_and_restart() {
 agh_service_control() {
     if is_agh_running; then
         printf "\n"
-        print_warning "Service is RUNNING."
+        print_warning "Service is RUNNING"
         printf "Disable, Restart, or Cancel? [D/R/0]: "; read -r confirm
         if [ "$confirm" = "d" ] || [ "$confirm" = "D" ]; then
             uci set adguardhome.config.enabled='0' && uci set adguardhome.config.dns_enabled='0' && uci commit adguardhome
@@ -1909,7 +1913,7 @@ agh_service_control() {
         fi
     else
         printf "\n"
-        print_warning "Service is STOPPED."
+        print_warning "Service is STOPPED"
         printf "Enable the service? [y/N]: "; read -r confirm
         if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
             uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
@@ -2672,7 +2676,7 @@ manage_agh_ui_updates() {
                     if [ "$updates_persist" -eq 0 ]; then
                         print_warning "UI updates are currently set to not persist across firmware updates.\nEnabling UI updates may cause compatibility issues during firmware\nupdates due to legacy binaries being reinstalled. Consider enabling\nupdate persistence to avoid this problem."
                     else
-                        print_info "UI updates are currently set to persist across firmware updates."
+                        print_info "UI updates are currently set to persist across firmware updates"
                         printf "\n"
                     fi
                     printf "Proceed with changes? [y/N]: "; read -r confirm
@@ -2771,7 +2775,7 @@ agh_remove_filter_limit() {
     local call_active=0; grep -qE "^[[:space:]]*mount_filter_img[[:space:]]+" "$AGH_INIT" && call_active=1
 
     if [ "$mounted" -eq 0 ] && [ "$call_active" -eq 0 ]; then
-        print_warning "Filter space limitation is already INACTIVE on the system."
+        print_warning "Filter space limitation is already INACTIVE on the system"
         return 1
     fi
 
@@ -2869,30 +2873,30 @@ manage_agh_storage() {
         case $storage_choice in
             1)
                 if [ "$limit_active" -eq 0 ]; then
-                    print_warning "Filter space limitation is already INACTIVE on the system."
+                    print_warning "Filter space limitation is already INACTIVE on the system"
                     press_any_key; continue
                 fi
 
                 if ! grep -qE "$exec_pattern" "$AGH_INIT"; then
-                    print_error "Could not find a feature call to disable."
+                    print_error "Could not find a feature call to disable"
                     press_any_key; continue
                 fi
                 
-                print_info "GL.iNet caps the AGH filter cache (~9MB loop partition) to protect RAM on ~512MB models."
-                print_info "Removing it allows larger/more lists, but raises RAM use and can destabilize small-RAM routers."
+                print_info "GL.iNet caps the AGH filter cache (~9MB loop partition) to protect RAM on ~512MB models"
+                print_info "Removing it allows larger/more lists, but raises RAM use and can destabilize small-RAM routers"
 
                 if ! swapon -s 2>/dev/null | grep -q zram; then
                     printf "\n"
                     print_warning "WARNING: Zram swap is NOT enabled!"
                     printf "\n"
-                    print_info "It is strongly recommended to enable zram swap before adding aditional filter lists."
+                    print_info "It is strongly recommended to enable zram swap before adding aditional filter lists"
                 fi
                 
                 printf "Remove the filter storage limit anyway? [y/N]: "
                 read -r confirm
                 printf "\n"
                 if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
-                    print_info "Operation cancelled."
+                    print_info "Operation cancelled"
                     press_any_key
                     continue
                 fi
@@ -2903,23 +2907,23 @@ manage_agh_storage() {
                 ;;
             2)
                 if [ "$limit_active" -eq 1 ]; then
-                    print_warning "Filter space limitation is already ACTIVE."
+                    print_warning "Filter space limitation is already ACTIVE"
                     press_any_key; continue
                 fi
                 
                 if ! grep -q "mount_filter_img" "$AGH_INIT"; then
-                    print_warning "Filter space limitation feature is not supported on this device/firmware."
+                    print_warning "Filter space limitation feature is not supported on this device/firmware"
                     press_any_key
                     continue
                 fi
 
                 if grep -qE "$exec_pattern" "$AGH_INIT"; then
-                    print_warning "Filter space limitation is already enabled or not supported on this device/firmware."
+                    print_warning "Filter space limitation is already enabled or not supported on this device/firmware"
                     press_any_key; continue
                 fi
 
                 if ! grep -qE "$comment_pattern" "$AGH_INIT"; then
-                    print_error "Could not find a feature call to re-enable."
+                    print_error "Could not find a feature call to re-enable"
                     press_any_key; continue
                 fi
 
@@ -2935,8 +2939,8 @@ manage_agh_storage() {
                 _use_kb=$(du -sk "$AGH_WORKDIR/data/filters" 2>/dev/null | awk '{print $1}')
                 case "$_use_kb" in ''|*[!0-9]*) _use_kb=0 ;; esac
                 if [ "$_cap_kb" -gt 0 ] && [ "$_use_kb" -gt "$_usable_kb" ]; then
-                    print_warning "Your filter lists use ~$(( _use_kb / 1024 ))MB, but this limit only holds ~$(( _usable_kb / 1024 ))MB."
-                    print_info "Lists that don't fit won't load - remove some, or leave the limit off for full space."
+                    print_warning "Your filter lists use ~$(( _use_kb / 1024 ))MB, but this limit only holds ~$(( _usable_kb / 1024 ))MB"
+                    print_info "Lists that don't fit won't load - remove some, or leave the limit off for full space"
                     printf "Re-enable the filter storage limit anyway? [y/N]: "; read -r _reyn
                     printf "\n"
                     if [ "$_reyn" != "y" ] && [ "$_reyn" != "Y" ]; then
@@ -3201,12 +3205,12 @@ EOF
         else
             print_warning "Enabling these lists (~$(agh_fmt_rules "$active") rules) puts memory in the HIGH zone on ${mt}MB RAM."
         fi
-        print_info "zram swap adds compressed headroom and is strongly recommended before loading them."
+        print_info "zram swap adds compressed headroom and is strongly recommended before loading them"
         printf "Enable zram swap now? [Y/n]: "; read -r _zr
         if [ "$_zr" != "n" ] && [ "$_zr" != "N" ]; then
             printf "\n"
             zram_install_enable
-            print_info "Manage this later in AdGuardHome -> Advanced Settings -> Zram Swap."
+            print_info "Manage this later in AdGuardHome -> Advanced Settings -> Zram Swap"
         fi
     fi
 
@@ -3224,13 +3228,13 @@ EOF
         if [ "$cap_kb" -gt 0 ] && [ "$proj_kb" -gt "$cap_kb" ]; then
             _agh_storage_over=1
             printf "\n"
-            print_warning "The selected lists (~$((proj_kb/1024))MB) exceed the ~$((cap_kb/1024))MB filter storage limit."
-            print_info "Removing the filter space limit lets them download."
+            print_warning "The selected lists (~$((proj_kb/1024))MB) exceed the ~$((cap_kb/1024))MB filter storage limit"
+            print_info "Removing the filter space limit lets them download"
             printf "Remove the filter storage limit now? [y/N]: "; read -r _sl
             if [ "$_sl" = "y" ] || [ "$_sl" = "Y" ]; then
                 printf "\n"
                 agh_remove_filter_limit && _agh_storage_over=0
-                print_info "Manage this later in AdGuardHome -> Advanced Settings -> Filter Storage Space Limit."
+                print_info "Manage this later in AdGuardHome -> Advanced Settings -> Filter Storage Space Limit"
             fi
         fi
     fi
@@ -3495,7 +3499,7 @@ EOF
                         done
                         printf "\r\033[K"
                         if [ -z "$_failed" ]; then
-                            print_success "Downloaded $_pending list(s)."
+                            print_success "Downloaded $_pending list(s)"
                         elif [ "${_agh_storage_over:-0}" = 1 ]; then
                             # ENOSPC: these cannot fit - remove them so nothing is left
                             # installed+enabled-but-empty (there is no clean re-apply from that state).
@@ -3509,11 +3513,11 @@ EOF
                             $AGH_INIT restart >/dev/null 2>&1
                             print_error "These lists could NOT download - lists storage is full - and were removed:"
                             printf "%s\n" "$_failed"
-                            print_info "Free space in Advanced Settings -> Filter Storage Space Limit, then add them again."
+                            print_info "Free space in Advanced Settings -> Filter Storage Space Limit, then add them again"
                         else
                             print_warning "These lists have not finished downloading:"
                             printf "%s\n" "$_failed"
-                            print_info "AdGuardHome keeps retrying - check back shortly, or check your connection."
+                            print_info "AdGuardHome keeps retrying - check back shortly, or check your connection"
                         fi
                     fi
 
@@ -3611,7 +3615,7 @@ update_agh_credentials() {
         read -r user_name
         [ -n "$user_name" ] && break
         printf "\n"
-        print_warning "Username cannot be blank."
+        print_warning "Username cannot be blank"
         printf "Try again? [Y/n]: "; read -r u_retry; printf "\n"
         case "$u_retry" in n|N) print_info "Operation cancelled."; return ;; esac
     done
@@ -3621,7 +3625,7 @@ update_agh_credentials() {
         user_pass=$(get_password "Enter Password: ")
         if [ -z "$user_pass" ]; then
             printf "\n"
-            print_warning "Password cannot be blank."
+            print_warning "Password cannot be blank"
             printf "Try again? [Y/n]: "; read -r p_retry; printf "\n"
             case "$p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
             continue
@@ -3631,7 +3635,7 @@ update_agh_credentials() {
             break
         fi
         printf "\n"
-        print_warning "Passwords do not match."
+        print_warning "Passwords do not match"
         printf "Try again? [Y/n]: "; read -r p_retry; printf "\n"
         case "$p_retry" in n|N) print_info "Operation cancelled."; return ;; esac
     done
@@ -3657,8 +3661,8 @@ update_agh_credentials() {
         if echo "$check_name" | grep -q " - name:" && echo "$check_pass" | grep -q "password:"; then
             mode="block"
         else
-            print_error "Unexpected YAML structure detected below 'users:' line."
-            print_warning "Manual edit required to avoid corrupting config."
+            print_error "Unexpected YAML structure detected below 'users:' line"
+            print_warning "Manual edit required to avoid corrupting config"
             press_any_key; return
         fi
     else
@@ -3715,7 +3719,7 @@ manage_agh_direct_access() {
                 clear
                 if [ "$DIRECT_STATUS" = "❌" ]; then
                     print_centered_header "Enable AdGuardHome Direct Access"
-                    print_warning "AdGuardHome direct access bypasses GL.iNet Web UI security."
+                    print_warning "AdGuardHome direct access bypasses GL.iNet Web UI security"
                     printf "\n"
                     print_warning "If no password is set, and you bypass setting a password, the UI will be ${BOLD}UNSECURED.${RESET}"
                     printf "\n"
@@ -3723,9 +3727,9 @@ manage_agh_direct_access() {
                     printf "Enable Direct Access? [y/N]: "
                 else
                     print_centered_header "Disable AdGuardHome Direct Access"
-                    print_warning "AdGuardHome direct Web UI access via http://$lan_ipaddr:3000 will be disabled."
+                    print_warning "AdGuardHome direct Web UI access via http://$lan_ipaddr:3000 will be disabled"
                     printf "\n"
-                    print_warning "Any passwords set will remain but will be bypassed."
+                    print_warning "Any passwords set will remain but will be bypassed"
                     printf "\n"
                     print_info "Once disabled, you can access the AdGuardHome Web UI at: ${BOLD}http://$lan_ipaddr/${RESET}"
                     printf "Disable Direct Access? [y/N]: "
@@ -3746,14 +3750,14 @@ manage_agh_direct_access() {
                     sed -i 's/ --glinet//g' "$AGH_INIT"
                     if [ "$PASS_STATUS" = "❌" ]; then
                         printf "\n"
-                        print_warning "No username/password has been set for AdGuardHome."
+                        print_warning "No username/password has been set for AdGuardHome"
                         printf "Would you like to set one now? [Y/n]: "
                         read -r set_pass
                         printf "\n"
                         if [ "$set_pass" != "n" ] && [ "$set_pass" != "N" ]; then
                             update_agh_credentials && continue
                         else
-                            print_warning "AdGuardHome Web UI will be UNSECURED (no password)."
+                            print_warning "AdGuardHome Web UI will be UNSECURED (no password)"
                             agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct Access enabled (Standalone Mode)."
                             press_any_key
                         fi
@@ -3770,13 +3774,13 @@ manage_agh_direct_access() {
                 clear
                 print_centered_header "Remove AdGuardHome Web UI Password"
                 if [ "$PASS_STATUS" = "❌" ]; then
-                    print_warning "No password currently exists."
+                    print_warning "No password currently exists"
                     press_any_key; continue
                 fi
                 if [ "$DIRECT_STATUS" = "✅" ]; then
-                    print_warning "This removes the Web UI credentials, leaving AdGuardHome OPEN (unsecured)."
+                    print_warning "This removes the Web UI credentials, leaving AdGuardHome OPEN (unsecured)"
                 else
-                    print_warning "This removes the AdGuardHome Web UI credentials."
+                    print_warning "This removes the AdGuardHome Web UI credentials"
                 fi
                 printf "Remove credentials? [y/N]: "
                 read -r confirm
@@ -3883,7 +3887,7 @@ create_agh_backup() {
             s)
                 if [ "$b_cfg" = "N" ] && [ "$b_bin" = "N" ] && [ "$b_ini" = "N" ]; then
                     printf "\n"
-                    print_error "Nothing selected to save."
+                    print_error "Nothing selected to save"
                     sleep 1
                     continue
                 fi
@@ -4067,7 +4071,7 @@ delete_agh_backups() {
                     print_error "No backups selected."; sleep 2; continue
                 fi
                 printf "\n"
-                print_warning "WARNING: You are about to permanently delete selected backups."
+                print_warning "WARNING: You are about to permanently delete selected backups"
                 printf "Delete selected backups? [y/N]: "; read -r confirm
                 case "$confirm" in
                     y|Y)
@@ -4075,7 +4079,7 @@ delete_agh_backups() {
                         [ "$sel" -eq 1 ] && bk_delete agh "$ts"
                     done < "$map_file"
                     printf "\n"
-                    print_success "Selected backups purged."
+                    print_success "Selected backups purged"
                     press_any_key;
                     rm -f "$map_file"
                     return ;;
@@ -4229,7 +4233,7 @@ sub_service_health() {
                ;;
             2)
                printf "\n"
-               print_warning "This clears all cached filter files; AdGuardHome re-downloads them on next start."
+               print_warning "This clears all cached filter files; AdGuardHome re-downloads them on next start"
                printf "Clear filter cache? [y/N]: "; read -r confirm
                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                    local wd=$(get_agh_workdir)
@@ -4274,7 +4278,7 @@ sub_confirm_factory_reset() {
         if is_agh_running; then
             kill -9 $(pidof AdGuardHome) >/dev/null 2>&1; sleep 1
         fi
-        print_success "Service stopped successfully."
+        print_success "Service stopped successfully"
     fi
 
     # --- 2. Restore Files from ROM ---
@@ -4298,13 +4302,13 @@ sub_confirm_factory_reset() {
             print_success "Full recovery successful! AdGuardHome auto-start re-enabled."
             printf "\n"
         else
-            print_warning "AdGuardHome was disabled in UCI."
+            print_warning "AdGuardHome was disabled in UCI"
             printf "Enable AdGuardHome? [y/N]: "; read -r confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
                 $L_INIT enable >/dev/null 2>&1; sleep 1
                 printf "\n"
-                print_success "AdGuardHome enabled in GL Web UI and UCI."
+                print_success "AdGuardHome enabled in GL Web UI and UCI"
                 printf "\n"
                 was_uci_enabled=1
             fi
@@ -4315,7 +4319,7 @@ sub_confirm_factory_reset() {
             print_info "Automatically restarting service"
             $L_INIT start >/dev/null 2>&1; sleep 2; print_success "Service restored to running state."
         elif [ "$was_uci_enabled" -eq 1 ]; then
-            print_warning "AdGuardHome is enabled but not running."
+            print_warning "AdGuardHome is enabled but not running"
             printf "Start the service? [y/N]: "; read -r confirm
             if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then 
                 printf "\n"
@@ -4471,159 +4475,180 @@ Important notes:
 Reach this screen from System Tweaks, or from AdGuardHome -> Advanced Settings
 -> Zram Swap (it pairs with the filter storage-space limit).
 
-In this menu you can:
-1. Install & enable zram swap
-2. Disable it (stops and disables on boot)
-3. Enable/Disable Persistence - survives firmware updates
-4. Completely uninstall the package
+Status + actions (the menu is context-aware - it shows only what applies):
+─────────────────────────────────────────────────────────────────────────
+The Zram Swap line shows one of:
+• NOT INSTALLED - the zram-swap package isn't installed.
+• DISABLED      - installed, but zram swap is off (the package is kept).
+• ENABLED       - on, with a zram device active in the swap table.
+• SERVICE DOWN  - it's enabled but no zram device is swapping (it didn't come up).
+
+Actions by state:
+• Install and enable - installs the zram-swap package, then enables and starts it.
+  (Shown when NOT INSTALLED.)
+• Enable  - turns it back on (instant - the package is already there).
+• Disable - stops zram swap but KEEPS the package and config, so re-enabling is
+  instant and lossless.
+• Reinstall - the fix for SERVICE DOWN: reinstalls the package and restarts it.
+  (Shown only when SERVICE DOWN.)
+• Uninstall - removes the zram-swap package and its persistence entries entirely.
+• Enable/Disable persistence - re-install zram swap automatically after a firmware
+  update (adds it to the boot re-install list). Available once it is enabled.
 HELPEOF
 }
 
 # Install and enable zram swap (shared by the Zram menu and the AGH Lists Manager
-# onboarding so the two never diverge). Prints its own progress.
+# onboarding so the two never diverge). Prints its own progress via the spinner.
 # Returns 0 if zram swap ends up active, 1 otherwise.
 zram_install_enable() {
-    if ! pkg_is_installed zram-swap; then
-        install_package zram-swap || return 1
+    if ! _zram_pkg_installed; then
+        install_package zram-swap || { print_error "The zram-swap package could not be installed"; return 1; }
     fi
     if [ ! -f /etc/init.d/zram ]; then
-        print_error "Zram init script not found"
+        print_error "The zram init script was not found"
         return 1
     fi
-    print_info "Enabling and starting zram swap"
-    /etc/init.d/zram enable >/dev/null 2>&1; sleep 1
-    /etc/init.d/zram start >/dev/null 2>&1; sleep 2
-    print_success "Zram swap enabled and started"
-    if swapon -s 2>/dev/null | grep -q zram; then
-        print_success "Zram swap is working correctly"
+    if spin_run "Starting zram swap" _zram_start_service; then
+        print_success "Zram swap enabled"
         return 0
     fi
-    print_warning "Zram swap may not be working properly"
+    print_error "Zram swap did not activate - no zram device is in the swap table"
     return 1
 }
 
+# ---- Zram feature-lifecycle callbacks + flows (drive the shared _lc_* helpers) --------
+# Accessor (not a top-level var) so it survives the e2e function-extraction and set -u.
+_zram_paths()         { printf '%s' "/etc/init.d/zram /etc/config/system"; }
+_zram_pkg_installed() { pkg_is_installed zram-swap || [ -f /etc/init.d/zram ]; }
+_zram_enabled()       { [ -f /etc/init.d/zram ] && /etc/init.d/zram enabled 2>/dev/null; }
+_zram_service_up()    { swapon -s 2>/dev/null | grep -q zram; }
+_zram_persist_is_on() {
+    local p c; c=$(_glpersist_keepconf)
+    for p in $(_zram_paths); do grep -qFx "$p" "$c" 2>/dev/null || return 1; done
+    return 0
+}
+
+# Enable + start zram and wait until a zram device is actually in the swap table. 0 on success.
+_zram_start_service() {
+    /etc/init.d/zram enable  >/dev/null 2>&1
+    /etc/init.d/zram restart >/dev/null 2>&1
+    local i; for i in 1 2 3 4 5; do _zram_service_up && return 0; sleep 1; done
+    return 1
+}
+# Stop + disable zram; 0 when no zram swap remains active.
+_zram_stop_service() {
+    [ -f /etc/init.d/zram ] && { /etc/init.d/zram stop >/dev/null 2>&1; /etc/init.d/zram disable >/dev/null 2>&1; }
+    sleep 1
+    ! _zram_service_up
+}
+# Disable KEEPS the package + config (lossless re-enable); Uninstall removes the package + persistence.
+_zram_disable()   { _zram_stop_service; return 0; }
+_zram_uninstall() {
+    _zram_stop_service
+    pkg_remove zram-swap >/dev/null 2>&1
+    local p; for p in $(_zram_paths); do _glpersist_keep_del "$p"; done
+    _conf_del "$(_lazlist)" zram-swap
+    return 0
+}
+_zram_reinstall_pkg() { pkg_install zram-swap >/dev/null 2>&1 || install_package zram-swap >/dev/null 2>&1; return 0; }
+
+_zram_enable_flow()  { zram_install_enable; }
+_zram_disable_flow() {
+    spin_run "Disabling zram swap" _zram_disable
+    print_success "Zram swap disabled (the package is kept - Enable is instant)"
+}
+_zram_reinstall_flow() {
+    spin_run "Reinstalling the zram-swap package" _zram_reinstall_pkg
+    if spin_run "Starting zram swap" _zram_start_service; then
+        print_success "Zram swap reinstalled and active"
+    else
+        print_error "Zram swap did not activate after reinstall"
+        print_info "Check ${GREY}logread | grep zram${RESET} and ${GREY}swapon -s${RESET}"
+    fi
+}
+_zram_uninstall_flow() {
+    local ans
+    printf "This removes the zram-swap package and its config. Uninstall? [y/N]: "; read -r ans; printf "\n"
+    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed"; return ;; esac
+    spin_run "Uninstalling the zram-swap package" _zram_uninstall
+    print_success "Zram swap uninstalled"
+}
+_zram_toggle_persistence() {
+    local p
+    if _zram_persist_is_on; then
+        for p in $(_zram_paths); do _glpersist_keep_del "$p"; done
+        _conf_del "$(_lazlist)" zram-swap
+        _persist_msg off "Zram swap"
+    else
+        for p in $(_zram_paths); do _glpersist_keep_add "$p"; done
+        _conf_add "$(_lazlist)" zram-swap
+        create_lazarus_hook
+        _persist_msg on "Zram swap"
+    fi
+}
+_zram_do() {   # <action_key>
+    case "$1" in
+        install_enable|enable) _zram_enable_flow ;;
+        disable)               _zram_disable_flow ;;
+        reinstall)             _zram_reinstall_flow ;;
+        uninstall)             _zram_uninstall_flow ;;
+    esac
+}
+
 manage_zram() {
-    local up_conf="/etc/sysupgrade.conf"
-    local laz_list="/etc/lazarus.list"
-
+    local state acts n a key choice per_status disksize disksize_mb
     while true; do
-		hash -r
-        zram_persisting=0
-        if grep -qFx "/etc/init.d/zram" "$up_conf" 2>/dev/null; then
-            zram_persisting=1
-        fi
-
+        hash -r
         clear
         print_centered_header "Zram Swap Management"
-        
+
+        state=$(_lc_state 1 _zram_pkg_installed _zram_enabled _zram_service_up)
+        _zram_persist_is_on && per_status="${GREEN}ENABLED${RESET}" || per_status="${YELLOW}DISABLED${RESET}"
+
         printf " %b\n" "${CYAN}STATUS${RESET}"
-        if command -v zram >/dev/null 2>&1 || [ -f /etc/init.d/zram ]; then
-            if /etc/init.d/zram enabled 2>/dev/null; then
-                printf "   Zram Swap:   %bENABLED%b\n" "${GREEN}" "${RESET}"
-                
-                if [ -f /sys/block/zram0/disksize ]; then
-                    disksize=$(cat /sys/block/zram0/disksize 2>/dev/null)
-                    disksize_mb=$((disksize / 1024 / 1024))
-                    printf "   Disk Size: %d MB\n" "$disksize_mb"
-                fi
-                
-                if swapon -s 2>/dev/null | grep -q zram; then
-                    printf "   Status: %bACTIVE%b\n" "${GREEN}" "${RESET}"
-                else
-                    printf "   Status: %bINACTIVE%b\n" "${YELLOW}" "${RESET}"
-                fi
-            else
-                printf "   Zram Swap:   %bDISABLED%b\n" "${YELLOW}" "${RESET}"
-            fi
-        else
-            printf "   Zram Swap:   %bNOT INSTALLED%b\n" "${RED}" "${RESET}"
+        printf "   %-13s %b\n" "Zram Swap:" "$(_lc_value "$state")"
+        if [ "$state" = ENABLED ] && [ -f /sys/block/zram0/disksize ]; then
+            disksize=$(cat /sys/block/zram0/disksize 2>/dev/null)
+            case "$disksize" in ''|*[!0-9]*) disksize=0 ;; esac
+            disksize_mb=$((disksize / 1024 / 1024))
+            printf "   %-13s %b\n" "Disk Size:" "${WHITE}${disksize_mb} MB${RESET}"
         fi
-        if [ "$zram_persisting" -eq 1 ]; then
-                printf "   Persistence: %bENABLED%b\n\n" "${GREEN}" "${RESET}"
-            else
-                printf "   Persistence: %bDISABLED%b\n\n" "${YELLOW}" "${RESET}"
-        fi
-        
-        local zram_persist_label="Enable Persistence"
-        [ "$zram_persisting" -eq 1 ] && zram_persist_label="Disable Persistence"
-        printf "%s%sInstall and Enable\n" "$N1" "$NSEP"
-        printf "%s%sDisable\n" "$N2" "$NSEP"
-        printf "%s%s%s\n" "$N3" "$NSEP" "$zram_persist_label"
-        printf "%s%sUninstall Package\n" "$N4" "$NSEP"
+        printf "   %-13s %b\n" "Persistence:" "$per_status"
+        printf "\n"
+
+        acts=$(_lc_actions "$state" 1); n=0
+        for a in $acts; do
+            n=$((n + 1)); eval "ZRAM_ACT_${n}=\"$a\""
+            printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$(_lc_label "$a")"
+        done
+        n=$((n + 1)); ZRAM_PERSIST_N=$n
+        if _zram_persist_is_on; then a="Disable persistence"; else a="Enable persistence"; fi
+        printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
         printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-4/0/?]: "
-        read -r zram_choice
-        printf "\n"
-        
-        case $zram_choice in
-            1)
-                zram_install_enable
-                press_any_key
-                ;;
-            2)
-                if [ -f /etc/init.d/zram ]; then
-                    /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
-                    /etc/init.d/zram disable >/dev/null 2>&1; sleep 1
-                    print_success "Zram swap disabled and stopped"
-                else
-                    print_warning "Zram swap is not installed"
-                fi
-                press_any_key
-                ;;
-            3)
-                if [ ! -f /etc/init.d/zram ]; then
-                    print_error "Zram swap is not installed."
-                else
-                    local z_paths="/etc/init.d/zram /etc/config/system"
-                    
-                    if [ "$zram_persisting" -eq 0 ]; then
-                        for p in $z_paths; do
-                            grep -qFx "$p" "$up_conf" || echo "$p" >> "$up_conf"
-                        done
-                        grep -qFx "zram-swap" "$laz_list" 2>/dev/null || echo "zram-swap" >> "$laz_list"
-                        create_lazarus_hook
-                        _persist_msg on "Zram swap"
-                    else
-                        for p in $z_paths; do
-                            sed -i "\|$p|d" "$up_conf" 2>/dev/null
-                        done
-                        sed -i "\|zram-swap|d" "$laz_list" 2>/dev/null
-                        _persist_msg off "Zram swap"
-                    fi
-                fi
-                press_any_key
-                ;;
-            4)
-                if pkg_is_installed zram-swap; then
-                    printf "Remove zram-swap package? [y/N]: "
-                    read -r confirm
-                    printf "\n"
-                    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                        [ -f /etc/init.d/zram ] && /etc/init.d/zram stop >/dev/null 2>&1; sleep 1
-                        pkg_remove zram-swap >/dev/null 2>&1
-                        for p in /etc/init.d/zram /etc/config/system; do
-                            sed -i "\|$p|d" "$up_conf" 2>/dev/null
-                        done
-                        sed -i "\|zram-swap|d" "$laz_list" 2>/dev/null
-                        
-                        print_success "zram-swap package removed"
-                    else
-                        printf "Removal cancelled."
-                    fi
-                else
-                    print_warning "zram-swap package is not installed"
-                fi
-                press_any_key
-                ;;
-            \?|h|H|❓)
-                show_zram_help
-                ;;
-            0)
-                return
-                ;;
-            *) print_error "Invalid option"; sleep 1 ;;
+        printf "\nChoose [1-%s/0/?]: " "$n"
+        read -r choice; printf "\n"
+
+        case "$choice" in
+            0) return ;;
+            \?|h|H|❓) show_zram_help; continue ;;
+            *[!0-9]*|"") print_error "Invalid choice"; sleep 1; continue ;;
         esac
+        if [ "$choice" = "$ZRAM_PERSIST_N" ]; then
+            if [ "$state" = NOT_INSTALLED ] || [ "$state" = DISABLED ]; then
+                print_warning "Enable zram swap first, then enable persistence"
+            else
+                _zram_toggle_persistence
+            fi
+            press_any_key; continue
+        fi
+        if [ "$choice" -ge 1 ] && [ "$choice" -lt "$ZRAM_PERSIST_N" ]; then
+            eval "key=\$ZRAM_ACT_${choice}"
+            _zram_do "$key"
+            press_any_key
+        else
+            print_error "Invalid choice"; sleep 1
+        fi
     done
 }
 
@@ -4902,7 +4927,7 @@ manage_fan_settings() {
                         echo "$(( (pct * 255 + 50) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
                         print_success "Manual mode active: $pct%"
                     else
-                        print_error "Invalid input."
+                        print_error "Invalid input"
                     fi
                     press_any_key; clear ;;
                 2)
@@ -4917,7 +4942,7 @@ manage_fan_settings() {
                     if [ -n "$val" ] && [ "$val" -le "$u_cur" ]; then
                         sync_system_and_ui "$val" "$u_cur" "$u_wrn" "$ui_max"
                         printf "\n"
-                        print_success "Minimum setpoint updated to ${val}°C (System & UI)."
+                        print_success "Minimum setpoint updated to ${val}°C (System & UI)"
                     else
                         printf "\n"
                         print_error "Must be a number and ≤ Fan-On ($u_cur°C)"
@@ -4965,7 +4990,7 @@ manage_fan_settings() {
                         fi
                         sync_system_and_ui "$u_min" "$u_cur" "$u_wrn" "$val"
                         printf "\n"
-                        print_success "Max setpoint updated to ${val}°C."
+                        print_success "Max setpoint updated to ${val}°C"
                     else
                         printf "\n"
                         print_error "Must be between Fan-On ($u_cur°C) and 120°C"
@@ -4977,11 +5002,11 @@ manage_fan_settings() {
                     glwebui_disable fan   # drop the fan app-bundle patch, re-paint terminal/switch if active
                     glpersist_is_on fan && glpersist_disable fan   # nothing left to persist
                     printf "\n"
-                    print_success "Factory defaults restored."
+                    print_success "Factory defaults restored"
                     press_any_key; clear ;;
                 8)
                     if ! glwebui_is_on fan; then
-                        print_warning "Set a fan value first so the Web-UI patch is active, then enable persistence."
+                        print_warning "Set a fan value first so the Web-UI patch is active, then enable persistence"
                         press_any_key; clear; continue
                     fi
                     if glpersist_is_on fan; then
@@ -4990,7 +5015,7 @@ manage_fan_settings() {
                     elif glpersist_enable fan; then
                         _persist_msg on "fan control"
                     else
-                        print_error "Could not enable persistence (no installable toolkit copy found)."
+                        print_error "Could not enable persistence (no installable toolkit copy found)"
                     fi
                     press_any_key; clear ;;
                 0) return ;;
@@ -5574,7 +5599,7 @@ _netlimit_offload_ok() {
     # for, not a caution against it - so ℹ️, one concise factual line, and a [Y/n] default (they
     # already entered a limit; the change auto-reverts). Mid-flow interruption keeps its blank above (rule #1).
     printf '\n'
-    print_info "Bandwidth limiting requires HW acceleration OFF and may impact network and router performance."
+    print_info "Bandwidth limiting requires HW acceleration OFF and may impact network and router performance"
     printf "Apply the limit now? [Y/n]: "
     local a; read -r a
     # The blank line before the apply gear is added by the caller (so it also appears when this
@@ -5905,7 +5930,7 @@ manage_netlimit() {
     # Preflight: shaping needs tc (tc-tiny). Present on GL firmware; require_cmd reinstalls it if a
     # user removed it. (The HTB/IFB kernel modules are a separate, rarer gap - see the backlog.)
     if ! require_cmd tc tc-tiny "traffic control (tc)"; then
-        print_warning "Traffic control (tc) isn't available - limits can't be applied until it's installed."
+        print_warning "Traffic control (tc) isn't available - limits can't be applied until it's installed"
         press_any_key
     fi
     while true; do
@@ -5959,14 +5984,14 @@ manage_netlimit() {
                 if [ "$(offload_state)" = on ]; then
                     spin_run "Disabling HW acceleration" set_hw_accel 0; _netlimit_build_map
                 elif netlimit_any_limited; then
-                    print_warning "Active limits will stop working with HW acceleration on (offload bypasses the shaper)."
+                    print_warning "Active limits will stop working with HW acceleration on (offload bypasses the shaper)"
                     printf "Enable anyway? [y/N]: "; read -r a; printf '\n'
                     case "$a" in y|Y) spin_run "Enabling HW acceleration" set_hw_accel 1; _netlimit_build_map ;; esac
                 else
                     spin_run "Enabling HW acceleration" set_hw_accel 1; _netlimit_build_map
                 fi ;;
             r|R)
-                print_warning "This removes every limit and router rule, re-enables HW acceleration, and stops the background service."
+                print_warning "This removes every limit and router rule, re-enables HW acceleration, and stops the background service"
                 printf "Revert to defaults? [y/N]: "; read -r a; printf '\n'
                 case "$a" in y|Y) spin_run "Reverting to defaults" netlimit_reset_all; _netlimit_build_map ;; esac ;;
             \?|help) show_netlimit_help ;;
@@ -6204,8 +6229,8 @@ _switch_set_function() {
         if [ -n "$subid" ]; then uci set switch-button.@main[0].sub_func="$subid"; else uci -q delete switch-button.@main[0].sub_func 2>/dev/null; fi
     fi
     uci commit switch-button
-    print_success "Toggle button function set to: $(_switch_func)."
-    print_info "Takes effect the next time the switch is flipped (or on reboot)."
+    print_success "Toggle button function set to: $(_switch_func)"
+    print_info "Takes effect the next time the switch is flipped (or on reboot)"
     press_any_key
 }
 
@@ -6260,6 +6285,59 @@ INITEOF
     chmod +x "$SWITCH_INIT"
 }
 
+# ---- Switch-indicator feature-lifecycle callbacks + flows -----------------------------
+# Service-only (no package): pkg_backed=0, so it is never NOT INSTALLED and has no Uninstall.
+# "Enabled" = the overlay is registered (intent on); "service up" = the gl_switchpos poller is
+# running. Overlay off = DISABLED; overlay on + poller up = ENABLED; overlay on + poller dead =
+# SERVICE DOWN. This collapses the old separate "Web-UI overlay" + "Live updates" rows into the
+# one lifecycle value (they are linked - see the feature-lifecycle standard).
+_switch_enabled() { glwebui_is_on switch; }
+
+# Enable/reinstall: write the backend, start the poller, inject the overlay, verify it painted.
+_switch_enable_flow() {
+    if [ -z "$(glwebui_appjs)" ] || [ -z "$(ls /rom/www/js/app.*.js.gz 2>/dev/null)" ]; then
+        print_error "The admin-panel bundle or its ROM base was not found, so the overlay can't be injected"
+        return
+    fi
+    mkdir -p /etc/glinet_utils
+    _switch_write_backend
+    if ! spin_run "Starting the switch-position backend service" _switch_start_service; then
+        print_error "The backend service did not start or did not publish a position"
+        print_info "Check ${GREY}logread | grep gl_switchpos${RESET} and whether ${GREY}$SWITCH_JSON${RESET} exists"
+        return
+    fi
+    spin_run "Adding the switch-position overlay to the Web-UI" glwebui_enable switch
+    if glwebui_is_on switch && zcat "$(glwebui_appjs)" 2>/dev/null | grep -q "gl-switchpos-ind"; then
+        print_success "Switch-position indicator enabled (position now: $(_switch_pos))"
+    else
+        print_error "The overlay did not take - the admin-panel bundle may lack a ROM base"
+    fi
+}
+# Disable (service-only): remove the overlay + stop/remove the backend (nothing to keep).
+_switch_disable_flow() {
+    if [ -n "$(glwebui_appjs)" ] && [ -n "$(ls /rom/www/js/app.*.js.gz 2>/dev/null)" ]; then
+        spin_run "Removing the switch-position overlay" glwebui_disable switch
+    else
+        print_warning "ROM base not found, so the bundle restore was skipped"
+    fi
+    spin_run "Stopping the backend service" _switch_stop_service
+    glpersist_is_on switch && glpersist_disable switch   # nothing left to persist
+    print_success "Switch-position indicator disabled"
+}
+_switch_reinstall_flow() { _switch_enable_flow; }   # SERVICE DOWN remediation = full re-apply
+_switch_toggle_persistence() {
+    if glpersist_is_on switch; then glpersist_disable switch; _persist_msg off "the switch position indicator"
+    elif glpersist_enable switch; then _persist_msg on "the switch position indicator"
+    else print_error "Could not enable persistence (no installable toolkit copy found)"; fi
+}
+_switch_do() {   # <action_key>
+    case "$1" in
+        enable)    _switch_enable_flow ;;
+        disable)   _switch_disable_flow ;;
+        reinstall) _switch_reinstall_flow ;;
+    esac
+}
+
 show_switch_indicator_help() {
     show_paged "Switch Position Indicator - Help" << 'HELPEOF'
 Switch Position Indicator – Quick Help
@@ -6283,27 +6361,33 @@ The STATUS lines
   WireGuard, VPN, Tor) - "None" if none is assigned. When a function IS assigned it
   also shows (ON)/(OFF): the same logical pressed/released state GL's own button
   handler acts on, derived the way GL derives it.
-• Web-UI overlay: whether the green indicator is currently injected into the panel.
-• Live updates: whether the background reader is running so the panel's indicator
-  stays current when you flip the switch (ON = live, OFF = it would go stale).
+• Indicator: the one lifecycle value for the overlay + its backend reader (they are
+  linked, so they share one state):
+  - DISABLED     - the overlay is off.
+  - ENABLED      - the overlay is injected and the background reader is live, so the
+                   panel's indicator stays current when you flip the switch.
+  - SERVICE DOWN - the overlay is on but the background reader died, so the panel
+                   would go stale. Use Reinstall to recover.
 • Persistence: whether the indicator is re-applied automatically after a firmware
-  update (ENABLED) or would need a manual re-install (DISABLED). See option 4.
+  update (ENABLED) or would need a manual re-enable (DISABLED).
 
 How it works
 ────────────
 • Backend (gl_switchpos): a tiny Procd service reads the switch GPIO and publishes
   the position to /www/gl-switchpos.json (only on change - negligible flash wear).
-  That is the "Live updates" line above.
 • Frontend (JS overlay): the shared glwebui registry appends a small script to the
   admin-panel bundle that polls that file and paints the active side. It draws only
   on the Toggle Button Settings page.
 
-Options
-───────
-• Install in Web-UI: writes + starts the backend service and injects the overlay.
-  Once installed this option reads "Reinstall / re-apply overlay" - handy after a
-  firmware upgrade resets the panel; it re-applies without a fresh install.
-• Remove from Web-UI: removes the overlay and stops/removes the backend service.
+Status + actions (the menu is context-aware - it shows only what applies)
+────────────────────────────────────────────────────────────────────────
+• Enable: writes + starts the backend service and injects the overlay. (Shown when
+  DISABLED.)
+• Disable: removes the overlay and stops/removes the backend service. (Shown when
+  ENABLED - there is no package to keep, so Disable removes everything.)
+• Reinstall: the fix for SERVICE DOWN - re-writes the backend, restarts it, and
+  re-injects the overlay. Also handy after a firmware upgrade resets the panel.
+  (Shown only when SERVICE DOWN.)
 • Set toggle button function: assign what the switch does (No Function, Repeater,
   Wi-Fi, a VPN tunnel, LED, ...). The choices come from GL's own handlers + tunnel
   list - the same set as GL's Toggle Button Settings dropdown. It takes effect on
@@ -6333,110 +6417,80 @@ HELPEOF
 }
 
 manage_switch_indicator() {
-    local sw_choice sup pos inj svc _fn _st _fnval l1 l2 per
+    local state acts n a key choice sup pos _fn _st _fnval per
     while true; do
         clear
         print_centered_header "Switch Position Indicator"
 
         if _switch_supported; then sup="${GREEN}DETECTED${RESET} ${GREY}(gpio-$(_switch_gpio))${RESET}"; else sup="${RED}NOT DETECTED${RESET}"; fi
-        glwebui_is_on switch && inj="${GREEN}ENABLED${RESET}" || inj="${YELLOW}DISABLED${RESET}"
-        _switch_service_running && svc="${GREEN}ON${RESET}" || svc="${RED}OFF${RESET}"
+
+        if ! _switch_supported; then
+            printf " %b\n" "${CYAN}STATUS${RESET}"
+            printf "   %-18s %b\n" "Hardware:" "$sup"
+            printf "\n"
+            print_warning "This model has no physical toggle switch, so a position indicator can't be shown"
+            printf "%s%sBack\n" "$N0" "$NSEP"
+            printf "%s Help\n" "$NQ"
+            printf "\nChoose [0/?]: "
+            read -r choice; printf "\n"
+            case "$choice" in 0) return ;; \?|h|H|❓) show_switch_indicator_help ;; *) : ;; esac
+            continue
+        fi
+
+        state=$(_lc_state 0 : _switch_enabled _switch_service_running)
         glpersist_is_on switch && per="${GREEN}ENABLED${RESET}" || per="${YELLOW}DISABLED${RESET}"
 
         printf " %b\n" "${CYAN}STATUS${RESET}"
         printf "   %-18s %b\n" "Hardware:" "$sup"
-        if _switch_supported; then
-            pos=$(_switch_pos 2>/dev/null)
-            if [ -n "$pos" ]; then printf "   %-18s %b\n" "Position:" "${WHITE}${pos}${RESET}"; else printf "   %-18s %b\n" "Position:" "${GREY}UNKNOWN${RESET}"; fi
-            _fn=$(_switch_func); _st=$(_switch_state 2>/dev/null)
-            if [ "$_st" = ON ]; then _fnval="${WHITE}${_fn}${RESET} ${GREEN}(ON)${RESET}"
-            elif [ "$_st" = OFF ]; then _fnval="${WHITE}${_fn}${RESET} ${GREY}(OFF)${RESET}"
-            else _fnval="${WHITE}${_fn}${RESET}"; fi
-            printf "   %-18s %b\n" "Toggle function:" "$_fnval"
-            printf "   %-18s %b\n" "Web-UI overlay:" "$inj"
-            printf "   %-18s %b\n" "Live updates:" "$svc"
-            printf "   %-18s %b\n" "Persistence:" "$per"
-        fi
+        pos=$(_switch_pos 2>/dev/null)
+        if [ -n "$pos" ]; then printf "   %-18s %b\n" "Position:" "${WHITE}${pos}${RESET}"; else printf "   %-18s %b\n" "Position:" "${GREY}UNKNOWN${RESET}"; fi
+        _fn=$(_switch_func); _st=$(_switch_state 2>/dev/null)
+        if [ "$_st" = ON ]; then _fnval="${WHITE}${_fn}${RESET} ${GREEN}(ON)${RESET}"
+        elif [ "$_st" = OFF ]; then _fnval="${WHITE}${_fn}${RESET} ${GREY}(OFF)${RESET}"
+        else _fnval="${WHITE}${_fn}${RESET}"; fi
+        printf "   %-18s %b\n" "Toggle function:" "$_fnval"
+        printf "   %-18s %b\n" "Indicator:" "$(_lc_value "$state")"
+        printf "   %-18s %b\n" "Persistence:" "$per"
         printf "\n"
 
-        if ! _switch_supported; then
-            print_warning "This model has no physical toggle switch, so a position indicator can't be shown."
-            printf "%s%sBack\n" "$N0" "$NSEP"
-            printf "%s Help\n" "$NQ"
-            printf "\nChoose [0/?]: "
-            read -r sw_choice; printf "\n"
-            case "$sw_choice" in 0) return ;; \?|h|H|❓) show_switch_indicator_help ;; *) : ;; esac
-            continue
-        fi
-
-        if _switch_installed; then l1="Reinstall / re-apply overlay"; else l1="Install in Web-UI"; fi
-        if glpersist_is_on switch; then l2="Disable persistence"; else l2="Enable persistence"; fi
-        printf "%s%s%s\n" "$N1" "$NSEP" "$l1"
-        printf "%s%sRemove from Web-UI\n" "$N2" "$NSEP"
-        printf "%s%sSet toggle button function\n" "$N3" "$NSEP"
-        printf "%s%s%s\n" "$N4" "$NSEP" "$l2"
+        acts=$(_lc_actions "$state" 0); n=0
+        for a in $acts; do
+            n=$((n + 1)); eval "SW_ACT_${n}=\"$a\""
+            printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$(_lc_label "$a")"
+        done
+        n=$((n + 1)); SW_FUNC_N=$n
+        printf "%s%sSet toggle button function\n" "$(_lc_num "$n")" "$NSEP"
+        n=$((n + 1)); SW_PERSIST_N=$n
+        if glpersist_is_on switch; then a="Disable persistence"; else a="Enable persistence"; fi
+        printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
         printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-4/0/?]: "
-        read -r sw_choice; printf "\n"
+        printf "\nChoose [1-%s/0/?]: " "$n"
+        read -r choice; printf "\n"
 
-        case "$sw_choice" in
-            1)
-                if [ -z "$(glwebui_appjs)" ] || [ -z "$(ls /rom/www/js/app.*.js.gz 2>/dev/null)" ]; then
-                    print_error "Admin-panel bundle or its ROM base was not found; can't inject."
-                    press_any_key; continue
-                fi
-                if _switch_installed; then print_info "Already installed - re-applying the overlay and backend."; printf "\n"; fi
-                mkdir -p /etc/glinet_utils
-                _switch_write_backend
-                if ! spin_run "Starting switch-position backend service" _switch_start_service; then
-                    print_error "The backend service did not start or did not publish a position."
-                    print_info "Check ${GREY}logread | grep gl_switchpos${RESET} and whether ${GREY}$SWITCH_JSON${RESET} exists."
-                    press_any_key; continue
-                fi
-                spin_run "Patching Web-UI overlay into the admin panel" glwebui_enable switch
-                if glwebui_is_on switch && zcat "$(glwebui_appjs)" 2>/dev/null | grep -q "gl-switchpos-ind"; then
-                    print_success "Switch-position indicator $([ "$l1" = "Install in Web-UI" ] && echo installed || echo re-applied) (position now: $(_switch_pos))."
-                else
-                    print_error "The overlay did not take - the admin-panel bundle may lack a ROM base."
-                    press_any_key; continue
-                fi
-                press_any_key ;;
-            2)
-                if ! glwebui_is_on switch && [ ! -f "$SWITCH_INIT" ]; then
-                    print_warning "The switch-position indicator isn't installed - nothing to remove."
-                    press_any_key; continue
-                fi
-                if [ -n "$(glwebui_appjs)" ] && [ -n "$(ls /rom/www/js/app.*.js.gz 2>/dev/null)" ]; then
-                    spin_run "Removing the Web-UI overlay" glwebui_disable switch
-                    print_success "Overlay removed from the Web-UI (terminal/fan re-painted if active)."
-                else
-                    print_warning "ROM base not found; skipped the bundle restore."
-                fi
-                spin_run "Stopping and removing the backend service" _switch_stop_service
-                print_success "Backend service stopped and removed."
-                glpersist_is_on switch && glpersist_disable switch   # nothing left to persist
-                press_any_key ;;
-            3)
-                _switch_set_function ;;
-            4)
-                if ! _switch_installed; then
-                    print_warning "Install the switch-position indicator first, then enable persistence."
-                    press_any_key; continue
-                fi
-                if glpersist_is_on switch; then
-                    glpersist_disable switch
-                    _persist_msg off "the switch position indicator"
-                elif glpersist_enable switch; then
-                    _persist_msg on "the switch position indicator"
-                else
-                    print_error "Could not enable persistence (no installable toolkit copy found)."
-                fi
-                press_any_key ;;
+        case "$choice" in
             0) return ;;
-            \?|h|H|❓) show_switch_indicator_help ;;
-            *) print_error "Invalid choice"; sleep 1 ;;
+            \?|h|H|❓) show_switch_indicator_help; continue ;;
+            *[!0-9]*|"") print_error "Invalid choice"; sleep 1; continue ;;
         esac
+        if [ "$choice" = "$SW_FUNC_N" ]; then
+            _switch_set_function; continue        # owns its own press_any_key / quiet cancel
+        fi
+        if [ "$choice" = "$SW_PERSIST_N" ]; then
+            if [ "$state" = DISABLED ]; then
+                print_warning "Enable the switch-position indicator first, then enable persistence"
+            else
+                _switch_toggle_persistence
+            fi
+            press_any_key; continue
+        fi
+        if [ "$choice" -ge 1 ] && [ "$choice" -lt "$SW_FUNC_N" ]; then
+            eval "key=\$SW_ACT_${choice}"
+            _switch_do "$key"
+            press_any_key
+        else
+            print_error "Invalid choice"; sleep 1
+        fi
     done
 }
 
@@ -6942,6 +6996,14 @@ _glpersist_keep_add() { local c; c=$(_glpersist_keepconf); [ -f "$c" ] || : > "$
 # whose in-place flag differs between them).
 _glpersist_keep_del() { local c t; c=$(_glpersist_keepconf); [ -f "$c" ] || return 0; t="$c.tmp.$$"; grep -vFx "$1" "$c" > "$t" 2>/dev/null; mv "$t" "$c"; }
 
+# Generic idempotent line add / exact-line delete in an arbitrary list file (same portable
+# tmp+mv idiom as the keep-list helpers - no sed -i, whose in-place flag differs across
+# busybox/BSD/GNU). Used for /etc/lazarus.list (the package re-install list) by the
+# package-backed features' persistence toggles. GLLAZ_LIST lets the test harness redirect it.
+_lazlist() { printf '%s' "${GLLAZ_LIST:-/etc/lazarus.list}"; }
+_conf_add() { local f="$1" l="$2"; [ -f "$f" ] || : > "$f"; grep -qFx "$l" "$f" 2>/dev/null || printf '%s\n' "$l" >> "$f"; }
+_conf_del() { local f="$1" l="$2" t; [ -f "$f" ] || return 0; t="$f.tmp.$$"; grep -vFx "$l" "$f" > "$t" 2>/dev/null; mv "$t" "$f"; }
+
 # The headless boot service calls the toolkit at INSTALL_PATH, so make sure a real copy
 # lives there (the running script may be /root/...). Guarded by _is_toolkit_file so we never
 # copy a mis-resolved path (see the installer busybox note).
@@ -7224,11 +7286,11 @@ _ttyd_gen_cert() {
 
 _ttyd_service_failure_report() {
     local port why; port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${port:=7681}"
-    print_error "ttyd did not start - nothing is listening on port ${port}."
+    print_error "ttyd did not start - nothing is listening on port ${port}"
     why=$(logread 2>/dev/null | grep -i ttyd | tail -3)
     [ -n "$why" ] && { print_info "Last ttyd log lines:"; printf '%s\n' "$why" | sed 's/^/   /'; }
-    print_info "Common causes: an invalid certificate, a wrong system clock, or port ${port} already in use."
-    print_warning "The terminal button was not added (it would open a dead page)."
+    print_info "Common causes: an invalid certificate, a wrong system clock, or port ${port} already in use"
+    print_warning "The terminal button was not added (it would open a dead page)"
 }
 
 # _ttyd_disable / _ttyd_uninstall - wrapped by spin_run. Disable KEEPS the package
@@ -7259,7 +7321,7 @@ _ttyd_enable_flow() {
     if grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null; then proto=https
     elif [ -f /etc/config/ttyd ]; then proto=http
     elif [ "$(uci -q get uhttpd.main.redirect_https 2>/dev/null)" = 1 ]; then
-        print_info "The Admin Panel forces HTTPS, so the terminal will use HTTPS."
+        print_info "The Admin Panel forces HTTPS, so the terminal will use HTTPS"
         proto=https
     else
         print_info "HTTP is simplest. HTTPS works too but needs a one-time browser certificate acceptance."
@@ -7275,7 +7337,7 @@ _ttyd_enable_flow() {
     _ttyd_write_config "$proto"
     if spin_run "Starting the ttyd service" _ttyd_start_service; then
         spin_run "Adding the terminal button to the Web-UI" glwebui_enable ttyd "$proto"
-        print_success "Web Terminal enabled."
+        print_success "Web Terminal enabled"
         if [ "$proto" = https ]; then
             ip=$(get_lan_ip)
             print_warning "HTTPS terminal: visit ${CYAN}https://${ip}:7681${RESET} once and accept the\ncertificate, or the embedded terminal stays blank."
@@ -7286,14 +7348,14 @@ _ttyd_enable_flow() {
 }
 _ttyd_disable_flow() {
     spin_run "Disabling the Web Terminal" _ttyd_disable
-    print_success "Web Terminal disabled (the package is kept - Enable is instant)."
+    print_success "Web Terminal disabled (the package is kept - Enable is instant)"
 }
 _ttyd_reinstall_flow() {
     local proto; grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && proto=https || proto=http
     spin_run "Reinstalling the ttyd package" _ttyd_reinstall_pkg
     if spin_run "Starting the ttyd service" _ttyd_start_service; then
         spin_run "Re-adding the terminal button to the Web-UI" glwebui_enable ttyd "$proto"
-        print_success "Web Terminal reinstalled and running."
+        print_success "Web Terminal reinstalled and running"
     else
         _ttyd_service_failure_report
     fi
@@ -7303,7 +7365,7 @@ _ttyd_uninstall_flow() {
     printf "This removes the ttyd package and its config. Uninstall? [y/N]: "; read -r ans; printf "\n"
     case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed."; return ;; esac
     spin_run "Uninstalling the ttyd package" _ttyd_uninstall
-    print_success "Web Terminal uninstalled."
+    print_success "Web Terminal uninstalled"
 }
 _ttyd_toggle_persistence() {
     if glpersist_is_on ttyd; then glpersist_disable ttyd; _persist_msg off "the Web Terminal"
@@ -7325,7 +7387,7 @@ manage_web_terminal() {
         clear
         print_centered_header "Web-UI Terminal Interface"
         if [ -z "$(glwebui_appjs)" ]; then
-            print_error "The admin-panel bundle was not found; can't manage the Web Terminal."
+            print_error "The admin-panel bundle was not found; can't manage the Web Terminal"
             press_any_key; return
         fi
 
@@ -7363,7 +7425,7 @@ manage_web_terminal() {
         esac
         if [ "$choice" = "$TTYD_PERSIST_N" ]; then
             if [ "$state" = NOT_INSTALLED ] || [ "$state" = DISABLED ]; then
-                print_warning "Enable the Web Terminal first, then enable persistence."
+                print_warning "Enable the Web Terminal first, then enable persistence"
             else
                 _ttyd_toggle_persistence
             fi
@@ -7879,7 +7941,7 @@ EOF
                         fi
                     done < "$map_file"
                     if [ "$install_fail" -eq 0 ] && [ -z "$rem_fail" ] && [ -z "$rem_kept" ] && [ -z "$rem_forced" ]; then
-                        print_success "System changes applied."
+                        print_success "System changes applied"
                     else
                         print_warning "Changes applied, with exceptions:"
                         [ "$install_fail" -gt 0 ] && printf "   %d package(s) failed to install.\n" "$install_fail"
@@ -7996,21 +8058,21 @@ manage_ssh_keys() {
                     # Extract base64 part for duplicate check
                     local key_base64=$(echo "$new_key" | awk '{print $2}')
                     if [ -f "$auth_file" ] && grep -q "$key_base64" "$auth_file"; then
-                        print_warning "Key already exists in authorized_keys."
+                        print_warning "Key already exists in authorized_keys"
                     else
                         mkdir -p /etc/dropbear
                         echo "$new_key" >> "$auth_file"
                         chmod 0700 /etc/dropbear && chmod 0600 "$auth_file"
-                        print_success "Key added successfully."
+                        print_success "Key added successfully"
                     fi
                 else
-                    print_error "Invalid key format."
+                    print_error "Invalid key format"
                 fi
                 press_any_key ;;
 
             2) # MANAGE / DELETE UI
                 if [ ! -s "$auth_file" ]; then
-                    print_error "No keys found to manage."
+                    print_error "No keys found to manage"
                     sleep 1; continue
                 fi
 
@@ -8074,7 +8136,7 @@ manage_ssh_keys() {
                                         mv "$tmp_auth" "$auth_file"
                                     fi
                                     chmod 0600 "$auth_file"
-                                    print_success "Keys updated."
+                                    print_success "Keys updated"
                                     break 2
                                 fi ;;
                             0) break 2 ;;
@@ -8177,14 +8239,14 @@ set_toolkit_persistence() {
             printf "%s\n" "$INSTALL_PATH" >> "$keep_conf"
             _persist_msg on "the toolkit"
         else
-            print_info "Persistence already enabled — no change."
+            print_info "Persistence already enabled — no change"
         fi
     else
         if grep -qFx "$INSTALL_PATH" "$keep_conf" 2>/dev/null; then
             sed -i "\|^${INSTALL_PATH}$|d" "$keep_conf" 2>/dev/null
             _persist_msg off "the toolkit"
         else
-            print_info "Persistence already disabled — no change."
+            print_info "Persistence already disabled — no change"
         fi
     fi
 }
@@ -8242,7 +8304,7 @@ check_install_prompt() {
     [ "$INSTALL_PROMPTED" -eq 1 ] && return
     _is_toolkit_file "$SCRIPT_PATH" || return   # piped/stdin run: no real file to install, don't offer
 
-    print_info "Installing to $INSTALL_PATH lets you run this program from anywhere as a system command."
+    print_info "Installing to $INSTALL_PATH lets you run this program from anywhere as a system command"
     printf "Install as a system command? [Y/n]: "
     read -r ip_ans
     printf "\n"
@@ -8263,7 +8325,7 @@ do_install_to_sbin() {
     # Never copy anything that isn't this toolkit (see _is_toolkit_file). A piped run mis-resolves
     # SCRIPT_PATH to /bin/sh -> busybox; copying that would brick the installed command.
     if ! _is_toolkit_file "$SCRIPT_PATH"; then
-        print_error "Can't install: couldn't locate the running script."
+        print_error "Can't install: couldn't locate the running script"
         print_info "This happens when the toolkit is piped into a shell. Save it to a file and run that:"
         print_info "  sh glinet_utils.sh"
         press_any_key
@@ -8461,7 +8523,7 @@ manage_display_settings() {
                     *)      pref_label="$new_pref"   ;;
                 esac
                 printf "\n"
-                print_info "Set display mode to $pref_label."
+                print_info "Set display mode to $pref_label"
                 printf "   Save as default? [Y/n]: "
                 read -r ds_save
                 printf "\n"
@@ -8469,7 +8531,7 @@ manage_display_settings() {
                     n|N)
                         OUTPUT_PREF="$new_pref"
                         detect_output_mode
-                        print_info "Applied for this session only (not saved)."
+                        print_info "Applied for this session only (not saved)"
                         ;;
                     *)
                         sed -i "s/^OUTPUT_PREF=\"[^\"]*\"/OUTPUT_PREF=\"$new_pref\"/" "$SCRIPT_PATH"
@@ -8562,9 +8624,9 @@ manage_toolkit() {
             1)
                 if toolkit_is_installed; then
                     # Uninstall path
-                    print_warning "This will remove $INSTALL_PATH from the system."
+                    print_warning "This will remove $INSTALL_PATH from the system"
                     if [ "$SCRIPT_PATH" = "$INSTALL_PATH" ]; then
-                        print_warning "You are currently running the installed copy."
+                        print_warning "You are currently running the installed copy"
                         printf "   After removal, run the script directly from its local path.\n"
                     fi
                     printf "   Remove the toolkit? [y/N]: "; read -r c; printf "\n"
@@ -8572,7 +8634,7 @@ manage_toolkit() {
                         y|Y)
                             rm -f "$INSTALL_PATH"
                             set_toolkit_persistence 0
-                            print_success "Uninstalled."
+                            print_success "Uninstalled"
                             press_any_key
                             ;;
                         *) print_info "No change."; press_any_key ;;
@@ -8580,7 +8642,7 @@ manage_toolkit() {
                 else
                     # Install path
                 if [ "$SCRIPT_PATH" = "$INSTALL_PATH" ]; then
-                    print_info "Already running from the installed location."
+                    print_info "Already running from the installed location"
                     press_any_key
                 else
                         do_install_to_sbin "$@"
@@ -8589,7 +8651,7 @@ manage_toolkit() {
                 ;;
             2)
                 if ! toolkit_is_installed; then
-                    print_error "Not installed — install first (option 1)."
+                    print_error "Not installed — install first (option 1)"
                     sleep 2; continue
                 fi
                 if toolkit_persistence_enabled; then
@@ -8605,7 +8667,7 @@ manage_toolkit() {
             4)
                 CL_EXIT_LABEL="Back"
                 if ! show_changelog "$@"; then
-                    print_warning "Unable to fetch the change log (network or GitHub issue)."
+                    print_warning "Unable to fetch the change log (network or GitHub issue)"
                     press_any_key
                 fi
                 CL_EXIT_LABEL=""
@@ -8795,16 +8857,16 @@ mtu_apply() {
         sleep 1
         if [ -n "$wrote" ]; then
             print_success "MTU on $iface is now $(mtu_get "$iface") (saved to the router's VPN config)."
-            print_info "Shows in the GL web UI under this tunnel's Options and survives a reboot."
+            print_info "Shows in the GL web UI under this tunnel's Options and survives a reboot"
         elif [ -n "$primary" ]; then
             print_success "MTU on $iface is now $(mtu_get "$iface")."
-            print_warning "Config write to $primary.mtu did not stick — applied live only, may not survive a reboot."
+            print_warning "Config write to $primary.mtu did not stick — applied live only, may not survive a reboot"
         else
             print_success "MTU on $iface is now $(mtu_get "$iface")."
-            print_warning "Applied live only — this firmware's config layout isn't mapped, so it may not survive a reboot."
+            print_warning "Applied live only — this firmware's config layout isn't mapped, so it may not survive a reboot"
         fi
     else
-        print_error "Failed to set MTU on $iface to $val."
+        print_error "Failed to set MTU on $iface to $val"
     fi
 }
 
@@ -8892,9 +8954,9 @@ mtu_probe_render() {
         *)              applyval="$old_rec"; print_info "Falling back to the Calculated ${old_rec:-N/A}; this value was not actively verified." ;;
     esac
     if [ -n "$applyval" ] && [ -n "$cur" ] && [ "$cur" != "$applyval" ]; then
-        print_info "To apply $applyval, choose [1] Optimize tunnel."
+        print_info "To apply $applyval, choose [1] Optimize tunnel"
     elif [ -n "$applyval" ] && [ "$cur" = "$applyval" ] && { [ "$outcome" = confirm ] || [ "$outcome" = revise ]; }; then
-        print_info "Current MTU already matches — nothing to change."
+        print_info "Current MTU already matches — nothing to change"
     fi
 }
 
@@ -8961,16 +9023,16 @@ mtu_probe() {
 
     if [ -z "$endpoint" ] && [ -z "$peer_ip" ]; then
         printf "\n"
-        print_warning "Active probe isn't available for this tunnel."
+        print_warning "Active probe isn't available for this tunnel"
         if [ "$type" = WireGuard ] && [ "$role" = Server ]; then
             npeers=$(wg show "$iface" allowed-ips 2>/dev/null | grep -c .)
             if [ "${npeers:-0}" -gt 0 ]; then
-                print_info "$npeers peer(s) configured, but none has connected - nothing live to probe."
+                print_info "$npeers peer(s) configured, but none has connected - nothing live to probe"
             else
-                print_info "No peers are configured on this server."
+                print_info "No peers are configured on this server"
             fi
         else
-            print_info "No public endpoint or peer tunnel IP could be determined."
+            print_info "No public endpoint or peer tunnel IP could be determined"
         fi
         press_any_key; return
     fi
@@ -9026,13 +9088,13 @@ mtu_probe() {
             press_any_key; return
         fi
         printf "\n"
-        print_warning "No reply from the public endpoint (it may drop ICMP)."
+        print_warning "No reply from the public endpoint (it may drop ICMP)"
         if [ -z "$peer_ip" ]; then
             mtu_v_clear "$iface"   # inconclusive: drop any stale Verified -> Basis returns to Calculated
-            print_info "No tunnel peer available to fall back to - probe inconclusive."
+            print_info "No tunnel peer available to fall back to - probe inconclusive"
             press_any_key; return
         fi
-        print_info "Falling back to the through-tunnel probe."
+        print_info "Falling back to the through-tunnel probe"
         lo=1280; hi=1500; best=0
     fi
 
@@ -9083,10 +9145,10 @@ mtu_reset() {
     mtu_drop_legacy "$iface" ""
     # Report the actual delta — only say "cleared" when something was cleared.
     if [ -n "$cleared" ]; then
-        print_success "Cleared the MTU override on $iface."
-        print_info "The web UI MTU field is back to Optional; restart the tunnel to pick up the default."
+        print_success "Cleared the MTU override on $iface"
+        print_info "The web UI MTU field is back to Optional; restart the tunnel to pick up the default"
     else
-        print_info "$iface had no MTU override — already at the router's default."
+        print_info "$iface had no MTU override — already at the router's default"
     fi
 }
 
@@ -9105,7 +9167,7 @@ manage_mtu() {
         mtu_detect > "$tf"
         if [ ! -s "$tf" ]; then
             clear; print_centered_header "VPN MTU Optimizer"; printf "\n"
-            print_warning "No active WireGuard or OpenVPN tunnels found."
+            print_warning "No active WireGuard or OpenVPN tunnels found"
             printf "\n"; rm -f "$tf"; press_any_key; return
         fi
         count=$(wc -l < "$tf" | tr -dc '0-9')
@@ -10503,18 +10565,18 @@ rla_do_lever2() {
     rla_ctx "$1" "$2" "$3"; _dir="$4"
     if [ "$_dir" = out ]; then
         if [ "$A_RLAN" = unknown ]; then
-            print_warning "The remote LAN subnet is not known yet."
-            print_info "Use option 2 first - a route needs a destination."
+            print_warning "The remote LAN subnet is not known yet"
+            print_info "Use option 2 first - a route needs a destination"
             press_any_key; return
         fi
         if guard_overlap "$A_LAN" "$A_RLAN"; then
-            print_error "Refused: $A_RLAN overlaps this router's LAN $A_LAN."
+            print_error "Refused: $A_RLAN overlaps this router's LAN $A_LAN"
             print_info "Two identical subnets cannot be routed between. Change one of them."
             press_any_key; return
         fi
         if rla_routes_via "$A_RLAN" "$A_IF" 2>/dev/null; then
             spin_run "Removing the route to $A_RLAN" w_route_del "$A_IF" "$A_RLAN"
-            print_success "This router no longer routes $A_RLAN over $A_IF."
+            print_success "This router no longer routes $A_RLAN over $A_IF"
         else
             _blk=$(az_blocker "$A_IF" 2>&1)
             if [ -n "$_blk" ]; then
@@ -10526,8 +10588,8 @@ rla_do_lever2() {
                 _pid=$(az_peers "$A_IF" 2>/dev/null | head -1 | cut -d'|' -f2)
                 [ -n "$_pid" ] && az_grant "$A_IF" "$_pid" "$A_RLAN" >/dev/null 2>&1
             fi
-            print_success "This router now routes $A_RLAN over $A_IF."
-            print_info "The status table re-checks reachability automatically."
+            print_success "This router now routes $A_RLAN over $A_IF"
+            print_info "The status table re-checks reachability automatically"
         fi
     else
         _cur=$(w_get_access "$A_IF")
@@ -10554,10 +10616,10 @@ rla_do_lever2() {
                                *) print_info "Not confirmed - it will revert." ;; esac
             else
                 lv_confirm "$A_IF" access
-                print_success "Remote access is now $_new."
+                print_success "Remote access is now $_new"
             fi
         else
-            print_error "The firewall did not follow the setting - reverting."
+            print_error "The firewall did not follow the setting - reverting"
         fi
     fi
     press_any_key
@@ -10574,8 +10636,8 @@ rla_do_lever3() {
     if ! w_zone_enabled "$A_IF"; then
         # w_set_masq refuses this too (rc 3); checked here as well so the
         # user gets an explanation instead of a silently skipped action.
-        print_error "The firewall zone for $A_IF is disabled."
-        print_info "This setting would have no effect until the VPN is enabled properly."
+        print_error "The firewall zone for $A_IF is disabled"
+        print_info "This setting would have no effect until the VPN is enabled properly"
         press_any_key; return
     fi
     _risk=$(guard_at_risk "$A_IF")
@@ -10592,7 +10654,7 @@ rla_do_lever3() {
         if [ "$_new" = 0 ]; then print_success "Your devices now show their real addresses to the remote side."
         else print_success "Your devices are now hidden behind $A_TUN."; fi
     else
-        print_error "The firewall did not follow the setting - it will revert."
+        print_error "The firewall did not follow the setting - it will revert"
     fi
     press_any_key
 }
@@ -10615,7 +10677,7 @@ rla_autodetect() {
     _ad_hits=$(grep '/' "$SPIN_LOG" 2>/dev/null)
     [ "$(printf '%s\n' "$_ad_hits" | grep -c '/')" = 1 ] && {
         d_store "$_ad_if" "$_ad_hits" probe >/dev/null 2>&1
-        print_success "Remote LAN on $_ad_if set to $_ad_hits."
+        print_success "Remote LAN on $_ad_if set to $_ad_hits"
     }
 }
 
@@ -10649,7 +10711,7 @@ rla_do_detect() {
         [ -n "$v" ] && { _known="$v"; _kdisp="the remote router over SSH"; _ktok="ssh"; }
     fi
     if [ -n "$_known" ]; then
-        print_success "Remote LAN is $_known  (from $_kdisp)."
+        print_success "Remote LAN is $_known  (from $_kdisp)"
         printf 'Keep this? [Y/n]: '; read -r _a; printf '\n'
         case "$_a" in
             n|N) _known="" ;;
@@ -10672,7 +10734,7 @@ rla_do_detect() {
         spin_run "Scanning common subnets" d_scan "$ifc" standard
         _hits=$(grep '/' "$SPIN_LOG" 2>/dev/null)
         if [ -z "$_hits" ]; then
-            print_warning "No remote LAN answered on the common subnets."
+            print_warning "No remote LAN answered on the common subnets"
             printf 'Run a full scan (every private /24, ~30s)? [y/N]: '
             read -r _a; printf '\n'
             case "$_a" in
@@ -10682,12 +10744,12 @@ rla_do_detect() {
                         spin_run "Scanning all private subnets" d_scan "$ifc" full
                         _hits=$(grep '/' "$SPIN_LOG" 2>/dev/null)
                     else
-                        print_warning "fping is unavailable and the shell fallback would take ~18 minutes - skipped."
+                        print_warning "fping is unavailable and the shell fallback would take ~18 minutes - skipped"
                     fi ;;
             esac
         fi
     elif [ -z "$_known" ]; then
-        print_info "This tunnel isn't up, so a scan can't run - enter the subnet by hand."
+        print_info "This tunnel isn't up, so a scan can't run - enter the subnet by hand"
     fi
 
     # 3) Present scan results: one -> store; several -> pick-list.
@@ -10723,14 +10785,14 @@ rla_do_detect() {
     if [ -n "$_in" ]; then
         case "$_in" in */*) ;; *) print_error "Needs a prefix length, e.g. 192.168.2.0/24"; press_any_key; return ;; esac
         if guard_overlap "$A_LAN" "$_in"; then
-            print_error "Refused: $_in overlaps this router's LAN $A_LAN."
-            print_info "Remote LAN access cannot work between two identical subnets."
+            print_error "Refused: $_in overlaps this router's LAN $A_LAN"
+            print_info "Remote LAN access cannot work between two identical subnets"
             press_any_key; return
         fi
         if d_store "$ifc" "$_in" manual; then print_success "Remote LAN set to $_in."
         else print_error "Could not store that subnet."; fi
     else
-        print_info "Left unknown - routing to the remote LAN needs a subnet first."
+        print_info "Left unknown - routing to the remote LAN needs a subnet first"
     fi
     press_any_key
 }
@@ -10854,8 +10916,8 @@ manage_remote_lan_access() {
     local np; np=$(wc -l < /tmp/rla_pages.$$ | tr -dc '0-9')
     if [ "${np:-0}" -lt 1 ]; then
         clear; print_centered_header "Remote LAN Access"
-        print_warning "No VPN tunnel is up on this router."
-        print_info "Start a WireGuard or OpenVPN client or server first."
+        print_warning "No VPN tunnel is up on this router"
+        print_info "Start a WireGuard or OpenVPN client or server first"
         press_any_key; rm -f /tmp/rla_pages.$$; return
     fi
     # Collect ALL data up front, on ENTERING the feature, before any page is drawn:
@@ -11226,13 +11288,13 @@ pkg_db_restore() {
     if bk_restore "$_ns" "$ts_sel" "$_db"; then
         spin_run "Verifying the package index" pkg_update
         if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
-            print_warning "Restored, but opkg still reports parse errors - the backup may predate the corruption; try 'Rebuild the package index cache'."
+            print_warning "Restored, but opkg still reports parse errors - the backup may predate the corruption; try 'Rebuild the package index cache'"
         else
             print_success "Database restored from $(bk_date "$ts_sel")."
         fi
         rm -f "$SPIN_LOG" 2>/dev/null
     else
-        print_error "Could not restore the selected backup."
+        print_error "Could not restore the selected backup"
     fi
     press_any_key
 }
@@ -11292,7 +11354,7 @@ pkg_db_delete() {
                     printf "\n"; print_error "No backups selected."; sleep 2; continue
                 fi
                 printf "\n"
-                print_warning "WARNING: You are about to permanently delete selected backups."
+                print_warning "WARNING: You are about to permanently delete selected backups"
                 printf "Delete selected backups? [y/N]: "; read -r confirm
                 case "$confirm" in
                     y|Y)
@@ -11300,7 +11362,7 @@ pkg_db_delete() {
                             [ "$sel" -eq 1 ] && bk_delete "$_ns" "$ts"
                         done < "$map_file"
                         printf "\n"
-                        print_success "Selected backups purged."
+                        print_success "Selected backups purged"
                         press_any_key; rm -f "$map_file"; return ;;
                     *) print_error "Deletion cancelled."; sleep 2; continue ;;
                 esac ;;
@@ -11383,12 +11445,12 @@ _pkg_db_repair_flow() {
     # of the repair the user already confirmed rather than behind its own prompt.
     if [ "$(pkg_mgr)" = opkg ] && ls "$(pkg_db_info_dir)"/*.control >/dev/null 2>&1; then
         printf "\n"
-        print_info "Rebuilding the database from installed-package metadata (this keeps your installed packages)."
+        print_info "Rebuilding the database from installed-package metadata (this keeps your installed packages)"
         spin_run "Rebuilding the installed database" pkg_db_reconstruct
         spin_run "Verifying the package index" pkg_update
         if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
             rm -f "$SPIN_LOG" 2>/dev/null
-            print_success "Installed database rebuilt from package metadata - opkg is working again."
+            print_success "Installed database rebuilt from package metadata - opkg is working again"
             return 0
         fi
         rm -f "$SPIN_LOG" 2>/dev/null
@@ -11407,8 +11469,8 @@ _pkg_db_repair_flow() {
                  spin_run "Verifying the package index" pkg_update
                  if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
                      rm -f "$SPIN_LOG" 2>/dev/null
-                     print_success "Factory package database restored - opkg is working again."
-                     print_info "Packages you had installed remain on disk; reinstall any you want opkg to track again."
+                     print_success "Factory package database restored - opkg is working again"
+                     print_info "Packages you had installed remain on disk; reinstall any you want opkg to track again"
                      return 0
                  fi
                  rm -f "$SPIN_LOG" 2>/dev/null ;;
@@ -11417,11 +11479,11 @@ _pkg_db_repair_flow() {
     fi
 
     # Exhausted - honest, consistent guidance (offer a restore only if the user actually has backups).
-    print_error "The database could not be repaired automatically."
+    print_error "The database could not be repaired automatically"
     if [ "$(bk_list "$_ns" "$_base" | grep -c .)" -gt 0 ]; then
-        print_info "Restore an earlier backup (from before the corruption) via 'Backup & Restore', or re-flash the firmware."
+        print_info "Restore an earlier backup (from before the corruption) via 'Backup & Restore', or re-flash the firmware"
     else
-        print_info "No earlier package-database backup exists to restore - re-flash the firmware to recover."
+        print_info "No earlier package-database backup exists to restore - re-flash the firmware to recover"
     fi
     return 1
 }
@@ -11434,7 +11496,7 @@ _pkg_db_repair_flow() {
 _pkg_db_repair_apk() {
     spin_run "Repairing the package database (apk fix)" apk fix
     rm -f "$SPIN_LOG" 2>/dev/null
-    print_success "Ran apk fix."
+    print_success "Ran apk fix"
     [ -f "$(pkg_db_rom)" ] || return 0
     printf "\n"
     print_info "If the package database is still misbehaving, the factory copy can be restored from"
@@ -11444,7 +11506,7 @@ _pkg_db_repair_apk() {
         y|Y) cp "$(pkg_db_rom)" "$(pkg_db_path)" 2>/dev/null
              spin_run "Refreshing the package index" pkg_update
              rm -f "$SPIN_LOG" 2>/dev/null
-             print_success "Factory package database restored."
+             print_success "Factory package database restored"
              print_info "Packages you had installed remain on disk; reinstall any you want apk to track again." ;;
         *) print_info "Left as-is (apk fix applied)." ;;
     esac
@@ -11453,13 +11515,13 @@ _pkg_db_repair_apk() {
 pkg_repair_now() {
     printf "\n"
     if [ "$PR_DB" != "CORRUPT" ] && [ "$PR_CACHE" != "CORRUPT" ] && [ "$PR_CACHE" != "EMPTY" ]; then
-        print_success "The package system looks healthy - nothing to repair."
+        print_success "The package system looks healthy - nothing to repair"
         press_any_key; return
     fi
     spin_run "Rebuilding the package index cache" pkg_cache_rebuild
     if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
         rm -f "$SPIN_LOG" 2>/dev/null
-        print_success "Package index cache rebuilt - the package system now parses cleanly."
+        print_success "Package index cache rebuilt - the package system now parses cleanly"
         press_any_key; return
     fi
     rm -f "$SPIN_LOG" 2>/dev/null
@@ -11468,7 +11530,7 @@ pkg_repair_now() {
         press_any_key; return
     fi
     printf "\n"
-    print_warning "The cache was rebuilt but the installed database still can't be parsed."
+    print_warning "The cache was rebuilt but the installed database still can't be parsed"
     printf "   A safe end-of-file repair is tried first, before anything drastic.\n\n"
     printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
     case "$yn" in
@@ -11482,9 +11544,9 @@ pkg_cache_rebuild_action() {
     printf "\n"
     spin_run "Rebuilding the package index cache" pkg_cache_rebuild
     if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
-        print_warning "The index was refreshed but opkg still reports parse errors - the installed database may be corrupted (try 'Repair the installed database')."
+        print_warning "The index was refreshed but opkg still reports parse errors - the installed database may be corrupted (try 'Repair the installed database')"
     else
-        print_success "Package index cache rebuilt."
+        print_success "Package index cache rebuilt"
     fi
     rm -f "$SPIN_LOG" 2>/dev/null
     press_any_key
@@ -11498,7 +11560,7 @@ pkg_db_repair_action() {
     fi
     local _db; _db="$(pkg_db_path)"
     if [ ! -f "$_db" ]; then print_error "No installed database found at $_db."; press_any_key; return; fi
-    print_warning "This repairs the installed package database ($_db)."
+    print_warning "This repairs the installed package database ($_db)"
     printf "   A safe end-of-file repair is tried first, before anything drastic.\n\n"
     printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
     case "$yn" in
@@ -11699,147 +11761,190 @@ No  → If you only care about your ISP's "Internet" speed (use Ookla for that).
 
 Important notes:
 • Listen Port: Defaults to :8989. Access via http://<router-ip>:8989
-• Persistence: Enabling persistence ensures the binary and settings survive 
-  firmware updates, preventing manual re-installation.
 • Procd Jail: Runs in a secure sandbox for improved router security.
+
+Status + actions (the menu is context-aware - it shows only what applies):
+─────────────────────────────────────────────────────────────────────────
+The Service line shows one of:
+• NOT INSTALLED - the librespeed-go package isn't installed.
+• DISABLED      - installed, but the service is off (the package is kept).
+• ENABLED       - on and listening on port 8989.
+• SERVICE DOWN  - it's enabled but nothing is listening (it didn't start).
+
+Actions by state:
+• Install and enable - installs the librespeed-go package, configures it, and starts
+  the service. (Shown when NOT INSTALLED.)
+• Enable  - turns it back on (instant - the package is already there).
+• Disable - stops the service but KEEPS the package and config, so re-enabling is
+  instant and lossless.
+• Reinstall - the fix for SERVICE DOWN: reinstalls the package and restarts it.
+  (Shown only when SERVICE DOWN.)
+• Uninstall - removes the librespeed-go package and its persistence entries entirely.
+• Enable/Disable persistence - keep the binary and settings across firmware updates
+  (adds them to the sysupgrade backup). Available once it is enabled.
 HELPEOF
 }
 
+# ---- LibreSpeed feature-lifecycle callbacks + flows (drive the shared _lc_* helpers) --
+# Accessors (not top-level vars) so they survive the e2e function-extraction and set -u.
+_ls_port()          { printf '%s' "8989"; }
+_ls_paths()         { printf '%s' "/usr/bin/librespeed-go /etc/init.d/librespeed-go /etc/config/librespeed-go"; }
+# The service's rc.d boot-enable symlink(s). Persisted ALONGSIDE the static paths so the
+# service auto-starts after a keep-settings firmware upgrade - without it the binary/init/
+# config survive but the boot symlink does not, so the service comes back SERVICE DOWN
+# (same class as the ttyd/OST rc.d handling).
+_ls_rcd_syms()      { find "${GLPERSIST_RCDIR:-/etc/rc.d}/" -name "[SK]*librespeed-go" 2>/dev/null; }
+_ls_pkg_installed() { command -v librespeed-go >/dev/null 2>&1; }
+_ls_enabled()       { [ "$(uci -q get librespeed-go.config.enabled 2>/dev/null)" = "1" ]; }
+_ls_service_up()    { { netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null; } | grep -q ":$(_ls_port) "; }
+_ls_persist_is_on() {
+    local p c; c=$(_glpersist_keepconf)
+    for p in $(_ls_paths); do grep -qFx "$p" "$c" 2>/dev/null || return 1; done
+    return 0
+}
+
+_ls_write_config() {
+    grep -q "^librespeed:" /etc/passwd 2>/dev/null || echo "librespeed:x:500:500:librespeed:/var/run/librespeed-go:/bin/false" >> /etc/passwd
+    [ -f /etc/config/librespeed-go ] || touch /etc/config/librespeed-go
+    uci -q get librespeed-go.config >/dev/null 2>&1 || uci set librespeed-go.config=librespeed-go
+    uci set librespeed-go.config.listen_addr=":$(_ls_port)"
+    uci set librespeed-go.config.enabled='1'
+    uci commit librespeed-go
+}
+# Enable + (re)start LibreSpeed and wait until it is actually listening. 0 on success.
+_ls_start_service() {
+    _ls_write_config
+    /etc/init.d/librespeed-go enable  >/dev/null 2>&1
+    /etc/init.d/librespeed-go restart >/dev/null 2>&1
+    local i; for i in 1 2 3 4 5; do _ls_service_up && return 0; sleep 1; done
+    return 1
+}
+# Stop + disable LibreSpeed; 0 when it is no longer listening.
+_ls_stop_service() {
+    uci set librespeed-go.config.enabled='0' 2>/dev/null; uci commit librespeed-go 2>/dev/null
+    [ -f /etc/init.d/librespeed-go ] && /etc/init.d/librespeed-go stop >/dev/null 2>&1
+    sleep 1
+    ! _ls_service_up
+}
+# Disable KEEPS the package + config (lossless re-enable); Uninstall removes package + persistence.
+_ls_disable()   { _ls_stop_service; return 0; }
+_ls_uninstall() {
+    # Capture the rc.d enable symlink(s) BEFORE teardown, so their keep-list lines are purged too.
+    local p l rcsyms; rcsyms=$(_ls_rcd_syms)
+    _ls_stop_service
+    pkg_remove librespeed-go >/dev/null 2>&1
+    for p in $(_ls_paths); do _glpersist_keep_del "$p"; done
+    for l in $rcsyms; do _glpersist_keep_del "$l"; done
+    return 0
+}
+_ls_reinstall_pkg() { pkg_install librespeed-go >/dev/null 2>&1 || install_package librespeed-go >/dev/null 2>&1; return 0; }
+
+_ls_enable_flow() {
+    local ip
+    if ! _ls_pkg_installed; then
+        install_package librespeed-go "LibreSpeed" || { print_error "The librespeed-go package could not be installed"; return; }
+    fi
+    if spin_run "Starting the LibreSpeed service" _ls_start_service; then
+        ip=$(get_lan_ip)
+        print_success "LibreSpeed enabled at ${CYAN}http://${ip}:$(_ls_port)${RESET}"
+    else
+        print_error "LibreSpeed did not start - nothing is listening on port $(_ls_port)"
+        print_info "Check ${GREY}logread | grep librespeed${RESET}"
+    fi
+}
+_ls_disable_flow() {
+    spin_run "Disabling the LibreSpeed service" _ls_disable
+    print_success "LibreSpeed disabled (the package is kept - Enable is instant)"
+}
+_ls_reinstall_flow() {
+    spin_run "Reinstalling the librespeed-go package" _ls_reinstall_pkg
+    if spin_run "Starting the LibreSpeed service" _ls_start_service; then
+        print_success "LibreSpeed reinstalled and running"
+    else
+        print_error "LibreSpeed did not start after reinstall"
+        print_info "Check ${GREY}logread | grep librespeed${RESET}"
+    fi
+}
+_ls_uninstall_flow() {
+    local ans
+    printf "This removes the librespeed-go package and its config. Uninstall? [y/N]: "; read -r ans; printf "\n"
+    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed"; return ;; esac
+    spin_run "Uninstalling the librespeed-go package" _ls_uninstall
+    print_success "LibreSpeed uninstalled"
+}
+_ls_toggle_persistence() {
+    local p l
+    if _ls_persist_is_on; then
+        for p in $(_ls_paths); do _glpersist_keep_del "$p"; done
+        for l in $(_ls_rcd_syms); do _glpersist_keep_del "$l"; done
+        _persist_msg off "LibreSpeed"
+    else
+        for p in $(_ls_paths); do _glpersist_keep_add "$p"; done
+        for l in $(_ls_rcd_syms); do _glpersist_keep_add "$l"; done
+        _persist_msg on "LibreSpeed"
+    fi
+}
+_ls_do() {   # <action_key>
+    case "$1" in
+        install_enable|enable) _ls_enable_flow ;;
+        disable)               _ls_disable_flow ;;
+        reinstall)             _ls_reinstall_flow ;;
+        uninstall)             _ls_uninstall_flow ;;
+    esac
+}
+
 manage_librespeed() {
+    local state acts n a key choice per_status ip port
     while true; do
+        hash -r
         clear
         print_centered_header "LibreSpeed Speed Test Management"
-        
-        LAN_IP=$(get_lan_ip)
-        LISTEN_PORT=":8989"
-        UP_CONF="/etc/sysupgrade.conf"
-        
-        # Determine installation status once for the whole loop
-		hash -r 
-        if command -v librespeed-go >/dev/null 2>&1; then
-            IS_INSTALLED=1
-        else
-            IS_INSTALLED=0
-        fi
+
+        state=$(_lc_state 1 _ls_pkg_installed _ls_enabled _ls_service_up)
+        _ls_persist_is_on && per_status="${GREEN}ENABLED${RESET}" || per_status="${YELLOW}DISABLED${RESET}"
 
         printf " %b\n" "${CYAN}STATUS${RESET}"
-        if [ "$IS_INSTALLED" -eq 1 ]; then
-            if [ "$(uci -q get librespeed-go.config.enabled)" = "1" ]; then
-                printf "   Service: %bENABLED%b\n" "${GREEN}" "${RESET}"
-                if netstat -ltn 2>/dev/null | grep -q "${LISTEN_PORT#:}"; then
-                    printf "   Status: %bACTIVE%b\n" "${GREEN}" "${RESET}"
-                    printf "   URL: %bhttp://$LAN_IP${LISTEN_PORT}%b\n" "${CYAN}" "${RESET}"
-                else
-                    printf "   Status: %bSTARTING/ERROR%b\n" "${YELLOW}" "${RESET}"
-                fi
-            else
-                printf "   Service: %bDISABLED%b\n" "${YELLOW}" "${RESET}"
-            fi
-            
-            # Check Persistence Status
-            persist_ok="1"
-            for entry in "/usr/bin/librespeed-go" "/etc/init.d/librespeed-go" "/etc/config/librespeed-go"; do
-                if ! grep -qFx "$entry" "$UP_CONF" 2>/dev/null; then
-                    persist_ok="0"
-                    break
-                fi
-            done
-            
-            if [ "$persist_ok" -eq "1" ]; then
-                printf "   Persistence: %bENABLED%b\n" "${GREEN}" "${RESET}"
-            else
-                printf "   Persistence: %bDISABLED%b\n" "${RED}" "${RESET}"
-            fi
-        else
-            printf "   Service: %bNOT INSTALLED%b\n" "${RED}" "${RESET}"
+        printf "   %-13s %b\n" "Service:" "$(_lc_value "$state")"
+        if _ls_service_up; then
+            ip=$(get_lan_ip 2>/dev/null)
+            printf "   %-13s %b\n" "Direct URL:" "${CYAN}http://${ip}:$(_ls_port)${RESET}"
         fi
-        
-        local ls_persist_label="Enable Persistence"
-        [ "$IS_INSTALLED" -eq 1 ] && [ "$persist_ok" -eq 1 ] && ls_persist_label="Disable Persistence"
-        printf "\n%s%sInstall and Enable\n" "$N1" "$NSEP"
-        printf "%s%sDisable Service\n" "$N2" "$NSEP"
-        printf "%s%s%s\n" "$N3" "$NSEP" "$ls_persist_label"
-        printf "%s%sUninstall Package\n" "$N4" "$NSEP"
+        printf "   %-13s %b\n" "Persistence:" "$per_status"
+        printf "\n"
+
+        acts=$(_lc_actions "$state" 1); n=0
+        for a in $acts; do
+            n=$((n + 1)); eval "LS_ACT_${n}=\"$a\""
+            printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$(_lc_label "$a")"
+        done
+        n=$((n + 1)); LS_PERSIST_N=$n
+        if _ls_persist_is_on; then a="Disable persistence"; else a="Enable persistence"; fi
+        printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
         printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-4/0/?]: "
-        read -r ls_choice
-        printf "\n"
-        
-        case $ls_choice in
-            1)
-                if [ "$IS_INSTALLED" -eq 0 ]; then
-                    install_package librespeed-go "LibreSpeed" || { press_any_key; continue; }
-                    grep -q "librespeed" /etc/passwd || echo "librespeed:x:500:500:librespeed:/var/run/librespeed-go:/bin/false" >> /etc/passwd
-                    IS_INSTALLED=1
-                fi
+        printf "\nChoose [1-%s/0/?]: " "$n"
+        read -r choice; printf "\n"
 
-                if [ ! -f "/etc/config/librespeed-go" ]; then
-                    touch /etc/config/librespeed-go
-                fi
-                
-                if ! uci -q get librespeed-go.config >/dev/null; then
-                    uci set librespeed-go.config=librespeed-go
-                fi
-
-                uci set librespeed-go.config.listen_addr="$LISTEN_PORT"
-                uci set librespeed-go.config.enabled='1'
-                uci commit librespeed-go
-                
-                /etc/init.d/librespeed-go restart >/dev/null 2>&1
-                print_success "LibreSpeed enabled at http://$LAN_IP${LISTEN_PORT}"
-                press_any_key
-                ;;
-            2)
-                if [ "$IS_INSTALLED" -eq 1 ]; then
-                    uci set librespeed-go.config.enabled='0'
-                    uci commit librespeed-go
-                    /etc/init.d/librespeed-go stop >/dev/null 2>&1
-                    print_success "LibreSpeed disabled"
-                else
-                    print_error "Nothing to disable: LibreSpeed is not installed."
-                fi
-                press_any_key
-                ;;
-            3)
-                if [ "$IS_INSTALLED" -eq 1 ]; then
-                    if [ "$persist_ok" -eq "0" ]; then
-                        for entry in "/usr/bin/librespeed-go" "/etc/init.d/librespeed-go" "/etc/config/librespeed-go"; do
-                            grep -qFx "$entry" "$UP_CONF" || echo "$entry" >> "$UP_CONF"
-                        done
-                        _persist_msg on "LibreSpeed"
-                    else
-                        sed -i "\|/usr/bin/librespeed-go|d" "$UP_CONF"
-                        sed -i "\|/etc/init.d/librespeed-go|d" "$UP_CONF"
-                        sed -i "\|/etc/config/librespeed-go|d" "$UP_CONF"
-                        _persist_msg off "LibreSpeed"
-                    fi
-                else
-                    print_error "Nothing to persist: LibreSpeed is not installed."
-                fi
-                press_any_key
-                ;;
-            4)
-                if [ "$IS_INSTALLED" -eq 1 ]; then
-                    printf "Remove LibreSpeed package? [y/N]: "; read -r confirm
-                    if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                        /etc/init.d/librespeed-go stop >/dev/null 2>&1
-                        pkg_remove librespeed-go >/dev/null 2>&1
-                        # Always clean up persistence entries on uninstall
-                        sed -i "\|/usr/bin/librespeed-go|d" "$UP_CONF"
-                        sed -i "\|/etc/init.d/librespeed-go|d" "$UP_CONF"
-                        sed -i "\|/etc/config/librespeed-go|d" "$UP_CONF"
-                        print_success "LibreSpeed removed"
-                    fi
-                else
-                    print_error "Nothing to remove: LibreSpeed is not installed."
-                fi
-                press_any_key
-                ;;
+        case "$choice" in
             0) return ;;
-            \?|h|H|❓) show_librespeed_help ;;
-            *) print_error "Invalid option"; sleep 1 ;;
+            \?|h|H|❓) show_librespeed_help; continue ;;
+            *[!0-9]*|"") print_error "Invalid choice"; sleep 1; continue ;;
         esac
+        if [ "$choice" = "$LS_PERSIST_N" ]; then
+            if [ "$state" = NOT_INSTALLED ] || [ "$state" = DISABLED ]; then
+                print_warning "Enable LibreSpeed first, then enable persistence"
+            else
+                _ls_toggle_persistence
+            fi
+            press_any_key; continue
+        fi
+        if [ "$choice" -ge 1 ] && [ "$choice" -lt "$LS_PERSIST_N" ]; then
+            eval "key=\$LS_ACT_${choice}"
+            _ls_do "$key"
+            press_any_key
+        else
+            print_error "Invalid choice"; sleep 1
+        fi
     done
 }
 
@@ -11856,12 +11961,12 @@ install_ookla_speedtest() {
                 # Speedtest menu routes MIPS to speedtest-go (see install_speedtest_go).
                 # Ookla publishes no MIPS binary, and it couldn't be persisted to the
                 # tiny flash here anyway, so explain that and point at the path that works.
-                print_error "Ookla Speedtest can't be installed as a package here."
+                print_error "Ookla Speedtest can't be installed as a package here"
                 print_info "Ookla ships no MIPS build ($arch), so there's no binary to"
-                print_info "persist to this router's flash."
+                print_info "persist to this router's flash"
                 printf "\n"
                 print_info "System Benchmarks -> \"Ookla Internet Speedtest\" still runs it on"
-                print_info "MIPS: the same speedtest.net test, via speedtest-go, on demand."
+                print_info "MIPS: the same speedtest.net test, via speedtest-go, on demand"
                 press_any_key
                 return 1
                 ;;
@@ -11883,7 +11988,7 @@ install_ookla_speedtest() {
         if command -v speedtest >/dev/null 2>&1; then
             print_success "Installed: $(speedtest --version | head -n1)"
         else
-            print_error "Failed to install Ookla Speedtest."
+            print_error "Failed to install Ookla Speedtest"
             check_connectivity
             press_any_key
             return 1
@@ -11938,7 +12043,7 @@ install_speedtest_go() {   # [target_dir]  default /tmp (scratch); pass /usr/bin
     if [ -x "$STGO_BIN" ] && "$STGO_BIN" --version >/dev/null 2>&1; then
         print_success "Ready: $("$STGO_BIN" --version 2>&1 | head -n1)"
     else
-        print_error "Couldn't fetch speedtest-go."
+        print_error "Couldn't fetch speedtest-go"
         check_connectivity
         press_any_key
         return 1
@@ -12073,13 +12178,13 @@ benchmark_system() {
                     if ! command -v stress >/dev/null 2>&1; then
                         # stress-ng can hard-crash routers on kernels < 6.6 - never fall back to it there.
                         if _stressng_unsafe; then
-                            print_error "Could not install 'stress', and 'stress-ng' can crash this router's kernel (a pre-6.6 kernel bug), so it isn't used here."
+                            print_error "Could not install 'stress', and 'stress-ng' can crash this router's kernel (a pre-6.6 kernel bug), so it isn't used here"
                             press_any_key
                             continue
                         fi
                         install_package stress-ng
                         if ! command -v stress-ng >/dev/null 2>&1; then
-                            print_error "Could not install a CPU stress tool."
+                            print_error "Could not install a CPU stress tool"
                             press_any_key
                             continue
                         else
@@ -12208,7 +12313,7 @@ benchmark_system() {
                 print_centered_header "VPN & Crypto Benchmark"
 
                 if ! require_cmd openssl openssl-util "OpenSSL command-line tools"; then
-                    print_error "OpenSSL is required for the crypto benchmark and could not be installed."
+                    print_error "OpenSSL is required for the crypto benchmark and could not be installed"
                     press_any_key
                     continue
                 fi
@@ -12232,7 +12337,7 @@ mt1300|Beryl|MT7621|5522|5944|5759|21915|27148|27613|10.4|397.6'
                 [ -z "$my_label" ] && my_label="$my_id"
                 [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
 
-                print_info "Measuring this device - stop VPN, SQM and heavy traffic for accurate, comparable numbers."
+                print_info "Measuring this device - stop VPN, SQM and heavy traffic for accurate, comparable numbers"
                 printf "\n"
 
                 bench_measure aes-256-gcm 64;          a64=$BENCH_RESULT
@@ -12447,7 +12552,7 @@ mt1300|Beryl|MT7621|179.39'
                 is_proxied=0
                 if nslookup "detect${RANDOM}.com" 1.2.3.4 >/dev/null 2>&1; then
                     is_proxied=1
-                    print_warning "DNS Interception Active: Traffic is being redirected locally."
+                    print_warning "DNS Interception Active: Traffic is being redirected locally"
                     printf "\n"
                 fi
                 
@@ -12525,7 +12630,7 @@ mt1300|Beryl|MT7621|179.39'
                             print_success "Speedtest completed"
                         else
                             printf "\n%s\n" "$_stdiv"
-                            print_error "Speedtest didn't complete - check your internet connection."
+                            print_error "Speedtest didn't complete - check your internet connection"
                         fi
                         press_any_key
                         ;;
@@ -12924,7 +13029,30 @@ OST_URL_MIRROR="https://fw.gl-inet.com/tools/script/Speed-Test-main.zip"
 
 _ost_installed() { [ -d "$OST_INSTALL_DIR/Speed-Test-main" ] && [ -f "$OST_CONFIG_PATH" ]; }
 _ost_running()   { [ -s "$OST_PID_FILE" ] && kill -0 "$(cat "$OST_PID_FILE" 2>/dev/null)" 2>/dev/null; }
-_ost_persisted() { grep -Fxq "$OST_INSTALL_DIR" /etc/sysupgrade.conf 2>/dev/null; }
+_ost_persisted() { grep -Fxq "$OST_INSTALL_DIR" "$(_glpersist_keepconf)" 2>/dev/null; }
+
+# ---- OpenSpeedTest feature-lifecycle callbacks (drive the shared _lc_* helpers) --------
+# "Package" here = the extracted web app + nginx config (a download cost), so pkg_backed=1.
+# ENABLED = files present, init enabled, nginx running; DISABLED = files present but the
+# service is turned off (files kept, so Enable is instant); SERVICE_DOWN = enabled but nginx
+# is not running.
+_ost_pkg_installed() { _ost_installed; }
+_ost_enabled()       { [ -f "$OST_STARTUP_SCRIPT" ] && "$OST_STARTUP_SCRIPT" enabled 2>/dev/null; }
+_ost_service_up()    { _ost_running; }
+# Start (no re-download) - used by Enable from DISABLED. 0 once nginx is running.
+_ost_start_service() {
+    [ -f "$OST_STARTUP_SCRIPT" ] || return 1
+    "$OST_STARTUP_SCRIPT" enable  >/dev/null 2>&1
+    "$OST_STARTUP_SCRIPT" start   >/dev/null 2>&1
+    local i; for i in 1 2 3 4 5; do _ost_running && return 0; sleep 1; done
+    return 1
+}
+# Stop + disable, KEEPING the app files (lossless re-enable). 0 once nginx is stopped.
+_ost_stop_service() {
+    [ -f "$OST_STARTUP_SCRIPT" ] && { "$OST_STARTUP_SCRIPT" stop >/dev/null 2>&1; "$OST_STARTUP_SCRIPT" disable >/dev/null 2>&1; }
+    sleep 1
+    ! _ost_running
+}
 
 # Effective MB free on the install partition. On a REINSTALL the current copy in
 # $OST_INSTALL_DIR/Speed-Test-main is cleared before the new one downloads, so credit its
@@ -13071,8 +13199,8 @@ _ost_space_check() {
     # The source-choice header already showed free vs required, so the happy path stays quiet -
     # we only speak up when flash is short (warn + offer an external drive, or error out).
     if [ "$avail" -lt "$OST_REQUIRED_MB" ]; then
-        print_warning "Only ${avail}MB free at $path - OpenSpeedTest needs ~${OST_REQUIRED_MB}MB."
-        print_info "Searching mounted external drives for space."
+        print_warning "Only ${avail}MB free at $path - OpenSpeedTest needs ~${OST_REQUIRED_MB}MB"
+        print_info "Searching mounted external drives for space"
         for mp in $(awk '$2 ~ /^\/mnt\//{print $2}' /proc/mounts 2>/dev/null); do
             ext=$(df -Pm "$mp" 2>/dev/null | awk 'NR==2{print $4}'); case "$ext" in ''|*[!0-9]*) ext=0 ;; esac
             if [ "$ext" -ge "$OST_REQUIRED_MB" ]; then
@@ -13090,18 +13218,21 @@ _ost_space_check() {
     if [ "${OST_DL_MODE:-stream}" = zip ]; then
         tavail=$(df -Pm /tmp 2>/dev/null | awk 'NR==2{print $4}'); case "$tavail" in ''|*[!0-9]*) tavail=0 ;; esac
         if [ "$tavail" -lt "$OST_TMP_REQUIRED_MB" ]; then
-            print_error "The GL.iNet mirror needs ~${OST_TMP_REQUIRED_MB}MB of temp space (/tmp) to stage its zip, but only ${tavail}MB is free."
-            print_info "Pick the Official source (streamed, no temp), or free up /tmp and retry."
+            print_error "The GL.iNet mirror needs ~${OST_TMP_REQUIRED_MB}MB of temp space (/tmp) to stage its zip, but only ${tavail}MB is free"
+            print_info "Pick the Official source (streamed, no temp), or free up /tmp and retry"
             return 1
         fi
     fi
     return 0
 }
 
+# Download + (re)install the app: deps, source pick, space gate, fetch/extract, write config +
+# init, start. Used by Install-and-enable (fresh) and by Reinstall (SERVICE_DOWN remediation).
+# No press_any_key - the menu loop owns the single pause after the action.
 _ost_do_install() {
-    _ost_deps || { press_any_key; return 1; }
-    _ost_choose_source || { print_info "Install cancelled."; press_any_key; return 1; }
-    _ost_space_check || { press_any_key; return 1; }
+    _ost_deps || return 1
+    _ost_choose_source || { print_info "Cancelled - nothing changed"; return 1; }
+    _ost_space_check || return 1
     # Stop any running instance first (fresh install / reinstall).
     _ost_running && { "$OST_STARTUP_SCRIPT" stop >/dev/null 2>&1; }
     mkdir -p "$OST_INSTALL_DIR"
@@ -13110,8 +13241,8 @@ _ost_do_install() {
         # Official: stream the .tar.gz straight into the docroot - no archive ever lands on flash,
         # so peak flash use is just the ~31M extracted app (not zip + app).
         _ost_stream() { wget -O - "$OST_DL_URL" 2>/dev/null | tar -xz -C "$OST_INSTALL_DIR" 2>/dev/null; [ -d "$OST_INSTALL_DIR/Speed-Test-main" ]; }
-        if ! spin_run "Downloading + extracting OpenSpeedTest" _ost_stream; then
-            print_error "Download/extract failed - check the router's internet connection, then retry."; rm -rf "$OST_INSTALL_DIR/Speed-Test-main"; press_any_key; return 1
+        if ! spin_run "Downloading and extracting OpenSpeedTest" _ost_stream; then
+            print_error "Download or extract failed - check the router's internet connection, then retry"; rm -rf "$OST_INSTALL_DIR/Speed-Test-main"; return 1
         fi
     else
         # Mirror: a .zip can't be streamed (central directory is at the end), so stage it in /tmp (RAM),
@@ -13119,10 +13250,10 @@ _ost_do_install() {
         _ost_fetch_zip() { wget -O /tmp/ost_main.zip "$OST_DL_URL" >/dev/null 2>&1 && [ -s /tmp/ost_main.zip ]; }
         _ost_extract()   { unzip -o /tmp/ost_main.zip -d "$OST_INSTALL_DIR" >/dev/null 2>&1; rm -f /tmp/ost_main.zip; [ -d "$OST_INSTALL_DIR/Speed-Test-main" ]; }
         if ! spin_run "Downloading OpenSpeedTest" _ost_fetch_zip; then
-            print_error "Download failed - check the router's internet connection, then retry."; rm -f /tmp/ost_main.zip; press_any_key; return 1
+            print_error "Download failed - check the router's internet connection, then retry"; rm -f /tmp/ost_main.zip; return 1
         fi
-        if ! spin_run "Extracting" _ost_extract; then
-            print_error "Extract failed - the download may be incomplete. Retry."; rm -f /tmp/ost_main.zip; press_any_key; return 1
+        if ! spin_run "Extracting the download" _ost_extract; then
+            print_error "Extract failed - the download may be incomplete, so retry"; rm -f /tmp/ost_main.zip; return 1
         fi
     fi
     _ost_write_nginx_conf
@@ -13135,27 +13266,23 @@ _ost_do_install() {
     else
         print_error "OpenSpeedTest did not start - port $OST_PORT may be in use. Run Diagnostics."
     fi
-    press_any_key
 }
 
 _ost_diagnose() {
     local ip; ip=$(get_lan_ip)
     printf " %bOpenSpeedTest diagnostics%b\n\n" "$CYAN" "$RESET"
-    if _ost_running; then print_success "Service is running (PID $(cat "$OST_PID_FILE"))."
-    else print_error "Service is NOT running."; fi
+    if _ost_running; then print_success "Service is running (PID $(cat "$OST_PID_FILE"))"
+    else print_error "Service is not running"; fi
     if netstat -tuln 2>/dev/null | grep -q ":$OST_PORT "; then
-        print_success "Port $OST_PORT is listening."
-        print_info "Open ${CYAN}http://$ip:$OST_PORT${RESET} in a browser on this network."
+        print_success "Port $OST_PORT is listening"
+        print_info "Open ${CYAN}http://$ip:$OST_PORT${RESET} in a browser on this network"
     else
-        print_error "Port $OST_PORT is not listening."
+        print_error "Port $OST_PORT is not listening"
     fi
-    press_any_key
 }
 
-_ost_uninstall() {
-    print_warning "This removes OpenSpeedTest: the service, its nginx config, and $OST_INSTALL_DIR."
-    printf "Uninstall OpenSpeedTest? [y/N]: "; read -r _c; printf "\n"
-    case "$_c" in y|Y) ;; *) print_info "Uninstall cancelled."; press_any_key; return ;; esac
+# Pure removal (no prompts, no pause) - wrapped by spin_run in _ost_uninstall_flow.
+_ost_remove() {
     _ost_running && "$OST_STARTUP_SCRIPT" stop >/dev/null 2>&1
     [ -f "$OST_STARTUP_SCRIPT" ] && { "$OST_STARTUP_SCRIPT" disable >/dev/null 2>&1; rm -f "$OST_STARTUP_SCRIPT"; }
     [ -f "$OST_CONFIG_PATH" ] && rm -f "$OST_CONFIG_PATH"
@@ -13163,23 +13290,55 @@ _ost_uninstall() {
     if [ -L /www2 ]; then rm -rf "$(readlink -f /www2)" 2>/dev/null; rm -f /www2
     elif [ -d "$OST_INSTALL_DIR" ]; then rm -rf "$OST_INSTALL_DIR"; fi
     _ost_persist_set 0 quiet
-    print_success "OpenSpeedTest uninstalled."
-    press_any_key
+    return 0
 }
 
-_ost_persist_set() {   # <1|0> [quiet] - add/remove OpenSpeedTest paths from sysupgrade.conf
-    local on="$1" quiet="$2" sc=/etc/sysupgrade.conf svc p
-    svc=$(basename "$OST_STARTUP_SCRIPT")
-    # Always clear first (idempotent), then re-add when enabling.
-    for p in "$OST_INSTALL_DIR" "$OST_STARTUP_SCRIPT" "$OST_CONFIG_PATH"; do sed -i "\|$p|d" "$sc" 2>/dev/null; done
-    sed -i "\|/etc/rc.d/[SK].*$svc|d" "$sc" 2>/dev/null
+# <1|0> [quiet] - add/remove OpenSpeedTest paths from the keep-list (portable, no sed -i).
+_ost_persist_set() {
+    local on="$1" quiet="${2:-}" svc p l rcdir; svc=$(basename "$OST_STARTUP_SCRIPT"); rcdir="${GLPERSIST_RCDIR:-/etc/rc.d}"
+    # Always clear first (idempotent): the static paths + any rc.d enable symlink we added.
+    for p in "$OST_INSTALL_DIR" "$OST_STARTUP_SCRIPT" "$OST_CONFIG_PATH"; do _glpersist_keep_del "$p"; done
+    for l in $(find "$rcdir/" -name "[SK]*$svc" 2>/dev/null); do _glpersist_keep_del "$l"; done
     if [ "$on" = 1 ]; then
-        for p in "$OST_INSTALL_DIR" "$OST_STARTUP_SCRIPT" "$OST_CONFIG_PATH"; do echo "$p" >> "$sc"; done
-        find /etc/rc.d/ -type l -name "[SK]*$svc" 2>/dev/null | while read -r l; do echo "$l" >> "$sc"; done
-        [ "$quiet" = quiet ] || { _persist_msg on "OpenSpeedTest"; press_any_key; }
+        for p in "$OST_INSTALL_DIR" "$OST_STARTUP_SCRIPT" "$OST_CONFIG_PATH"; do _glpersist_keep_add "$p"; done
+        for l in $(find "$rcdir/" -name "[SK]*$svc" 2>/dev/null); do _glpersist_keep_add "$l"; done
+        [ "$quiet" = quiet ] || _persist_msg on "OpenSpeedTest"
     else
-        [ "$quiet" = quiet ] || { _persist_msg off "OpenSpeedTest"; press_any_key; }
+        [ "$quiet" = quiet ] || _persist_msg off "OpenSpeedTest"
     fi
+}
+
+# ---- OpenSpeedTest action flows (dispatched from the lifecycle menu) -------------------
+_ost_enable_flow() {
+    # Not installed -> the full download path; installed-but-off -> just start (no re-download).
+    if ! _ost_installed; then _ost_do_install; return; fi
+    if spin_run "Starting OpenSpeedTest" _ost_start_service; then
+        print_success "OpenSpeedTest is running at ${CYAN}http://$(get_lan_ip):$OST_PORT${RESET}"
+    else
+        print_error "OpenSpeedTest did not start - port $OST_PORT may be in use. Run Diagnostics."
+    fi
+}
+_ost_disable_flow() {
+    spin_run "Disabling OpenSpeedTest" _ost_stop_service
+    print_success "OpenSpeedTest disabled (the app files are kept - Enable is instant)"
+}
+_ost_reinstall_flow() { _ost_do_install; }   # re-download + rewrite config + restart
+_ost_uninstall_flow() {
+    local ans
+    print_warning "This removes OpenSpeedTest: the service, its nginx config, and $OST_INSTALL_DIR"
+    printf "Uninstall OpenSpeedTest? [y/N]: "; read -r ans; printf "\n"
+    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed"; return ;; esac
+    spin_run "Uninstalling OpenSpeedTest" _ost_remove
+    print_success "OpenSpeedTest uninstalled"
+}
+_ost_toggle_persistence() { _ost_persisted && _ost_persist_set 0 || _ost_persist_set 1; }
+_ost_do() {   # <action_key>
+    case "$1" in
+        install_enable|enable) _ost_enable_flow ;;
+        disable)               _ost_disable_flow ;;
+        reinstall)             _ost_reinstall_flow ;;
+        uninstall)             _ost_uninstall_flow ;;
+    esac
 }
 
 show_openspeedtest_help() {
@@ -13192,17 +13351,28 @@ Hosts the OpenSpeedTest web app on this router so you can test LAN/Wi-Fi speed
 between a device and the router from any browser - no internet needed, no app.
 It runs its own nginx instance on port 8888 (separate from the admin panel).
 
-Options
-───────
-  • Install / Reinstall: installs any missing dependencies (nginx, unzip, wget),
-    then downloads the web app from your chosen source. It offers a mounted
-    external drive if the internal flash is short, writes the nginx config +
-    service, and starts it. Re-running refreshes the app and restarts the service.
+Status + actions (the menu is context-aware - it shows only what applies)
+────────────────────────────────────────────────────────────────────────
+The Service line shows one of:
+• NOT INSTALLED - the web app isn't installed.
+• DISABLED      - installed, but the service is off (the app files are kept).
+• ENABLED       - on and serving on port 8888.
+• SERVICE DOWN  - it's enabled but nginx isn't running (the page won't load).
+
+Actions by state:
+  • Install and enable: installs any missing dependencies (nginx, unzip, wget),
+    downloads the web app from your chosen source (offering a mounted external
+    drive if the internal flash is short), writes the nginx config + service, and
+    starts it. (Shown when NOT INSTALLED.)
+  • Enable: starts the service again with no re-download (the app files are kept).
+  • Disable: stops the service but KEEPS the app files, so re-enabling is instant.
+  • Reinstall: the fix for SERVICE DOWN - re-downloads the app, rewrites the config
+    and service, and restarts. (Shown only when SERVICE DOWN.)
+  • Uninstall: stops the service and removes the app, config, and service script.
   • Diagnostics: reports whether the service is running and the port is listening,
     and shows the URL to open.
-  • Uninstall: stops the service and removes the app, config, and service script.
-  • Persistence: keep OpenSpeedTest across a firmware upgrade (adds its files to
-    the sysupgrade backup). Off by default to save space.
+  • Enable/Disable persistence: keep OpenSpeedTest across a firmware upgrade (adds
+    its files to the sysupgrade backup). Off by default to save space.
 
 Space needed
 ────────────
@@ -13226,38 +13396,65 @@ HELPEOF
 }
 
 manage_openspeedtest() {
+    local state acts n a key choice per_status ip
     while true; do
         clear
         print_centered_header "OpenSpeedTest Server"
-        local ip; ip=$(get_lan_ip)
-        local svc inst per url
-        _ost_running   && svc="${GREEN}RUNNING${RESET}"   || svc="${RED}STOPPED${RESET}"
-        _ost_installed && inst="${GREEN}YES${RESET}"       || inst="${YELLOW}NO${RESET}"
-        _ost_persisted && per="${GREEN}YES${RESET}"        || per="${GREY}NO${RESET}"
-        printf " %b\n" "${CYAN}STATUS${RESET}"
-        printf "   Installed:   %b\n" "$inst"
-        printf "   Service:     %b%s\n" "$svc" "$(_ost_running && printf ' (port %s)' "$OST_PORT")"
-        printf "   Persist:     %b\n" "$per"
-        if _ost_running; then printf "   Direct URL:  %b\n\n" "${CYAN}http://${ip}:${OST_PORT}${RESET}"
-        else printf "   Direct URL:  %b\n\n" "${GREY}(service not running)${RESET}"; fi
 
-        printf "%s%sInstall / Reinstall\n" "$N1" "$NSEP"
-        printf "%s%sDiagnostics\n" "$N2" "$NSEP"
-        printf "%s%sUninstall\n" "$N3" "$NSEP"
-        _ost_persisted && printf "%s%sDisable persistence\n" "$N4" "$NSEP" || printf "%s%sEnable persistence\n" "$N4" "$NSEP"
+        state=$(_lc_state 1 _ost_pkg_installed _ost_enabled _ost_service_up)
+        _ost_persisted && per_status="${GREEN}ENABLED${RESET}" || per_status="${YELLOW}DISABLED${RESET}"
+
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        printf "   %-13s %b\n" "Service:" "$(_lc_value "$state")"
+        if _ost_running; then
+            ip=$(get_lan_ip 2>/dev/null)
+            printf "   %-13s %b\n" "Direct URL:" "${CYAN}http://${ip}:${OST_PORT}${RESET}"
+        fi
+        printf "   %-13s %b\n" "Persistence:" "$per_status"
+        printf "\n"
+
+        acts=$(_lc_actions "$state" 1); n=0
+        for a in $acts; do
+            n=$((n + 1)); eval "OST_ACT_${n}=\"$a\""
+            printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$(_lc_label "$a")"
+        done
+        # Feature-specific extra: Diagnostics (only meaningful once something is installed).
+        OST_DIAG_N=0
+        if [ "$state" != NOT_INSTALLED ]; then
+            n=$((n + 1)); OST_DIAG_N=$n
+            printf "%s%sDiagnostics\n" "$(_lc_num "$n")" "$NSEP"
+        fi
+        n=$((n + 1)); OST_PERSIST_N=$n
+        if _ost_persisted; then a="Disable persistence"; else a="Enable persistence"; fi
+        printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
         printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-4/0/?]: "
-        read -r _o; printf "\n"
-        case "$_o" in
-            1) _ost_do_install ;;
-            2) _ost_diagnose ;;
-            3) _ost_uninstall ;;
-            4) _ost_persisted && _ost_persist_set 0 || _ost_persist_set 1 ;;
+        printf "\nChoose [1-%s/0/?]: " "$n"
+        read -r choice; printf "\n"
+
+        case "$choice" in
             0) return ;;
-            \?|h|H|❓) show_openspeedtest_help ;;
-            *) print_error "Invalid option"; sleep 1 ;;
+            \?|h|H|❓) show_openspeedtest_help; continue ;;
+            *[!0-9]*|"") print_error "Invalid choice"; sleep 1; continue ;;
         esac
+        if [ "$OST_DIAG_N" -ne 0 ] && [ "$choice" = "$OST_DIAG_N" ]; then
+            _ost_diagnose; press_any_key; continue
+        fi
+        if [ "$choice" = "$OST_PERSIST_N" ]; then
+            if [ "$state" = NOT_INSTALLED ] || [ "$state" = DISABLED ]; then
+                print_warning "Enable OpenSpeedTest first, then enable persistence"
+            else
+                _ost_toggle_persistence
+            fi
+            press_any_key; continue
+        fi
+        if [ "$choice" -ge 1 ] && [ "$choice" -lt "$OST_PERSIST_N" ]; then
+            eval "key=\$OST_ACT_${choice}"
+            _ost_do "$key"
+            press_any_key
+        else
+            print_error "Invalid choice"; sleep 1
+        fi
     done
 }
 

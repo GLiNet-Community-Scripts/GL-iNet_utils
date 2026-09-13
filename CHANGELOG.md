@@ -4,6 +4,35 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-09-13
+- **One consistent lifecycle for every installable feature.** The Web Terminal (ttyd), Zram Swap,
+  LibreSpeed, OpenSpeedTest, and the Switch Position Indicator now share ONE status + action model, so
+  no two screens behave differently. Each shows a single lifecycle status value — **NOT INSTALLED /
+  DISABLED / ENABLED / SERVICE DOWN** (colour carries the difference: yellow = you turned it off,
+  red = it broke) — and the menu is **context-aware**, showing only the actions that apply:
+  - **Install and enable** when nothing is installed (it discloses the package download),
+  - **Enable / Disable** to turn it on/off — Disable KEEPS the package and config so re-enabling is
+    instant and lossless,
+  - **Reinstall** only when a service is down (the fix that re-applies the backend and restarts),
+  - **Uninstall** to remove the package entirely (only where a package exists).
+  A down service shows just **Reinstall** + its removal (Uninstall for a package-backed feature; the
+  switch indicator, which has no package, keeps Disable as its removal) — the sensible flows from a
+  broken service are fix or remove, so a standalone Disable isn't offered there.
+  Retired the old inconsistent labels (Install and Enable / Install / Reinstall / Disable Service /
+  Uninstall Package / Install in Web-UI / Remove from Web-UI / re-apply overlay).
+- **Switch Position Indicator:** the separate "Web-UI overlay" and "Live updates" rows are collapsed
+  into the one **Indicator** lifecycle value (they were always linked); a dead backend now reads
+  **SERVICE DOWN** with a **Reinstall** to recover, instead of a silent stale overlay.
+- **Every working step is a gear + spinner** across all five features (no more static "…ing" headers
+  or stray blank lines between action lines), matching the rest of the toolkit.
+- **Terser, consistent messages.** Single-sentence status/result lines no longer end in a period
+  (a period separates sentences; one sentence needs none); progress labels stay natural
+  ("Stopping the ttyd service"); result stamps stay telegraphic ("Web Terminal enabled").
+- Persistence toggles for zram / LibreSpeed / OpenSpeedTest now use the portable keep-list helpers
+  (no `sed -i`), and LibreSpeed's and OpenSpeedTest's keep-lists now also preserve their service's
+  rc.d boot symlink, so the service auto-starts (instead of returning SERVICE DOWN) after a
+  keep-settings firmware upgrade.
+
 ## 2026-09-09
 - **New: Switch Position Indicator** (System Tweaks ▸ Switch Position Indicator). On models with a
   physical toggle switch, it shows which way the switch is actually flipped, right on the Admin Panel's

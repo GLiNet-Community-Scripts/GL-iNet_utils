@@ -4,7 +4,7 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
-## 2026-09-26
+## 2026-09-26_21:20
 - **AdGuardHome Control Center: status reads like every other screen.** The status area is now one
   STATUS list — one fact per row, in the same coloured words the rest of the toolkit uses
   (**ENABLED** / **DISABLED** / **SERVICE DOWN**, **OK** / **MISSING**) — instead of four small blocks of
@@ -51,6 +51,12 @@ for multiple releases on the same day.
 - **Bandwidth Limiter: bringing interfaces up or down now checks they really did.** It used to report
   success once the setting was saved, even if a Wi-Fi band stayed down. It now waits for each band (or
   the network) to reach the chosen state and, if one doesn't, says which band and what state it's in.
+- **Bandwidth Limiter: guest / IoT networks fed by a VLAN port are no longer shown as DOWN.** Their
+  state used to come only from their Wi-Fi SSIDs, so a guest or IoT network carried on a tagged VLAN
+  port (e.g. to a VLAN-aware access point) with its SSIDs off read **DOWN** and offered no limits. The
+  wired / VLAN ports on the network's bridge now count: the network reads **UP**, its ports are listed
+  under If-State as **Wired/VLAN**, and switching all of its Wi-Fi bands off no longer takes the ports
+  down with them. Thanks to mikeyjmatthews for the report.
 - **DNS Benchmark tidied:** a blank line now separates the check from the results, and the timings are
   shown in the value colour instead of switching between green and cyan at an arbitrary 15 ms.
 - **Consistency pass on status words and colours.** "Unknown", "Up to date" and similar readings are

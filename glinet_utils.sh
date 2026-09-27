@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-09-26
+# Version: 2026-09-26_21:20
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -6751,8 +6751,25 @@ netlimit_net_wifi() {   # <net> -> "iface|band|ssid|disabled" per wifi-iface; 2.
         printf '%s %s|%s|%s|%s\n' "$k" "$sec" "$blabel" "$ssid" "$dis"
     done | sort -n | sed 's/^[0-9]* //'
 }
+# Wired / VLAN ports on a network's bridge, one per line: the bridge device's configured `ports` plus
+# any LIVE member that isn't a radio (no phy80211 - true for mt76 wlan* AND MediaTek ra*/rai*/rax*,
+# measured fleet-wide 2026-09-26). GL creates guest/iot SSIDs on every box, but a guest/iot network
+# can ALSO (or only) be fed by a tagged VLAN port to a VLAN-aware AP - those ports carry traffic
+# whatever the SSIDs say.  <net>
+netlimit_net_wired() {
+    local dev s m sys="${NL_SYS:-/sys/class/net}"
+    dev=$(uci -q get "network.$1.device" 2>/dev/null); [ -n "$dev" ] || dev="br-$1"
+    {
+        for s in $(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.]*\)\.name='$dev'\$/\1/p"); do
+            uci -q get "network.$s.ports" 2>/dev/null | tr ' ' '\n'
+        done
+        for m in $(ls "$sys/$dev/brif" 2>/dev/null); do [ -e "$sys/$m/phy80211" ] || echo "$m"; done
+    } | grep . | sort -u
+}
 netlimit_net_ifstate() {   # <net> -> up|down (band-aware: a wifi network is UP iff any of its SSIDs is up)
     [ "$(uci -q get "network.$1.disabled" 2>/dev/null)" = 1 ] && { echo down; return; }
+    # a wired/VLAN port keeps the network up even with every SSID off (VLAN-fed guest/iot)
+    [ -n "$(netlimit_net_wired "$1")" ] && { echo up; return; }
     local sec any_wifi=0 any_up=0
     for sec in $(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\(.*\)\.network='$1'\$/\1/p"); do
         any_wifi=1; [ "$(uci -q get "wireless.$sec.disabled" 2>/dev/null)" = 1 ] || any_up=1
@@ -6766,12 +6783,14 @@ netlimit_bands_apply() {   # <net> <dev> <mapfile: idx|iface|band|ssid|sel(=up)>
         if [ "$sel" = 1 ]; then uci -q set "wireless.$sec.disabled=0"; any_up=1
         else uci -q set "wireless.$sec.disabled=1"; fi
     done < "$mf"
-    # The network master follows the bands: enabled iff at least one band is up.
-    [ "$any_up" = 1 ] && uci -q set "network.$net.disabled=0" || uci -q set "network.$net.disabled=1"
+    # The network master follows the bands: enabled iff at least one band is up - UNLESS wired/VLAN
+    # ports also feed it; then switching Wi-Fi off must not cut those clients off, so it stays up.
+    local keep=0; [ -n "$(netlimit_net_wired "$net")" ] && keep=1
+    { [ "$any_up" = 1 ] || [ "$keep" = 1 ]; } && uci -q set "network.$net.disabled=0" || uci -q set "network.$net.disabled=1"
     uci commit wireless; uci commit network
     /etc/init.d/network reload >/dev/null 2>&1
     command -v wifi >/dev/null 2>&1 && wifi reload >/dev/null 2>&1
-    [ "$any_up" = 1 ] && netlimit_reshape "$dev" up || netlimit_reshape "$dev" down
+    { [ "$any_up" = 1 ] || [ "$keep" = 1 ]; } && netlimit_reshape "$dev" up || netlimit_reshape "$dev" down
     _nl_bands_verify "$mf"      # the live state, not the config write, decides success
 }
 netlimit_guest_parse() {   # <initscript> -> "dl ul"
@@ -6962,7 +6981,9 @@ Per-network options
     change, like the GL admin toggle, so it survives a reboot. A network with multiple Wi-Fi
     bands (2.4 / 5 / 6 GHz) opens a grid where you pick which bands to bring up or down - the
     network reads UP while any band is up, DOWN once all are off; single-interface networks (a
-    wired VLAN) toggle as a whole. A switched-off network offers only "Bring interface(s) UP",
+    wired VLAN) toggle as a whole. A guest / IoT network that's also fed by a wired or tagged VLAN
+    port (e.g. to a VLAN-aware access point) stays UP with every band off - the ports are listed
+    under If-State as Wired/VLAN, and switching its bands off never takes those ports down. A switched-off network offers only "Bring interface(s) UP",
     since limits and router access don't apply until it's up. The LAN and VPN tunnels are never
     toggled here. Turning bands on/off briefly re-applies Wi-Fi, so other wireless may drop for
     a moment.
@@ -7065,6 +7086,11 @@ EOF
                 else printf "   %-10s %b\n" "${_bb:-$_bi}" "$_upc"; fi
             done
         fi
+        # Wired/VLAN ports feeding a guest/iot network - why it reads UP with every SSID off.
+        case "$type" in guest|iot)
+            _wp=$(netlimit_net_wired "$name" | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+            [ -n "$_wp" ] && [ "$ifstate" != down ] && printf "   %-10s %b%s%b\n" "Wired/VLAN" "$BLUE" "$_wp" "$RESET" ;;
+        esac
         # no limit set = nothing active -> grey NO LIMIT (the grid keeps its compact "-")
         _r=$(_nl_rate "$dl"); [ "$_r" = - ] && _r="${GREY}NO LIMIT${RESET}"; printf " %bDownload:%b    %b\n" "$CYAN" "$RESET" "$_r"
         _r=$(_nl_rate "$ul"); [ "$_r" = - ] && _r="${GREY}NO LIMIT${RESET}"; printf " %bUpload:%b      %b\n" "$CYAN" "$RESET" "$_r"

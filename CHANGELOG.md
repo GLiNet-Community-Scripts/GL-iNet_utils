@@ -4,6 +4,234 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-09-26
+- **AdGuardHome Control Center: status reads like every other screen.** The status area is now one
+  STATUS list — one fact per row, in the same coloured words the rest of the toolkit uses
+  (**ENABLED** / **DISABLED** / **SERVICE DOWN**, **OK** / **MISSING**) — instead of four small blocks of
+  dot-separated values. It adds the dashboard's full address (with its real port) when Direct UI
+  Access is on, and the release channel. The Direct UI Access, Updates & Channel, and Backup & Recovery
+  screens follow the same layout and words.
+- **DISABLED now reads grey everywhere** (it was yellow): off-by-choice is a calm, inactive state, so it
+  shares grey with NOT INSTALLED and "No Change", and yellow is kept for things actually worth a look.
+- **Values are easier to pick out.** Plain facts — versions, sizes, speeds, temperatures, addresses,
+  paths — now show in the same soft blue as info messages, so every "label: value" line has clear contrast
+  while green stays reserved for "good". Hardware Information keeps its look but its values are blue now,
+  with YES/FULL/UP still green; the Fan, Toolkit, AdGuardHome, zram, SSH keys, Bandwidth Limiter and System
+  Configuration Viewer screens follow the same rule, and the benchmark tables mark "this device" in bold blue.
+  The Bandwidth Limiter's network detail now colours its Status (ACTIVE/BYPASSED/INACTIVE) the same way the
+  network list does.
+- **Status colours now mean the same thing on every screen.** Red is only for something broken; a missing
+  feature or piece of hardware (no fan, no switch, a CPU without AES) is grey, not red; and yellow now also
+  flags a setting changed from GL's defaults in a way that could cause harm — no root password, SSH
+  password or root login turned off (lockout risk), or a fan limit raised above the factory value (now
+  shown with the factory number). Plain facts such as Wi-Fi passwords and file paths are no longer
+  coloured, and the System Configuration Viewer's status words are now capitalised like everywhere else.
+- **AdGuardHome: item 1 now matches what's wrong.** It reads **Recover Configuration** when config.yaml
+  is missing (restore a backup, or reset to factory defaults if there's none) and **Restart
+  AdGuardHome** when the service is switched on but not running, instead of an Enable/Disable that
+  couldn't fix either.
+- **New: switch AdGuardHome between the Stable and Beta channels** (Advanced Settings ▸ Updates &
+  Channel). Beta installs AdGuard's pre-release build; config.yaml is backed up first, and switching
+  back to Stable restores GL.iNet's build and that backup (Beta upgrades config.yaml to a format
+  GL.iNet's build can't read). You're offered update persistence so a firmware update doesn't strand
+  the Beta build.
+- **Hardware Info: Device ID lines up again** once uptime passes 9 days (the day count wasn't counted in
+  the column width).
+- **Direct UI Access: fixed a way to end up with an open dashboard.** Enabling it asked twice whether to
+  set a password, and backing out of the second question left the router switched to direct access
+  without a login — silently, taking effect at the next restart. It now asks once, collects the login
+  before changing anything, and backing out leaves Direct UI Access off.
+- **Direct UI Access fixes:** a missing config.yaml no longer prints a stray `grep` error or claims a
+  password is set — it shows UNKNOWN and points to Recover Configuration. Addresses now use the port
+  AdGuardHome really listens on instead of assuming 3000. "UI Direct Access" / "Direct Web UI Access"
+  are now consistently **Direct UI Access**.
+- **Bandwidth Limiter network screen is easier to read.** Each band's UP/DOWN is coloured like the
+  network's, an unset limit reads NO LIMIT instead of "-", the Router state word takes the colour of its
+  dot (BLOCKED stays red, matching the network list), and the open-port list is easier to pick out.
+- **Bandwidth Limiter: bringing interfaces up or down now checks they really did.** It used to report
+  success once the setting was saved, even if a Wi-Fi band stayed down. It now waits for each band (or
+  the network) to reach the chosen state and, if one doesn't, says which band and what state it's in.
+- **DNS Benchmark tidied:** a blank line now separates the check from the results, and the timings are
+  shown in the value colour instead of switching between green and cyan at an arbitrary 15 ms.
+- **Consistency pass on status words and colours.** "Unknown", "Up to date" and similar readings are
+  now capitalised like every other status (UNKNOWN, UP TO DATE, AVAILABLE); an empty backup list reads
+  NONE in grey everywhere; the AdGuardHome filter limit reads INACTIVE in grey; Display Settings shows
+  the saved default in the value colour; the Bandwidth Limiter list colours its Persist column and
+  limits; the Fan screen's control mode and the Switch indicator's details read more cleanly; and the
+  self-update messages use the standard message style.
+- **AdGuardHome updates from the toolkit.** Updates & Channel now shows the installed Version and an
+  Update line (UP TO DATE, or AVAILABLE with the newer version) under the Channel, on both Stable and
+  Beta; the Control Center shows the same. A new option updates AdGuardHome to the newest build of its
+  channel using AdGuardHome's own updater - config.yaml is backed up first, AdGuardHome restarts on the
+  new version, and the result is checked - or checks again when there's no update. It checks free space
+  first (allowing for flash that compresses, like the MT3000's), and if an update stops part-way the
+  previous version is put back. "UI Updates" is now called **Updates via UI**, and the help explains
+  what it and the channels actually do.
+- **Safer AdGuardHome channel switches, updates and restores.** Switching to Stable now installs
+  AdGuard's current stable release and **keeps your config.yaml** (it used to put back an older backup
+  and drop your changes); the new build is checked against config.yaml first, and nothing changes if it
+  can't read it. If a new version won't start, the exact previous version and config are put back
+  automatically. When a firmware update would leave AdGuardHome unable to start (GL.iNet's build can't
+  read a newer config.yaml), the Persistence row turns yellow and you're offered persistence. Backups now
+  record the version, channel and config schema they were taken on and show them in the restore list;
+  a restore is checked first, and a backup taken on GL.iNet's build can bring that build back from
+  /rom at no storage cost. If AdGuardHome is down because its build can't read config.yaml (e.g. after
+  a firmware update), the Control Center offers **Reinstall AdGuardHome**.
+- **AdGuardHome is really stopped before its files change.** Every flow that changes AdGuardHome's files
+  (update, channel switch, restore, factory reset, list changes, credentials, Direct UI Access, storage
+  limit) now waits until the process has actually exited - asking nicely first, then forcing it - and
+  changes nothing if it can't. **Factory Reset** reads as one clean sequence, and the Backup Cleanup list
+  shows each backup's Version, Channel and Schema like the restore list. Backup Creation and the restore
+  picker use the standard [A] All / [N] None / [#] Toggle / [C] Confirm keys.
+- **Every download checks for free space first.** Package installs (Package Manager, Web Terminal, zram,
+  LibreSpeed…), Ookla Speedtest, speedtest-go, the toolkit's own update, OpenSpeedTest and AdGuardHome all
+  check - before changing anything - that there's room, allowing for flash that compresses. When there
+  isn't, nothing is changed and you're told how much is needed; where it makes sense you're offered an
+  alternative instead: OpenSpeedTest can go on a USB/SD drive, and a speed test can run from RAM for the
+  session. A download that fails part-way no longer leaves a broken program behind. On a USB/SD drive,
+  OpenSpeedTest only ever installs into - and uninstalls - a folder of its own, so a folder of yours that
+  happens to be called "openspeedtest" is never written into or deleted.
+- **AdGuardHome backups are counted and kept tidy.** The status shows how many backups you have (not a
+  file count), the temporary safety copies taken while changing Direct UI Access, credentials or lists are
+  removed once the change is confirmed instead of piling up in the backup store, and the Restore and
+  Cleanup lists now show every backup - including any leftover copy - so everything can be deleted.
+- **No more dead-end menu items.** An option that would only say "nothing to do" now does something
+  real: Package System Repair offers **Check for Package System Issues** when all is healthy (Repair Now
+  when not), backup menus offer **Check for Backups** when none are saved, the MTU Optimizer offers
+  **Recalculate Recommended MTU** when already optimal, and the Bandwidth Limiter offers **Check Router
+  Access** when the firewall zone governs it - and each check shows its progress and says what it found
+  ("No package system issues found", "Found 2 backups - choose Restore from a Backup"). Options that can't apply are left out rather than shown
+  (Reset MTU with no override, Disable Limit with no limit - now the last item - and Delete with no
+  backups). AdGuardHome's filter space limit is one Enable/Disable option, and on models where GL.iNet
+  doesn't use it (e.g. the MT3000) the screen says so instead of offering options that do nothing.
+- **Menus read consistently.** Every menu item is now in Title Case ("Enable Persistence", "Check for
+  Updates", "Main Menu"), and the AdGuardHome Control Center shows **Persistence** - yellow when a
+  firmware update would stop AdGuardHome.
+- **VPN & Crypto Benchmark: RSA-2048 fixed on newer firmware.** Routers with OpenSSL 3 (e.g. a Beryl AX
+  on current firmware) showed 0.0 sign/s and verify/s because the newer output format wasn't recognised;
+  the real numbers are now read. A measurement that fails shows `---` instead of a misleading 0.0.
+- **Prompts line up with the menus they follow.** A few yes/no and choice prompts (Toolkit Management,
+  Display Settings, the first-run install and the Mac spacing picker) were indented as if an icon were
+  missing; they now start at the left edge like every other prompt, and the spacing picker's save
+  prompt names the option you picked.
+- **Display Settings previews match your terminal.** The sample messages now use the exact spacing
+  your terminal really gets (Termius and Windows Terminal were showing extra gaps), including when
+  you're currently in Compatible mode.
+- **Menu spacing: you now choose the gap after the numbered items.** A recent macOS update changed how
+  Terminal *draws* the number-key emoji (it paints wider) without changing how far it *moves the
+  cursor* — a difference invisible to every terminal query, so the toolkit can't detect it and the gap
+  came out cramped on one macOS version and loose on another. It's now a deliberate choice instead of a
+  guess: on the first launch in macOS Terminal a quick picker (Option 1 / Option 2) lets you pick the
+  list whose numbers line up with the `?` Help line, and offers to save it as your default (or keep it
+  just for this session). It only appears on genuine macOS Terminal — never on ttyd/web/Linux — so no
+  other terminal is ever bothered by it.
+- **New "WT" display mode** (Toolkit Management ▸ Display Settings) — full mode with **circled-digit
+  keycaps** (`❶ ❷ ❸`) instead of emoji keycaps. These are single-cell glyphs with no per-macOS-version
+  drift, so they need no spacing pick at all — a clean option for anyone who'd rather skip the keycap
+  question entirely. The warning/info/gear symbols still adapt to whatever terminal you're on.
+- **Compatible-mode preview fixed** — it now shows the symbols that terminal will *actually* use (the
+  full-width set on PuTTY, the plain-ASCII set elsewhere) instead of a generic set that clipped on PuTTY.
+- **Bandwidth Limiter: fixed networks showing a limit that wasn't there.** A network with no
+  configured limit could read **ACTIVE/BYPASSED** if a leftover traffic shaper lingered on it (from an
+  older version, an interrupted change, or a config that drifted from the kernel) — and because the
+  status was tied to the router-wide HW-acceleration toggle, acting on one network visibly changed the
+  status of the others. Status now follows the **configured limit**: no limit → INACTIVE, whatever
+  stray shaping exists, and one network's action no longer repaints the rest.
+- **Bandwidth Limiter: leftover shapers are now cleaned up.** Every teardown was previously scoped to
+  the current config, so a shaper whose config entry was gone was orphaned forever — and even Reset
+  couldn't clear it. Opening the limiter now sweeps any shaping left on a network with no limit
+  (cleaning the ingress filter before the ifb device, so nothing dangles), and Reset does a full sweep.
+  Verified end-to-end on real hardware.
+- **AdGuardHome Control Center now warns when its config is missing.** If `config.yaml` is gone while
+  AdGuardHome is still running off already-loaded filter files, the Control Center used to look healthy
+  (Run: ✅) and show a contradictory "Lists: 0 · Rules: N" — with no hint the Lists Manager would fail
+  with "Config not found". It now shows **Config: MISSING** in the status block and an honest
+  "unknown — config.yaml missing" for filters, so a broken config is visible at a glance.
+- **System Configuration Viewer — VPN screen: ZeroTier now shows a status line** (it previously printed
+  a bare "ZeroTier:" header with nothing under it when no networks were configured), matching Tailscale.
+  Tailscale's node IP line is now shown only when there actually is one, instead of an empty "Node:".
+- **System Configuration Viewer: every screen now pages, and there's more to see.** The config views
+  used to print straight to the screen (with an ad-hoc pager on Wireless), so long output scrolled
+  off. Each of the curated views now goes through the shared paged viewer — `[N]`/`[P]` to move, `[0]`
+  to go back — and the extra room was put to use: **Network** now lists every interface (guest / IoT /
+  VLANs, not just WAN+LAN) plus DHCP pools, **static leases**, static routes and DNS; **VPN** adds
+  Tailscale and ZeroTier; **System** adds NTP, logging, LED, Dynamic DNS and the firmware channel. A
+  new **Firewall** view shows the default policy, zones, forwardings, port forwards and traffic rules.
+  Wi-Fi passwords are still shown (you own the router); VPN/OpenVPN private keys are never displayed
+  (and a safety-net mask catches any stray base64 key). Verified live across the fleet.
+- **The AdGuardHome "Memory Impact" meter no longer under-reports while lists download.** After an
+  apply, AdGuardHome re-downloads filter lists asynchronously, so a big list it hadn't finished
+  fetching read as 0 rules — the meter could tell you there was room when there wasn't. The meter now
+  reads AdGuardHome's own download log (`logread`) to resolve any list whose file hasn't landed yet: a
+  completed download contributes its real `rules_count`, a failed download counts 0, and one still in
+  flight uses the catalog estimate, firming up to the exact count as each finishes. Under the meter, a
+  short note says how many enabled lists are still downloading, and an error names any that failed
+  (with "storage full" when that's the cause); a failed list shows **FAILED** in its Size column.
+  Lists you've ticked but not confirmed yet raise no note — their "~" size already marks the estimate. The on-disk file stays the primary source, and if the log is unavailable or
+  its format changes it falls back to the estimate — never the old under-count. Verified against real
+  filter-download logs on the fleet (logged counts matched the on-disk files exactly).
+- **AdGuardHome Lists Manager: applying changes shows every step.** Confirming now reads as one
+  sequence — **Stopping AdGuardHome**, **Applying the list changes** (with a spinner, so removals on
+  older hardware no longer look stalled), **Restarting AdGuardHome**, then **Downloading lists**, whose
+  line now stays on screen with the result under it (**6 lists downloaded**). The misleading "Backup file
+  created" line is gone — that copy is only an undo copy, removed once the change is settled. If lists
+  can't fit in the filter storage, AdGuardHome is stopped before they're removed, and each outcome uses a
+  plain count ("1 list still downloading", "2 lists failed to download (storage full) and will be removed").
+- **Startup messages stay readable.** Startup now ends with one final step, **Loading the main menu**.
+  If anything was reported on the way (for example the keycap spacing you just saved), it holds for
+  2 seconds before the menu clears the screen; a clean start passes straight through.
+- **Fixed: numbered menu items no longer show a double gap on macOS Tahoe ("Golden Gate").** The OS
+  update changed the width of emoji keycap glyphs (1️⃣) from 1 cell to 2, and the mac terminal profile
+  had *assumed* 1 cell (hardcoding a 2-space keycap→label separator), so every numbered row rendered
+  with a doubled gap. The toolkit now MEASURES the keycap advance at startup (same cursor-probe it
+  already uses for ⚠️ and †) and sets the separator to one visible gap — self-correcting on Tahoe,
+  pre-Tahoe macOS, and Linux alike, with no per-OS assumption to go stale again. The Display Settings
+  Full-mode preview (which hardcoded the keycap spacing) now follows the same measured separator.
+- **The AdGuardHome service control is now a clean Enable/Disable toggle.** Item 1 of the Control
+  Center used to be a compound "Restart / Stop AdGuardHome" that opened a second prompt — "⚠ Service
+  is RUNNING / Disable, Restart, or Cancel? [D/R/0]" — which put a warning glyph on a perfectly
+  healthy service and made you choose an action twice (a menu wearing a confirmation's clothes). It's
+  now a single item whose label follows state: **Enable AdGuardHome** when stopped, **Disable
+  AdGuardHome** when running. Enabling just acts; disabling asks once (it takes LAN DNS filtering
+  down). The four destinations below it (Manage Lists, Advanced, Backup, Logs) keep fixed numbers.
+- **Restart moved to Logs & Maintenance**, where it belongs — it's an operational bounce (reload
+  config.yaml / clear a wedge), not a lifecycle state change. It keeps a **fixed menu slot** (Watch=1,
+  Clear=2, Restart=3 — numbers never shift): while running it restarts and verifies the service came
+  back up; while the service is disabled it doesn't vanish or silently turn into Enable — it points
+  you to the Control Center toggle (item 1). This locks in a new "hub menus keep fixed item numbers"
+  standard: a state-dependent item holds its slot and explains itself in place rather than disappearing.
+- **Failures now read the same everywhere, and always tell you why.** A single `fail_report` shape
+  is used across every install / enable / service-start failure: the error, then (when there is one)
+  the actual diagnostic — indented — then what to check, then a warning if partial state was left.
+  Most importantly, a **failed package install now shows the real reason** (no MIPS build, a missing
+  dependency, out of space, a feed error) instead of a bare "Failed to install X" — that output used
+  to be thrown away. Same fix for the Ookla and speedtest-go fetches.
+- **Broken services report their log inline.** Zram, LibreSpeed, the Switch indicator and AdGuardHome
+  now show the last few relevant log lines on a failure instead of telling you to go run `logread`.
+- **Success messages are now honest.** The AdGuardHome direct-access Enable / Restart / Disable, the
+  fan "Dynamic control restored", the Remote LAN "set" writes, and SSH key-add now confirm the action
+  actually took (service up/down, write succeeded, key present) before reporting success — and report
+  the real failure otherwise, instead of claiming success unconditionally.
+- **Every working step is a gear + spinner.** The last static "…ing" lines (AdGuardHome restart/start,
+  backup creation, the DNS-benchmark pre-check) now use the spinner, and the two AdGuardHome restarts
+  verify the service actually came up instead of assuming success.
+- **Consistent message punctuation throughout.** Completed the single-sentence "no trailing period"
+  pass across the remaining compound-line messages (case arms, `&&` chains, one-liners).
+- Switch indicator help now notes Disable is offered in both ENABLED and SERVICE DOWN (it is the
+  service-only feature's removal).
+- **Fixed: "Press any key to continue" now accepts any key.** On this firmware busybox's `read`
+  didn't do a true single-key read, so only Enter advanced the prompt and any other key appeared to
+  hang. It now reads one key via `stty` raw + `dd` and restores the terminal (same fix for the
+  `[P]/[N]` pager reads). Verified on all fleet models. Also: `spin_run`/`countdown_run` now run their
+  background command with stdin from `/dev/null`, so a service they (re)start can't inherit the
+  terminal and wedge the next keypress.
+- **Fixed: the AdGuardHome Control Center no longer freezes when `config.yaml` is missing.** If the
+  config file was absent (never set up, or moved), the status screen's list/rule counters ran `awk`
+  and `cat` with an empty file argument, which silently reads the terminal and hangs forever on a real
+  TTY (invisible to piped tests). The counters now guard the file (`[ -f ]` + `</dev/null`) and use
+  `find -exec cat {} +` instead of `| xargs cat`, so a missing config shows zero counts instead of
+  hanging. The AdGuardHome list edit/delete helpers got the same `</dev/null` guard.
+
 ## 2026-09-13
 - **One consistent lifecycle for every installable feature.** The Web Terminal (ttyd), Zram Swap,
   LibreSpeed, OpenSpeedTest, and the Switch Position Indicator now share ONE status + action model, so

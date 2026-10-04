@@ -23,14 +23,17 @@
   - **Network Topology:** Paged navigation for network interfaces and wireless radio details (Link speeds, MIMO, Channel bandwidth).
   - **VPN Crypto Audit:** Instantly verify if your hardware acceleration (AES-CE, NEON) is active at the kernel level for optimized OpenVPN and WireGuard performance.
 - 🛠️ **AdGuardHome Control Center**
-  - **Service Management:** A central hub to toggle AGH, manage UI updates, and bulk-import pre-set blocklists/allowlists.
+  - **Service Management:** A central hub to enable/disable AGH (or restart or recover it when it's down), switch between the firmware's Stable build and the Beta channel, manage UI updates, and bulk-import pre-set blocklists/allowlists — with a Memory Impact meter, and list changes that still work while AGH is off.
   - **Industrial Self-Healing:** Fail-safe logic that pulls pristine binaries or init scripts from /rom if your current installation becomes corrupted.
   - **Surgical Backups:** Precision tracking of configurations, binaries, and scripts with automated timestamping and integrity checks that persist through firmware upgrades.
 - ⚙️ **System Tweaks**
   - **Zram Tuning:** Essential for low-RAM devices (e.g., Beryl 7/MT3600BE). Easily install and tune compressed RAM swap to reduce OOM (Out-of-Memory) crashes.
   - **Advanced Fan Control:** Granular management of Min/Max thresholds, "Fan-on" triggers, and thermal warnings with direct UI integration.
   - **Web-UI Terminal:** Embeds a fully functional Linux terminal directly into the GL.iNet Admin Panel. Adds a `>_` icon to the navigation bar that opens a draggable, resizable, minimizable terminal modal powered by ttyd. Supports both HTTP and HTTPS modes.
-  - **Package Manager:** Installs and persists essential CLI tools across sysupgrades — showing each tool's install size and the overlay's free space, with a live projection of what's left after your selections (an approximate floor on compressing filesystems), so you can weigh the flash cost before committing.
+  - **Package and Persistence Manager:** Installs essential CLI tools and chooses what survives a firmware update — packages (re-installed after the update, keeping only their config) and the toolkit's own features and settings (Web Terminal, fan, switch indicator, bandwidth limits, OpenSpeedTest, SSH keys, backups). Each package's size includes the dependencies it pulls in, and the Storage and Persist lines project the result before you commit.
+  - **Firmware Update:** Updates from GL.iNet's own download catalogue — check for an update or choose any build GL.iNet offers the router (upgrade, downgrade, channel switch or reinstall), with release notes. Before flashing it lists what may not survive and offers to persist it, measures whether the update fits in memory (and can stop services to make room), verifies the download, checksum, signature and image, then counts down. After the update, the next start checks that everything that was meant to persist came back.
+  - **Switch Position Indicator:** Shows which side the physical toggle switch is on, right in the Admin Panel's button settings.
+  - **Package System Repair:** Detects and repairs a corrupted package database.
   - **Toolkit Management:** Install the toolkit as a system command — copies it to `/usr/sbin/glinet_utils` so you can launch it from any directory by just typing `glinet_utils`, with optional `sysupgrade.conf` persistence so it (and its self-updates) survive firmware upgrades.
 - 📊 **Performance Benchmarks**
   - **Cross-Device Leaderboards:** A VPN & Crypto benchmark (WireGuard/ChaCha20, OpenVPN/AES-GCM, and RSA handshake), plus CPU thermal stress and raw Disk/Memory I/O — each ranked against saved reference routers instead of a single baseline — alongside DNS latency.
@@ -47,7 +50,7 @@
     authorisation into GL's own config so they appear in the web UI, and applies
     firewall changes under a 30-second auto-revert so a wrong toggle cannot lock
     you out.
-- 📋 **Secure UCI Viewer:** Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, VPN tunnels, and GoodCloud settings without digging through the CLI.
+- 📋 **Secure UCI Viewer:** Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, network and firewall settings, VPN tunnels, and GoodCloud settings without digging through the CLI.
 - 🔄 **Native Self-Updater:** Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 **GPL-3.0 Licensed:** Free, open, and community-driven.
 
@@ -102,13 +105,13 @@ Main Menu
 AdGuardHome Control Center
 
 ```
-1️⃣  Start AdGuardHome            (Restart / Stop when already running)
+1️⃣  Disable AdGuardHome          (Enable / Restart / Reinstall / Recover, matching its state)
 2️⃣  Manage Allow/Blocklists
-3️⃣  Setup, Access & UI Updates
+3️⃣  Advanced Settings
 4️⃣  Backup & Recovery Suite
 5️⃣  Logs & Maintenance
 🆑 Reset to Factory Settings (Start Over)
-0️⃣  Main menu
+0️⃣  Main Menu
 ❓ Help
 ```
 
@@ -118,9 +121,12 @@ System Tweaks
 1️⃣  Device Fan Settings
 2️⃣  Manage Zram Swap
 3️⃣  Web-UI Terminal Interface
-4️⃣  Package and Persistence Manager
-5️⃣  Toolkit Management
-0️⃣  Main menu
+4️⃣  Switch Position Indicator
+5️⃣  Package and Persistence Manager
+6️⃣  Package System Repair
+7️⃣  Toolkit Management
+8️⃣  Firmware Update
+0️⃣  Main Menu
 ❓ Help
 ```
 
@@ -136,7 +142,7 @@ System Benchmarks
 7️⃣  LibreSpeed Speed Test Server
 8️⃣  iPerf3 Network Speed Test Server
 9️⃣  OpenSpeedTest Server
-0️⃣  Main menu
+0️⃣  Main Menu
 ❓ Help
 
 
@@ -149,7 +155,8 @@ Network and VPN Tools
 2️⃣  Remote LAN Access
 3️⃣  Network Bandwidth Limiter
 4️⃣  SSH Key Management
-0️⃣  Main menu
+0️⃣  Main Menu
+❓ Help
 ```
 
 VPN MTU Optimizer
@@ -175,10 +182,11 @@ System Configuration Viewer
 ```
 1️⃣  Wireless Networks
 2️⃣  Network Configuration
-3️⃣  VPN Configuration
-4️⃣  System Settings
-5️⃣  Cloud Services
-0️⃣  Main menu
+3️⃣  Firewall
+4️⃣  VPN Configuration
+5️⃣  System Settings
+6️⃣  Cloud Services
+0️⃣  Main Menu
 ❓ Help
 ```
 

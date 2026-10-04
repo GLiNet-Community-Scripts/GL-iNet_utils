@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-09-26_21:20
+# Version: 2026-10-03
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -46,7 +46,21 @@
 # Vocabulary (locked)
 #   [C] Confirm   [0] Exit / Main Menu / Back / Cancel (by depth/context)
 #   [?] Help      multi-select: [A] All  [N] None  [#] Toggle
-#   pager: [P] Prev  [N] Next         [X] is never used.
+#   pager: [P] Previous  [N] Next     [X] is never used.
+#   paged multi-select: [N] stays Next, so None becomes [Z]; [A]/[Z] act on the
+#   current page only (Package & Persistence Manager).
+#
+# Input line (locked)
+#   1. A blank line or a divider sits directly above the input line (a "Choose
+#      [...]" prompt, or a nav line that is itself the input).
+#   2. The "[P] Previous   Page X of Y   [N] Next" line is the line closest to the
+#      input line (or is the input line).
+#   3. Any other command lines go above it.
+#   Prompt order: the page's range, then the footer's keys in reading order,
+#   0 and ? last.
+#
+# Headings: L0 bold cyan, L1 cyan, L2 HDR2 lilac, all non-bold below the title.
+#   An L2 heading inside a table is ONE word (more runs under the column headers).
 #
 # Naming (locked)
 #   Functions and shell variables are plain snake_case - NEVER a leading
@@ -345,7 +359,7 @@ YELLOW="\033[33m"
 GREY="\033[90m"
 BOLD="\033[1m"
 BLUE="\033[38;5;153m"
-HDR2="\033[38;5;148m"   # L2 sub-heading (chartreuse) — one rung below the CYAN L1
+HDR2="\033[38;5;183m"   # L2 sub-heading (lilac) — one rung below the CYAN L1; clear of the warning yellow on every terminal
 
 SPLASH="
    _____ _          _ _   _      _   
@@ -438,6 +452,53 @@ _stressng_unsafe() {
     [ "$kmaj" -gt 6 ] && return 1
     case "$kmin" in ''|*[!0-9]*) return 0 ;; esac
     [ "$kmin" -lt 6 ]
+}
+# "stress" is ONE tool to the user; its backend follows the kernel. Below 6.6 it's the real `stress` package
+# (stress-ng can crash those kernels - see above). On 6.6+ it's stress-ng, with /usr/bin/stress pointing at
+# it: stress-ng takes the same --cpu/--timeout options, and OpenWrt 25's feeds don't carry `stress` at all
+# (on apk, stress-ng even PROVIDES "stress", so `apk info -e stress` says yes - check the command instead).
+# Persisted by RE-INSTALL, so a firmware update that crosses 6.6 flips the backend (5.10 -> 6.12: stress-ng;
+# back down: stress) - found on the fleet 2026-09-29.
+_pm_present() { case "$1" in stress) _stress_installed ;; *) pkg_is_installed "$1" ;; esac; }
+_stress_backend()   { if _stressng_unsafe; then echo stress; else echo stress-ng; fi; }
+# The command to run for THIS kernel (empty = not installed). Below 6.6 only the real stress counts - a link to
+# stress-ng (left from a newer firmware) would crash the kernel. From 6.6, stress or stress-ng (a stress-ng
+# installed without our /usr/bin/stress link - e.g. a plain `apk add stress` - still counts).
+_stress_cmd() {
+    local sb="${STRESS_BIN:-/usr/bin/stress}"      # e2e hook
+    if [ "$(_stress_backend)" = stress ]; then
+        [ -x "$sb" ] && [ ! -L "$sb" ] && "$sb" --version >/dev/null 2>&1 </dev/null && echo "$sb"
+    elif [ -x "$sb" ] && "$sb" --version >/dev/null 2>&1 </dev/null; then echo "$sb"
+    elif command -v stress-ng >/dev/null 2>&1 && stress-ng --version >/dev/null 2>&1 </dev/null; then command -v stress-ng
+    fi
+}
+_stress_installed() { [ -n "$(_stress_cmd)" ]; }
+_stress_install() {   # 0 when `stress` runs afterwards
+    local b; b=$(_stress_backend)
+    _stress_installed && return 0
+    if [ "$b" = stress ]; then install_package stress
+    else
+        install_package stress-ng "stress (stress-ng)" || return 1
+    fi
+    _stress_link
+    _stress_installed
+}
+# /usr/bin/stress matches the kernel: on 6.6+ it points at stress-ng when only stress-ng is there; below 6.6 a
+# link to stress-ng is removed (stress-ng can crash those kernels). Run at startup and after each (re)install.
+_stress_link() {
+    local sb="${STRESS_BIN:-/usr/bin/stress}"      # e2e hook
+    if [ "$(_stress_backend)" = stress-ng ]; then
+        [ -e "$sb" ] || { command -v stress-ng >/dev/null 2>&1 && ln -sf "$(command -v stress-ng)" "$sb"; }
+    else
+        [ -L "$sb" ] && case "$(readlink "$sb")" in *stress-ng*) rm -f "$sb" ;; esac
+    fi
+    return 0
+}
+_stress_remove() {
+    [ -L /usr/bin/stress ] && rm -f /usr/bin/stress
+    pkg_is_installed stress-ng && pkg_remove stress-ng >/dev/null 2>&1
+    pkg_is_installed stress && [ -f /usr/bin/stress ] && pkg_remove stress >/dev/null 2>&1
+    ! [ -x /usr/bin/stress ]
 }
 
 pkg_is_installed() {   # <pkg> -> 0 if installed
@@ -1159,6 +1220,18 @@ terminal_size_advisory() {
     done
 }
 
+# Package sizes, measured once per toolkit session (they don't change unless a package is installed or
+# removed, and those rows are re-measured): the Package & Persistence Manager's slowest step - 4-6 s on a
+# router (parsing the opkg index / one `apk info -s` per package). A file, because the measuring runs in
+# spin_run's subshell (the toolkit's usual way of handing results back); removed when the toolkit exits.
+PKG_SIZE_CACHE="/tmp/.glinet_pkgsizes.$$"
+_session_cleanup() {
+    # stop the background measurement FIRST - one finishing between a delete and the stop would write its
+    # result file again
+    [ -n "${FW_ARCH_PID:-}" ] && _fw_kill_tree "$FW_ARCH_PID" 2>/dev/null
+    rm -f "$PKG_SIZE_CACHE" "$FW_ARCH_CACHE" /tmp/.fw_keeplist."$$".* 2>/dev/null
+}
+
 terminal_restore() {
     [ -n "$_TERM_RESTORED" ] && return              # idempotent - run once
     _TERM_RESTORED=1
@@ -1201,9 +1274,9 @@ fi
 # Headless runs never touched the terminal, so there is nothing to restore - and emitting the
 # restore escape sequences would dirty the boot log / captured output.
 if [ -z "${__GL_HEADLESS:-}" ]; then
-    trap 'terminal_restore' EXIT
-    trap 'terminal_restore; exit 130' INT
-    trap 'terminal_restore; exit 143' TERM
+    trap 'terminal_restore; _session_cleanup' EXIT
+    trap 'terminal_restore; _session_cleanup; exit 130' INT
+    trap 'terminal_restore; _session_cleanup; exit 143' TERM
 fi
 
 # -----------------------------
@@ -1293,7 +1366,9 @@ press_any_key() {
         dd bs=1 count=1 2>/dev/null </dev/tty >/dev/null
         stty "$s" 2>/dev/null </dev/tty
     else
-        read -r s
+        # no stty (it isn't installed for every terminal type): busybox read -n 1 still takes ONE key -
+        # plain `read` needed Enter, so "Press any key" didn't mean any key (found on .3.1, 2026-09-29)
+        read -rsn1 s 2>/dev/null || read -r s
     fi
     printf "\n"
     _STARTUP_MSG=0      # acknowledged - nothing left on screen for the startup hold to protect
@@ -1784,21 +1859,53 @@ offer_pkg_db_repair() {
     return 1
 }
 
+# A not-installed package's install FOOTPRINT: itself plus every dependency that isn't installed yet
+# (tailscale on an MT1300 is 3.6 MB, but it pulls tailscaled 6.2 MB - the package alone under-reported it).
+# opkg: from the feed index (name|bytes|depends, one pass over the lists); apk: a simulated install.
+_opkg_index_table() {   # [lists dir] -> name|installed-bytes|depends, one line per package
+    local d="${1:-${PKG_LISTS_DIR:-/var/opkg-lists}}" f
+    [ -d "$d" ] || d=/tmp/opkg-lists
+    for f in "$d"/*; do [ -f "$f" ] && { gzip -dc "$f" 2>/dev/null || cat "$f" 2>/dev/null; }; done \
+      | awk '/^Package: /{ if (n != "") print n "|" sz "|" dp; n = $2; sz = ""; dp = "" }
+             /^Installed-Size: /{ sz = $2 } /^Depends: /{ dp = substr($0, 10) }
+             END { if (n != "") print n "|" sz "|" dp }' | awk -F'|' '$2 != "" && !seen[$1]++'
+}
+_opkg_footprint_bytes() {   # <pkg> <table> - bytes; dependencies followed through the table, installed ones skipped
+    awk -F'|' -v root="$1" -v inst="$(ls "${OPKG_INFO_DIR:-/usr/lib/opkg/info}" 2>/dev/null | sed -n 's/\.control$//p' | tr '\n' ' ')" '
+        BEGIN { n = split(inst, a, " "); for (i = 1; i <= n; i++) have[a[i]] = 1 }
+        { size[$1] = $2; deps[$1] = $3 }
+        END { if (!(root in size)) { print 0; exit }
+              tot = size[root]; q[1] = root; h = 1; t = 1; seen[root] = 1
+              while (h <= t) { p = q[h++]; m = split(deps[p], d, ",")
+                  for (j = 1; j <= m; j++) { x = d[j]; sub(/\|.*/, "", x); gsub(/\(.*\)/, "", x); gsub(/ /, "", x)
+                      if (x == "" || (x in seen) || (x in have)) continue; seen[x] = 1   # "a | b": the first
+                      if (x in size) { tot += size[x]; q[++t] = x } } }
+              print tot + 0 }' "$2" 2>/dev/null
+}
+_apk_footprint_kb() {   # <pkg> - KB of everything a simulated install adds (just the package when installed)
+    local what="$1"
+    if ! apk info -e "$1" >/dev/null 2>&1; then
+        what=$(apk add --simulate "$1" 2>/dev/null </dev/null | sed -n 's/^([0-9]*\/[0-9]*) Installing \([^ ]*\) .*/\1/p' | tr '\n' ' ')
+        [ -n "$what" ] || what="$1"
+    fi
+    apk info -s $what 2>/dev/null </dev/null | awk '$2=="B" {s += ($1+1023)/1024} $2=="KiB" {s += $1}
+                                                      $2=="MiB" {s += $1*1024} $2=="GiB" {s += $1*1048576}
+                                                      END { printf "%d", s + 0 }'
+}
+
 # Ensure <pkg> is installed: no-op if already present, else refresh lists and
 # install it with a spinner. $2 = optional friendly name for messages.
 # Returns 0 if the package is installed afterwards, 1 otherwise.
-# A package's INSTALLED size in KB from the package index - 0 when unknown (the pre-flight is then
-# skipped, never guessed). apk: `apk info -s`; opkg: the Installed-Size (bytes) in the feed index.
-# Dependencies aren't included, so it's a floor; opkg/apk still stop on ENOSPC themselves.
+# A package's install footprint in KB - itself plus the dependencies it pulls in (_opkg_footprint_bytes /
+# _apk_footprint_kb) - 0 when unknown (the pre-flight is then skipped, never guessed).
 pkg_install_kb() {   # <pkg>
-    local kb=0 d="${PKG_LISTS_DIR:-/var/opkg-lists}" f
+    local kb=0 t
     if [ "$(pkg_mgr)" = apk ]; then
-        kb=$(apk info -s "$1" 2>/dev/null </dev/null | awk '$2=="B"{printf "%d",($1+1023)/1024;exit} $2=="KiB"{printf "%d",$1;exit}
-                                                          $2=="MiB"{printf "%d",$1*1024;exit} $2=="GiB"{printf "%d",$1*1048576;exit}')
+        kb=$(_apk_footprint_kb "$1")
     else
-        [ -d "$d" ] || d=/tmp/opkg-lists
-        kb=$(for f in "$d"/*; do [ -f "$f" ] && { gzip -dc "$f" 2>/dev/null || cat "$f"; }; done \
-             | awk -v p="$1" '/^Package: /{n=$2} n==p && /^Installed-Size: /{printf "%d", ($2+1023)/1024; exit}')
+        t=$(mktemp /tmp/.opkg_table.XXXXXX) || return 0
+        _opkg_index_table > "$t"
+        kb=$(( ($(_opkg_footprint_bytes "$1" "$t") + 1023) / 1024 )); rm -f "$t"
     fi
     case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
     echo "$kb"
@@ -2135,13 +2242,14 @@ agh_apply_and_restart() {
 _agh_apply_and_restart_core() {
     local was_running="$1" backup="$2" target="$3" ctx="$4"
     local stopped_note="${5:-AdGuardHome is stopped - the change applies when it next starts}" _log
+    local start_label="${7:-Restarting AdGuardHome}"
     [ "${6:-}" = inline ] || printf "\n"
     if [ "$was_running" != "1" ]; then
         print_success "${ctx:-Changes saved}"
         [ "$stopped_note" = "-" ] || print_info "$stopped_note"
         return 0
     fi
-    if spin_run "Restarting AdGuardHome" _agh_svc_verify "$AGH_INIT" start; then
+    if spin_run "$start_label" _agh_svc_verify "$AGH_INIT" start; then
         print_success "${ctx:-Changes applied}"
         return 0
     fi
@@ -3774,8 +3882,15 @@ The screen
   • Under the meter: how many enabled lists are still downloading (their
     counts are estimates until finished), and how many failed - a failed
     list loads nothing, so the meter doesn't count it.
+  • AdGuardHome not running: the manager still opens, with a warning on top.
+    Lists are part of its config, so they can be staged either way. If it's
+    SERVICE DOWN, Confirm applies the lists and starts it; if it's DISABLED,
+    Confirm asks whether to enable it - say no and the lists are saved for
+    when it's enabled. Nothing downloads while it's stopped, so the
+    "downloading" line is left out until it runs.
   • Sections: Recommended (a curated, safe default set), General, Security,
-    Allowlist, and any of "Your Other Lists" already in the config.
+    Allowlist, and Other (lists already in your config that aren't in this
+    catalog).
 
 Staying safe on small boxes
 ────────────────────────────────────────────────────────────────────────
@@ -3947,11 +4062,27 @@ id: $ts"
 #   enabled lists with no file, which UNDER-reported a list AGH was still downloading.)
 agh_proj_active_rules() { awk -F'|' '{ if($7==1 && $8==1) s+=$9 } END{print s+0}' "$1"; }
 
+# GL's factory config.yaml writes list items at column 0 ("- enabled:" / "  url:"); AdGuardHome itself
+# writes them indented ("  - enabled:" / "    url:"), and agh_add_block adds its items that way. A
+# section mixing the two is invalid YAML ("did not find expected '-' indicator") - so bring a column-0
+# filters / whitelist_filters section to AdGuardHome's style before any edit. No-op on an AGH-written file.
+_agh_lists_normalize() {   # <config>
+    grep -qE '^(filters|whitelist_filters):' "$1" 2>/dev/null || return 0
+    awk '
+        /^(filters|whitelist_filters):/ { sec = 1; print; next }
+        sec && /^[^ -]/                { sec = 0 }
+        sec && /^- /                   { print "  " $0; next }
+        sec && /^  [^ -]/              { print "  " $0; next }
+        { print }' "$1" > "$1.norm" && cat "$1.norm" > "$1"
+    rm -f "$1.norm"
+}
+
 # Write the planned list changes into config.yaml and drop the filter files of removed lists
 # (AGH leaves them behind, so a removal wouldn't free the partition). One step so it can run under
 # a spinner - on older hardware the per-list edits take a noticeable moment.  <lists-data> <config> <workdir>
 _agh_lists_write() {
     local data="$1" cfg="$2" wd="$3" count=0 i sec n ty oi oe ti te rules url est act head next_line
+    _agh_lists_normalize "$cfg"
     while IFS='|' read -r i sec n ty oi oe ti te rules url est; do
         [ -z "$n" ] && continue
         act=$(get_agh_action_text "$ti" "$te" "$oi" "$oe")
@@ -3979,6 +4110,7 @@ _agh_lists_write() {
 # their leftovers.  <lists-data> <config> <workdir>
 _agh_lists_drop_empty() {
     local data="$1" cfg="$2" wd="$3" _i _sec _n _ty _oi _oe _ti _te _r _u _e _id
+    _agh_lists_normalize "$cfg"
     while IFS='|' read -r _i _sec _n _ty _oi _oe _ti _te _r _u _e; do
         { [ "$_ti" = 1 ] && [ "$_te" = 1 ]; } || continue
         _id=$(agh_list_id "$_n" "$cfg")
@@ -4005,7 +4137,8 @@ agh_mem_fill() {
     echo "$filled"
 }
 
-# Print the Memory Health meter line for the current target selection ($1=LISTS_DATA).
+# Print the Memory Health meter line for the current target selection ($1=LISTS_DATA). $2 = 0 when
+# AdGuardHome isn't running: nothing downloads then, so the "downloading" line is left out.
 agh_memory_meter() {
     local active mt st cap filled i bar swaptxt status dl fl fs _why
     active=$(agh_proj_active_rules "$1")
@@ -4033,7 +4166,7 @@ EOF
 $(awk -F'|' '$5==1 && $6==1 { if ($11==1) d++; else if ($11==2) f++; else if ($11==3) { f++; s++ } }
              END { print d+0, f+0, s+0 }' "$1" 2>/dev/null)
 EOF
-    if [ "${dl:-0}" -gt 0 ]; then
+    if [ "${dl:-0}" -gt 0 ] && [ "${2:-1}" = 1 ]; then
         if [ "$dl" = 1 ]; then print_info "1 list downloading - rule count estimated until finished"
         else print_info "$dl lists downloading - rule count estimated until finished"; fi
     fi
@@ -4198,7 +4331,7 @@ EOF
                 else
                     rc=0; cest=1
                 fi
-                printf "%s|Your Other Lists|%s|%s|%s|%s|%s|%s|%s|CUSTOM|%s\n" \
+                printf "%s|Other|%s|%s|%s|%s|%s|%s|%s|CUSTOM|%s\n" \
                     "$cbase" "$c_name" "$c_type" "$oi" "$oe" "$oi" "$oe" "$rc" "$cest" >> "$LISTS_DATA"
                 cbase=$((cbase + 1))
             fi
@@ -4223,7 +4356,14 @@ EOF
 
             clear
             print_centered_header "AdGuardHome Lists Manager"
-            agh_memory_meter "$LISTS_DATA"
+            # Not running: entry is allowed (lists are config), but say what Confirm will do. The meter
+            # stays (projected from the config); the "downloading" line goes until AdGuardHome is up.
+            agh_st=$(agh_run_state); agh_up=1
+            case "$agh_st" in
+                down) agh_up=0; print_warning "AdGuardHome is stopped. Changes take effect once started."; printf "\n" ;;
+                off)  agh_up=0; print_warning "AdGuardHome is disabled. Changes will take effect once enabled."; printf "\n" ;;
+            esac
+            agh_memory_meter "$LISTS_DATA" "$agh_up"
             printf "\n"
             printf "       %-7s %-7s %-6s %-48s %-9s %s\n" "Install" "Enable" "Type" "Name" "Size" "Planned Action"
             printf " %s\n" "$RULE"
@@ -4254,7 +4394,7 @@ EOF
             done
             printf " %s\n" "$RULE"
             printf " [P] Previous   Page %s of %s   [N] Next   [#] Toggle   [C] Confirm   [0] Back   [?] Help\n" "$page" "$pages"
-            printf "\n Choose [%s-%s/N/P/C/0/?]: " "$start" "$end"
+            printf "\n Choose [%s-%s/P/N/C/0/?]: " "$start" "$end"
             read -r input
 
             case "$input" in
@@ -4281,7 +4421,7 @@ EOF
                         esac
                     done < "$LISTS_DATA"
                     if [ -z "${ci}${cinst}${cen}${cdis}${crem}" ]; then
-                        print_warning "No changes to apply (all planned actions are 'No Change')"
+                        print_info "No changes to apply"
                         sleep 2; continue
                     fi
 
@@ -4297,6 +4437,16 @@ EOF
 
                     printf "\nProceed with list changes? [y/N]: "; read -r confirm
                     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
+                    # agh_go: 1 = AdGuardHome runs after the write (it was running, it's SERVICE DOWN - Confirm
+                    # starts it - or it's DISABLED and the user enables it here); 0 = save the config only.
+                    agh_st=$(agh_run_state); agh_go=1; agh_label="Restarting AdGuardHome"
+                    case "$agh_st" in
+                        down) agh_label="Starting AdGuardHome" ;;
+                        off)
+                            printf "Enable AdGuardHome to apply these lists? [Y/n]: "; read -r confirm
+                            case "$confirm" in n|N) agh_go=0 ;; *) agh_label="Enabling AdGuardHome" ;; esac
+                            ;;
+                    esac
 
                     # Same order as every AdGuardHome change: take the undo copy BEFORE anything changes,
                     # stop it (or refuse), write the change under a spinner, then restart. The undo copy
@@ -4309,10 +4459,21 @@ EOF
                         fail_report "Couldn't back up config.yaml, so nothing was changed" "" "Check free space, then retry"
                         press_any_key; continue
                     fi
-                    agh_was_running=0; is_agh_running && agh_was_running=1
                     _agh_stop_or_refuse || { rm -f "$BACKUP_FILE"; press_any_key; continue; }
                     spin_run "Applying the list changes" _agh_lists_write "$LISTS_DATA" "$AGH_CONFIG" "$(get_agh_workdir)"
-                    agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONFIG" "Changes applied" "" inline
+                    if [ "$agh_st" = off ] && [ "$agh_go" = 1 ]; then   # the same switch as Control Center item 1
+                        uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
+                        $AGH_INIT enable >/dev/null 2>&1
+                    fi
+                    agh_was_running=0
+                    agh_ctx="Changes applied"; [ "$agh_go" = 1 ] || agh_ctx="Changes saved"
+                    if agh_apply_and_restart "$agh_go" "$BACKUP_FILE" "$AGH_CONFIG" "$agh_ctx" \
+                        "AdGuardHome is disabled - the lists load when it's enabled" inline "$agh_label"; then
+                        agh_was_running=$agh_go
+                    elif [ "$(agh_mem_fill "$(agh_proj_active_rules "$LISTS_DATA")" "$(agh_capacity_mb | awk '{print $3}')")" -gt 14 ]; then
+                        # a start that fails with a heavy selection: memory is the likely cause
+                        print_info "Memory Impact is high for these lists - the likely cause; turn some off, then retry"
+                    fi
 
                     # AGH fetches enabled lists asynchronously after the restart, so "config
                     # saved" != "list loaded". Wait for the newly-enabled lists to download,
@@ -4625,7 +4786,7 @@ manage_agh_direct_access() {
                 else
                     print_centered_header "Disable AdGuardHome Direct UI Access"
                     print_warning "The dashboard at ${CYAN}http://$lan_ipaddr:$ui_port${RESET}${YELLOW} will close"
-                    print_info "It returns behind the GL.iNet login at ${CYAN}http://$lan_ipaddr/${RESET}${BLUE}; its own login is kept but bypassed"
+                    print_info "It returns behind the GL.iNet login at ${CYAN}http://$lan_ipaddr/${RESET}${BLUE};\nits own login is kept but bypassed"
                     printf "Disable Direct UI Access? [y/N]: "
                 fi
                 read -r confirm
@@ -5695,12 +5856,13 @@ zram_install_enable() {
 
 # ---- Zram feature-lifecycle callbacks + flows (drive the shared _lc_* helpers) --------
 # Accessor (not a top-level var) so it survives the e2e function-extraction and set -u.
-_zram_paths()         { printf '%s' "/etc/init.d/zram /etc/config/system"; }
+_zram_paths()         { printf '%s' "/etc/config/system"; }   # config only - zram-swap is re-installed
 _zram_pkg_installed() { pkg_is_installed zram-swap || [ -f /etc/init.d/zram ]; }
 _zram_enabled()       { [ -f /etc/init.d/zram ] && /etc/init.d/zram enabled 2>/dev/null; }
 _zram_service_up()    { swapon -s 2>/dev/null | grep -q zram; }
 _zram_persist_is_on() {
     local p c; c=$(_glpersist_keepconf)
+    grep -qxF zram-swap "$(_lazlist)" 2>/dev/null || return 1
     for p in $(_zram_paths); do grep -qFx "$p" "$c" 2>/dev/null || return 1; done
     return 0
 }
@@ -5724,7 +5886,7 @@ _zram_uninstall() {
     _zram_stop_service
     pkg_remove zram-swap >/dev/null 2>&1
     local p; for p in $(_zram_paths); do _glpersist_keep_del "$p"; done
-    _conf_del "$(_lazlist)" zram-swap
+    _conf_del "$(_lazlist)" zram-swap; _glpersist_pkgs_sync >/dev/null 2>&1
     return 0
 }
 _zram_reinstall_pkg() { pkg_install zram-swap >/dev/null 2>&1 || install_package zram-swap >/dev/null 2>&1; return 0; }
@@ -5859,8 +6021,9 @@ To prevent logic loops, the following rules are enforced:
 
 Dynamic vs. Manual Mode:
 • Dynamic: The system automatically adjusts RPM based on heat.
-• Manual: Forces the fan to a specific percentage (0-100%). 
-  Note: Manual mode persists until you re-enable Dynamic control.
+• Static: Holds the fan at a set percentage (0-100%) and turns off GL's own
+  fan service while it does. The speed is kept across reboots until you
+  choose Enable Dynamic Fan Control.
 
 Safety Warning:
 ────────────────
@@ -5879,10 +6042,11 @@ browser fetches it fresh).
 
 Persistence (option 8):
 ───────────────────────
-A firmware upgrade resets the Admin Panel, dropping the fan setpoint patch.
-Turn on "Enable Persistence" and a small boot service re-applies your fan
-settings from the new firmware's bundle on first boot, reporting the result on
-the next launch. If the new panel changed so the patch no longer fits, it is
+Reboots are always fine. A firmware upgrade resets the Admin Panel, dropping
+the fan setpoint patch, and forgets a static speed. Turn on "Enable
+Persistence" (a setpoint or a static speed must be set first) and a small boot
+service re-applies both on the new firmware's first boot, reporting the result
+on the next launch. If the new panel changed so the patch no longer fits, it is
 left stock (never corrupted) and reported as unable to restore.
 HELPEOF
 }
@@ -5975,6 +6139,70 @@ _fan_apply() {
     /etc/init.d/gl_fan restart
 }
 
+# ---- static fan speed that survives reboots ----
+# A static speed stops GL's controller (gl_fan) and writes the PWM level directly - which on its own only
+# lasts until the next boot (gl_fan comes back and takes over). So the speed is stored in the toolkit's
+# OWN file and a tiny boot service holds it; Enable Dynamic Fan Control removes both. Not in GL's glfan
+# config: setting a setpoint (_fan_apply) resets glfan from /rom and silently erased it (found in a real
+# firmware update on a BE14000, 2026-09-28). Firmware updates are covered by fan persistence.
+# PIDs of processes NAMED exactly $1 (their /proc comm). busybox `pgrep -x` doesn't match a process started
+# by full path (procd's /usr/bin/gl_fan, /usr/sbin/tailscaled) and `pidof` misses some too - found on the
+# fleet 2026-09-29; `pgrep -f` from an ssh command line matches itself. Names are <= 15 chars (comm).
+_proc_pids() { local p c; for p in /proc/[0-9]*; do read -r c < "$p/comm" 2>/dev/null && [ "$c" = "$1" ] && echo "${p#/proc/}"; done; return 0; }
+_proc_running() { [ -n "$(_proc_pids "$1")" ]; }
+FAN_STATIC_INIT="${FAN_STATIC_INIT:-/etc/init.d/glinet_fanstatic}"
+FAN_PWM="${FAN_PWM:-/sys/class/thermal/cooling_device0/cur_state}"
+FAN_STATIC_FILE="${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}"
+_fan_static_pct() { cat "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}" 2>/dev/null | tr -dc '0-9'; }
+_fan_static_write_service() {
+    local fi_="${FAN_STATIC_INIT:-/etc/init.d/glinet_fanstatic}"
+    cat > "$fi_" <<'INITEOF'
+#!/bin/sh /etc/rc.common
+# glinet_fanstatic - hold the fan at the static speed set in glinet_utils (/etc/glinet_utils/fan_static).
+# Generated by glinet_utils; Enable Dynamic Fan Control removes it.
+START=99
+start() {
+    local pct lvl i=0 pwm=/sys/class/thermal/cooling_device0/cur_state
+    pct=$(cat /etc/glinet_utils/fan_static 2>/dev/null | tr -dc '0-9'); [ -n "$pct" ] || return 0
+    /etc/init.d/gl_fan stop >/dev/null 2>&1
+    # procd kills gl_fan seconds AFTER stop returns, and until then it writes its own level over ours
+    _glfan_up() { local p c; for p in /proc/[0-9]*; do read -r c < "$p/comm" 2>/dev/null && [ "$c" = gl_fan ] && return 0; done; return 1; }
+    while { _glfan_up || [ ! -w "$pwm" ]; } && [ "$i" -lt 30 ]; do sleep 1; i=$((i + 1)); done
+    lvl=$(( (pct * 255 + 50) / 100 ))
+    echo "$lvl" > "$pwm" 2>/dev/null; sleep 2
+    [ "$(cat "$pwm" 2>/dev/null)" = "$lvl" ] || echo "$lvl" > "$pwm" 2>/dev/null
+    [ "$(cat "$pwm" 2>/dev/null)" = "$lvl" ] \
+        && logger -t glinet_fanstatic "fan held at ${pct}%" || logger -t glinet_fanstatic "could not set the fan to ${pct}%"
+}
+INITEOF
+    chmod +x "$fi_"; "$fi_" enable >/dev/null 2>&1
+}
+# Stop GL's fan controller and WAIT for it to exit: procd kills it seconds after `stop` returns, and until
+# then it keeps writing its own level over ours (after the 4.11 update the fan went back to 0 this way).
+_fan_glfan_stop() {
+    local i=0
+    /etc/init.d/gl_fan stop >/dev/null 2>&1; /etc/init.d/gl_fan disable >/dev/null 2>&1
+    while _proc_running gl_fan && [ "$i" -lt 15 ]; do sleep 1; i=$((i + 1)); done
+}
+# Set a static speed now AND for every boot. 0 only when the fan really is held there.
+_fan_static_set() {   # <pct>
+    local lvl=$(( ($1 * 255 + 50) / 100 ))
+    mkdir -p "$(dirname "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}")"
+    printf '%s\n' "$1" > "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}"
+    _fan_glfan_stop
+    echo "$lvl" > "${FAN_PWM:-/sys/class/thermal/cooling_device0/cur_state}" 2>/dev/null
+    _fan_static_write_service
+    glpersist_is_on fan 2>/dev/null && _glpersist_keep_add "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}"
+    [ "$(cat "${FAN_PWM:-/sys/class/thermal/cooling_device0/cur_state}" 2>/dev/null)" = "$lvl" ] && ! _proc_running gl_fan \
+        && [ -x "${FAN_STATIC_INIT:-/etc/init.d/glinet_fanstatic}" ]
+}
+_fan_static_clear() {   # back to GL's dynamic control; the boot service goes too
+    rm -f "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}"
+    local fi_="${FAN_STATIC_INIT:-/etc/init.d/glinet_fanstatic}"
+    [ -f "$fi_" ] && { "$fi_" disable >/dev/null 2>&1; rm -f "$fi_"; }
+    return 0
+}
+
 # Restart the fan controller and confirm it is actually running. 0 if up. Wrapped by spin_run so a
 # failed restart no longer prints a false "Dynamic control restored".
 _fan_restart_verify() { /etc/init.d/gl_fan restart >/dev/null 2>&1; sleep 1; pgrep gl_fan >/dev/null 2>&1; }
@@ -6060,6 +6288,9 @@ manage_fan_settings() {
         if [ "$has_fan" = "false" ]; then
             printf "   Hardware:          %bNOT DETECTED%b (fanless unit)\033[K\n" "${GREY}" "${RESET}"
         else
+            _fsp=$(_fan_static_pct)
+            [ "$c_mode" = MANUAL ] && [ -n "$_fsp" ] && c_mode_note="(static ${_fsp}%, kept across reboots)"
+            [ "$c_mode" = MANUAL ] && [ -z "$_fsp" ] && c_mode_note="(static, this boot only)"
             printf "   Control Mode:      %b%s%b %s\033[K\n" "$c_mode_color" "$c_mode" "${RESET}" "$c_mode_note"
             printf "   Current Speed:     %b%d%% (%s RPM)%b\033[K\n" "$BLUE" "$c_speed_pct" "$c_fan_rpm" "$RESET"
         fi
@@ -6078,7 +6309,9 @@ manage_fan_settings() {
             printf "   Max Setpoint:      %b%s°C%b\033[K\n" "$BLUE" "$ui_max" "$RESET"
         fi
         if [ "$has_fan" = "true" ]; then
-            glpersist_is_on fan && fan_per="${GREEN}ENABLED${RESET}" || fan_per="${GREY}DISABLED${RESET}"
+            # the same meaning the Bandwidth Limiter spells out: reboots are always fine, this is about firmware
+            if glpersist_is_on fan; then fan_per="${GREEN}ENABLED${RESET}  (survives firmware upgrades)"
+            else fan_per="${GREY}DISABLED${RESET}  (reboot-safe; lost on firmware upgrade)"; fi
             printf "   Persistence:       %b\033[K\n" "$fan_per"
         fi
         printf "\033[K\n"
@@ -6126,14 +6359,17 @@ manage_fan_settings() {
                     printf "\n"
                     pct=$(echo "$pct" | tr -dc '0-9')
                     if [ -n "$pct" ] && [ "$pct" -le 100 ]; then
-                        /etc/init.d/gl_fan stop >/dev/null 2>&1
-                        echo "$(( (pct * 255 + 50) / 100 ))" > /sys/class/thermal/cooling_device0/cur_state
-                        print_success "Manual mode active: $pct%"
+                        if spin_run "Setting the fan to $pct%" _fan_static_set "$pct"; then
+                            print_success "Fan held at $pct% - kept across reboots"
+                        else
+                            fail_report "The fan didn't take the $pct% setting" "" "Try again, or choose Enable Dynamic Fan Control"
+                        fi
                     else
                         print_error "Invalid input"
                     fi
                     press_any_key; clear ;;
                 2)
+                    _fan_static_clear
                     /etc/init.d/gl_fan enable >/dev/null 2>&1
                     if spin_run "Restoring dynamic fan control" _fan_restart_verify; then
                         print_success "Dynamic control restored"
@@ -6205,14 +6441,15 @@ manage_fan_settings() {
                 7)
                     print_warning "Restoring to Factory Defaults"
                     reset_to_factory
+                    _fan_static_clear; /etc/init.d/gl_fan enable >/dev/null 2>&1; /etc/init.d/gl_fan restart >/dev/null 2>&1
                     glwebui_disable fan   # drop the fan app-bundle patch, re-paint terminal/switch if active
                     glpersist_is_on fan && glpersist_disable fan   # nothing left to persist
                     printf "\n"
                     print_success "Factory defaults restored"
                     press_any_key; clear ;;
                 8)
-                    if ! glwebui_is_on fan; then
-                        print_warning "Set a fan value first so the Web-UI patch is active, then enable persistence"
+                    if ! glwebui_is_on fan && [ -z "$(_fan_static_pct)" ]; then
+                        print_warning "Nothing to keep yet - set a static speed or a setpoint first, then enable persistence"
                         press_any_key; clear; continue
                     fi
                     if glpersist_is_on fan; then
@@ -6333,6 +6570,7 @@ set_hw_accel() {
 # HTB scheme (2% DL / 4% UL overhead) applied per $iface.
 NETLIMIT_CONF="${NETLIMIT_CONF:-/etc/netlimit.conf}"
 NETLIMIT_INIT="${NETLIMIT_INIT:-/etc/init.d/netlimit}"
+NETLIMIT_HOTPLUG="${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}"   # re-applies a limit on every ifup
 NETLIMIT_GUEST_OLD="${NETLIMIT_GUEST_OLD:-/etc/init.d/guest_limiter}"
 NL_MAP="${NL_MAP:-/tmp/netlimit_map}"
 
@@ -6473,8 +6711,14 @@ netlimit_service_write() {
     cat > "$NETLIMIT_INIT" <<'INITEOF'
 #!/bin/sh /etc/rc.common
 # netlimit - per-interface bandwidth limiter (generated by glinet_utils; do not edit).
+# Boot applies every limit whose interface already exists; /etc/hotplug.d/iface/60-netlimit re-applies
+# a limit whenever its interface comes (back) up - bridges often appear late in boot, and a network
+# reload rebuilds them, wiping their queues. `reapply <iface>` is what the hotplug calls.
 START=99
 STOP=10
+EXTRA_COMMANDS="reapply verify"
+EXTRA_HELP="	reapply <iface>	Re-apply the limit configured for one interface
+	verify		Re-apply any limit whose shaping has gone missing (run every minute from cron)"
 CONF=/etc/netlimit.conf
 _ifbname() {
     local n="${1}-ifb"
@@ -6510,15 +6754,33 @@ _flush() {
     [ -x /etc/init.d/bridger ]     && /etc/init.d/bridger     restart >/dev/null 2>&1
 }
 _rows() { [ -f "$CONF" ] && grep -vE '^#|^[[:space:]]*$' "$CONF"; }
+_one() {   # <iface> <dl> <ul> - apply one row if its interface exists (else hotplug does it on ifup)
+    case "$2" in ''|*[!0-9]*) set -- "$1" 0 "$3" ;; esac; case "$3" in ''|*[!0-9]*) set -- "$1" "$2" 0 ;; esac
+    [ "$2" -eq 0 ] && [ "$3" -eq 0 ] && return 0
+    [ -d "/sys/class/net/$1" ] || { logger -t netlimit "$1 not up yet - its limit applies when it comes up"; return 0; }
+    _clear "$1"; _apply "$1" "$2" "$3"
+    if tc qdisc show dev "$1" 2>/dev/null | grep -qE 'htb|clsact'; then logger -t netlimit "limit applied on $1 (down $2 / up $3 Mbit/s)"
+    else logger -t netlimit "limit on $1 did NOT apply"; fi
+}
 start() {
-    _rows | while IFS='|' read -r iface dl ul webui persist; do
-        [ -z "$iface" ] && continue
-        case "$dl" in ''|*[!0-9]*) dl=0 ;; esac; case "$ul" in ''|*[!0-9]*) ul=0 ;; esac
-        [ "$dl" -eq 0 ] && [ "$ul" -eq 0 ] && continue
-        i=0; while [ ! -d "/sys/class/net/$iface" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i+1)); done
-        _clear "$iface"; _apply "$iface" "$dl" "$ul"
-    done
+    _rows | while IFS='|' read -r iface dl ul webui persist; do [ -n "$iface" ] && _one "$iface" "$dl" "$ul"; done
     _flush
+}
+reapply() {
+    local want="$1"
+    _rows | while IFS='|' read -r iface dl ul webui persist; do [ "$iface" = "$want" ] && _one "$iface" "$dl" "$ul"; done
+}
+# Some firmware services clear or rebuild interface queues after boot without an ifup (seen on an
+# OpenWrt 25 GL build, 2026-09-28) - so every minute, re-apply only the limits whose shaping is gone.
+verify() {
+    _rows | while IFS='|' read -r iface dl ul webui persist; do
+        [ -n "$iface" ] && [ -d "/sys/class/net/$iface" ] || continue
+        case "$dl" in ''|*[!0-9]*) dl=0 ;; esac; case "$ul" in ''|*[!0-9]*) ul=0 ;; esac
+        { [ "$dl" -gt 0 ] && ! tc qdisc show dev "$iface" 2>/dev/null | grep -q htb; } \
+          || { [ "$ul" -gt 0 ] && ! tc qdisc show dev "$iface" 2>/dev/null | grep -q clsact; } || continue
+        logger -t netlimit "shaping on $iface had gone missing - re-applying"
+        _one "$iface" "$dl" "$ul"
+    done
 }
 stop() {
     _rows | while IFS='|' read -r iface rest; do [ -n "$iface" ] && _clear "$iface"; done
@@ -6526,18 +6788,52 @@ stop() {
 }
 INITEOF
     chmod +x "$NETLIMIT_INIT"
+    mkdir -p "$(dirname "${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}")"
+    cat > "${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}" <<'HPEOF'
+#!/bin/sh
+# netlimit - re-apply a bandwidth limit whenever its interface comes (back) up (generated by
+# glinet_utils). Covers a bridge that appears after the boot script ran and a network reload that
+# rebuilt it. Runs whether or not the netlimit service is enabled, so it also survives the service's
+# boot link being lost in a firmware update.
+[ "$ACTION" = ifup ] || exit 0
+[ -f /etc/netlimit.conf ] && [ -x /etc/init.d/netlimit ] || exit 0
+for dev in "$DEVICE" $(ubus call "network.interface.$INTERFACE" status </dev/null 2>/dev/null | jsonfilter -e '@.l3_device' -e '@.device' 2>/dev/null); do
+    [ -n "$dev" ] || continue
+    grep -q "^$dev|" /etc/netlimit.conf 2>/dev/null || continue
+    /etc/init.d/netlimit reapply "$dev"
+    exit 0
+done
+exit 0
+HPEOF
+    chmod +x "${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}"
 }
 netlimit_reload() {
     [ -f "$NETLIMIT_INIT" ] || netlimit_service_write
     "$NETLIMIT_INIT" enable  >/dev/null 2>&1
     "$NETLIMIT_INIT" restart >/dev/null 2>&1
+    netlimit_cron_sync
 }
+# The once-a-minute `verify` runs only while a limit exists. /etc/crontabs/root is on GL's keep list.
+NETLIMIT_CRON_LINE="* * * * * /etc/init.d/netlimit verify >/dev/null 2>&1"
+netlimit_cron_sync() {
+    local ct="${NETLIMIT_CRONTAB:-/etc/crontabs/root}" want=0 line="${NETLIMIT_CRON_LINE:-* * * * * /etc/init.d/netlimit verify >/dev/null 2>&1}"
+    netlimit_any_limited && want=1
+    mkdir -p "$(dirname "$ct")"; [ -f "$ct" ] || : > "$ct"
+    if [ "$want" = 1 ]; then
+        grep -qxF "$line" "$ct" || { printf '%s\n' "$line" >> "$ct"; _netlimit_cron_kick; }
+    elif grep -qxF "$line" "$ct"; then
+        grep -vxF "$line" "$ct" > "$ct.$$"; mv "$ct.$$" "$ct"; _netlimit_cron_kick
+    fi
+}
+_netlimit_cron_kick() { [ -x /etc/init.d/cron ] && { /etc/init.d/cron enable >/dev/null 2>&1; /etc/init.d/cron restart >/dev/null 2>&1; }; }
 netlimit_persist_sync() {
     local sc=/etc/sysupgrade.conf
-    sed -i '\|/etc/init.d/netlimit|d; \|/etc/netlimit.conf|d' "$sc" 2>/dev/null
+    sed -i '\|/etc/init.d/netlimit|d; \|/etc/netlimit.conf|d; \|/etc/hotplug.d/iface/60-netlimit|d' "$sc" 2>/dev/null
     if netlimit_conf_list | awk -F'|' '($5+0)>0{n++} END{exit !n}'; then
         grep -qxF '/etc/init.d/netlimit' "$sc" 2>/dev/null || echo '/etc/init.d/netlimit' >> "$sc"
         grep -qxF '/etc/netlimit.conf'   "$sc" 2>/dev/null || echo '/etc/netlimit.conf'   >> "$sc"
+        # the hotplug hook is what re-applies after a firmware update (the service's rc.d link isn't kept)
+        grep -qxF "${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}"    "$sc" 2>/dev/null || echo "${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}"    >> "$sc"
     fi
 }
 # Shaping needs the software path: offload OFF whenever any limit is active, ON when none.
@@ -6847,7 +7143,9 @@ netlimit_reset_all() {
     # 3. drop config, boot service, and persistence entries
     rm -f "$NETLIMIT_CONF"
     [ -f "$NETLIMIT_INIT" ] && { "$NETLIMIT_INIT" stop >/dev/null 2>&1; "$NETLIMIT_INIT" disable >/dev/null 2>&1; rm -f "$NETLIMIT_INIT"; }
-    sed -i '\|/etc/init.d/netlimit|d; \|/etc/netlimit.conf|d' /etc/sysupgrade.conf 2>/dev/null
+    rm -f "${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}"
+    netlimit_cron_sync
+    sed -i '\|/etc/init.d/netlimit|d; \|/etc/netlimit.conf|d; \|/etc/hotplug.d/iface/60-netlimit|d' /etc/sysupgrade.conf 2>/dev/null
     # 3b. sweep any shaping left on interfaces the config no longer lists (config is now gone, so
     # this clears every remaining netlimit qdisc/ifb) - makes Reset actually complete.
     netlimit_sweep_orphans
@@ -7342,7 +7640,7 @@ manage_netlimit() {
                     spin_run "Enabling HW acceleration" set_hw_accel 1; _netlimit_build_map
                 fi ;;
             r|R)
-                print_warning "This removes every limit and router rule, re-enables HW acceleration, and stops the background service"
+                print_warning "This removes every limit and router rule, re-enables HW acceleration,\nand stops the background service"
                 printf "Revert to defaults? [y/N]: "; read -r a; printf '\n'
                 case "$a" in y|Y) spin_run "Reverting to defaults" netlimit_reset_all; _netlimit_build_map ;; esac ;;
             \?|help) show_netlimit_help ;;
@@ -8336,8 +8634,8 @@ GLPERSIST_REPORT="$GLPERSIST_DIR/last_report"
 GLPERSIST_VERFILE="$GLPERSIST_DIR/glversion"
 GLPERSIST_UNSEEN="$GLPERSIST_DIR/.unseen"
 
-glpersist_is_on() { [ -f "$GLPERSIST_DIR/$1" ]; }               # $1 = fan|ttyd|switch
-glpersist_any()   { [ -f "$GLPERSIST_DIR/fan" ] || [ -f "$GLPERSIST_DIR/ttyd" ] || [ -f "$GLPERSIST_DIR/switch" ]; }
+glpersist_is_on() { [ -f "${GLPERSIST_DIR:-/etc/glinet_utils/persist}/$1" ]; }               # $1 = fan|ttyd|switch
+glpersist_any()   { [ -f "$GLPERSIST_DIR/fan" ] || [ -f "$GLPERSIST_DIR/ttyd" ] || [ -f "$GLPERSIST_DIR/switch" ] || [ -f "$GLPERSIST_DIR/ost" ] || [ -s "$(_lazlist)" ]; }
 glpersist_curver(){ cat "${GLPERSIST_VERSRC:-/etc/glversion}" 2>/dev/null; }
 
 _glpersist_label() {
@@ -8345,6 +8643,7 @@ _glpersist_label() {
         switch) printf 'switch position indicator' ;;
         fan)    printf 'fan control' ;;
         ttyd)   printf 'Web Terminal' ;;
+        ost)    printf 'OpenSpeedTest' ;;
     esac
 }
 
@@ -8376,15 +8675,15 @@ _glpersist_ensure_toolkit_installed() {
 _glpersist_install_service() {
     cat << 'INITEOF' > "$GLPERSIST_INIT"
 #!/bin/sh /etc/rc.common
-# glinet_persist - re-apply glinet_utils Web-UI tweaks (Fan / Web Terminal / Switch
-# indicator) after a firmware update. Runs at boot; the toolkit's headless entrypoint
+# glinet_persist - after a firmware update, re-install the packages on the toolkit's re-install
+# list and re-apply glinet_utils Web-UI tweaks (Fan / Web Terminal / Switch indicator). Runs at boot; the toolkit's headless entrypoint
 # no-ops unless /etc/glversion changed since persistence was last applied. Backgrounded
 # so it never delays boot.
 START=99
 STOP=01
 boot() { start; }
 start() {
-    ( /usr/sbin/glinet_utils --webui-persist-run >/dev/null 2>&1 & )
+    ( sh /usr/sbin/glinet_utils --webui-persist-run >/dev/null 2>&1 & )   # via sh: never depends on the file's exec bit
 }
 INITEOF
     chmod +x "$GLPERSIST_INIT"
@@ -8407,6 +8706,8 @@ _glpersist_reassert_keeplist() {
     # GLPERSIST_RCDIR overrides the rc.d dir for the test harness; unset in normal use.
     find "${GLPERSIST_RCDIR:-/etc/rc.d}/" -name '[SK]*glinet_persist' 2>/dev/null | while IFS= read -r _l; do _glpersist_keep_add "$_l"; done
     _glpersist_keep_add "$INSTALL_PATH"
+    [ -s "$(_lazlist)" ] && _glpersist_keep_add "$(_lazlist)"
+    glpersist_is_on fan && [ -f "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}" ] && _glpersist_keep_add "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}"
     if glpersist_is_on ttyd; then
         _glpersist_keep_add /etc/config/ttyd
         [ -f /etc/ttyd.crt ] && _glpersist_keep_add /etc/ttyd.crt
@@ -8431,6 +8732,7 @@ glpersist_enable() {
 glpersist_disable() {
     local f="$1"
     rm -f "$GLPERSIST_DIR/$f"
+    [ "$f" = fan ] && _glpersist_keep_del "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}"
     if [ "$f" = ttyd ]; then
         _glpersist_keep_del /etc/config/ttyd
         _glpersist_keep_del /etc/ttyd.crt
@@ -8472,11 +8774,38 @@ _glwebui_marker_present() {
 
 # _glpersist_reapply_all <oldver> <newver> - backend-first, fail-stock re-apply of every
 # ENABLED feature, writing a per-feature result to the report file.
+# OpenSpeedTest is kept WHOLE (/www2, its nginx config, its startup script, its boot link) - but it's SERVED by
+# nginx. GL firmware ships nginx in its image (it serves GL's own web UI; every fleet build has it), so this
+# normally does nothing. On a firmware without nginx it's re-installed the way the installer does it
+# (_ost_deps), then OpenSpeedTest is started again - only if it was on (its boot link rode the keep list).
+_glpersist_ost_restore() {
+    local n=0 r
+    if ! _ost_installed; then printf 'ost|fail|files\n' >> "$GLPERSIST_REPORT"; return 0; fi
+    if ! command -v nginx >/dev/null 2>&1; then
+        until pkg_update >/dev/null 2>&1; do
+            n=$((n + 1)); [ "$n" -ge "${GLPERSIST_NET_TRIES:-45}" ] && break; sleep "${GLPERSIST_NET_WAIT:-20}"
+        done
+        pkg_install nginx-ssl >/dev/null 2>&1
+        if ! command -v nginx >/dev/null 2>&1; then
+            printf 'ost|fail|nginx\n' >> "$GLPERSIST_REPORT"; logger -t glinet_persist "could not re-install nginx for OpenSpeedTest"; return 0
+        fi
+        { /etc/init.d/nginx stop; /etc/init.d/nginx disable; } >/dev/null 2>&1; rm -f /etc/nginx/conf.d/default.conf
+        logger -t glinet_persist "re-installed nginx for OpenSpeedTest"
+    fi
+    if "$OST_STARTUP_SCRIPT" enabled 2>/dev/null; then
+        # start only if it isn't serving already (a restart of a running one raced its own port check)
+        _ost_running || { "$OST_STARTUP_SCRIPT" start >/dev/null 2>&1; sleep 2; }
+        _ost_running && r='ost|ok' || r='ost|fail|start'
+    else r='ost|ok'; fi                                  # kept, and off as it was
+    printf '%s\n' "$r" >> "$GLPERSIST_REPORT"
+}
 _glpersist_reapply_all() {
     local oldv="$1" newv="$2" rmin rmax rcur umin ucur uwrn
     mkdir -p "$GLPERSIST_DIR"
     : > "$GLPERSIST_REPORT"
     printf 'ver|%s|%s\n' "$oldv" "$newv" >> "$GLPERSIST_REPORT"
+    _glpersist_pkgs_restore
+    glpersist_is_on ost && _glpersist_ost_restore
 
     # --- backends first (independent of the shared bundle) ---
     if glpersist_is_on switch; then
@@ -8489,13 +8818,15 @@ _glpersist_reapply_all() {
         command -v ttyd >/dev/null 2>&1 || install_package ttyd >/dev/null 2>&1
         [ -x /etc/init.d/ttyd ] && { /etc/init.d/ttyd enable >/dev/null 2>&1; /etc/init.d/ttyd restart >/dev/null 2>&1; }
     fi
-    if glpersist_is_on fan; then
+    if glpersist_is_on fan && glwebui_is_on fan; then        # setpoints (Web-UI + controller patch)
         set -- $(cat "$GLWEBUI_DIR/fan" 2>/dev/null); rmin="${1:-70}"; rmax="${2:-90}"; rcur="${3:-75}"
         umin=$(uci -q get glfan.globals.minimum_temperature); : "${umin:=$rmin}"
         ucur=$(uci -q get glfan.globals.temperature);         : "${ucur:=$rcur}"
         uwrn=$(uci -q get glfan.globals.warn_temperature);    : "${uwrn:=$ucur}"
         _fan_apply "$umin" "$ucur" "$uwrn" "$rmax"
     fi
+    # a static speed rides in /etc/config/glfan (kept) but its boot service doesn't - put it back
+    if glpersist_is_on fan && [ -n "$(_fan_static_pct)" ]; then _fan_static_set "$(_fan_static_pct)" >/dev/null 2>&1; fi
 
     # --- one rebuild re-applies every active overlay from the new ROM base ---
     glwebui_rebuild
@@ -8508,8 +8839,14 @@ _glpersist_reapply_all() {
             printf 'switch|fail\n' >> "$GLPERSIST_REPORT"
         fi
     fi
-    if glpersist_is_on fan; then
+    # fan = the Web-UI setpoint tweak; fanstatic = the static speed really held (a separate fact)
+    if glpersist_is_on fan && glwebui_is_on fan; then
         if _glwebui_marker_present fan; then printf 'fan|ok\n'; else printf 'fan|fail\n'; fi >> "$GLPERSIST_REPORT"
+    fi
+    if glpersist_is_on fan && [ -n "$(_fan_static_pct)" ]; then
+        if [ -x "${FAN_STATIC_INIT:-/etc/init.d/glinet_fanstatic}" ] && ! _proc_running gl_fan \
+           && [ "$(cat "${FAN_PWM:-/sys/class/thermal/cooling_device0/cur_state}" 2>/dev/null)" = "$(( ($(_fan_static_pct) * 255 + 50) / 100 ))" ]
+        then printf 'fanstatic|ok\n'; else printf 'fanstatic|fail\n'; fi >> "$GLPERSIST_REPORT"
     fi
     if glpersist_is_on ttyd; then
         if _glwebui_marker_present ttyd; then printf 'ttyd|ok\n'; else printf 'ttyd|fail\n'; fi >> "$GLPERSIST_REPORT"
@@ -8530,7 +8867,8 @@ _glpersist_wiped() {
         _glwebui_marker_present switch || return 0
         _switch_service_running || return 0
     fi
-    if glpersist_is_on fan;  then _glwebui_marker_present fan  || return 0; fi
+    # fan: the Web-UI setpoint patch (when there is one) must be present; a static speed has no marker
+    if glpersist_is_on fan && glwebui_is_on fan; then _glwebui_marker_present fan || return 0; fi
     if glpersist_is_on ttyd; then _glwebui_marker_present ttyd || return 0; fi
     return 1
 }
@@ -8562,18 +8900,27 @@ _glpersist_show_report() {
     while IFS='|' read -r tag a b; do
         [ "$tag" = ver ] && { oldv="$a"; newv="$b"; }
     done < "$GLPERSIST_REPORT"
+    # an update made from Firmware Update was just reported by its own health check - don't repeat it
+    [ "${FW_HEALTH_SHOWN:-0}" = 1 ] && { rm -f "$GLPERSIST_UNSEEN"; return 0; }
     clear
-    print_centered_header "Web-UI Persistence"
-    print_info "Firmware update detected (${oldv:-?} -> ${newv:-?}). Restoring Web-UI tweaks:"
+    print_centered_header "After the Firmware Update"
+    print_info "Firmware changed (${oldv:-?} → ${newv:-?}) - restoring what was set to persist:"
     printf "\n"
     while IFS='|' read -r tag a b; do
         case "$tag|$a" in
             switch\|ok)   print_success "Switch position indicator restored" ;;
-            switch\|fail) print_error   "Unable to restore switch position indicator." ;;
+            switch\|fail) print_error   "Switch position indicator not restored - re-enable it in System Tweaks" ;;
             fan\|ok)      print_success "Fan control restored" ;;
-            fan\|fail)    print_error   "Unable to restore fan control." ;;
+            fan\|fail)    print_error   "Fan control not restored - set it again in System Tweaks → Device Fan Settings" ;;
+            fanstatic\|ok)   print_success "Fan held at its static speed" ;;
+            fanstatic\|fail) print_error "Fan not held at its static speed - set it again in System Tweaks → Device Fan Settings" ;;
             ttyd\|ok)     print_success "Web Terminal restored" ;;
-            ttyd\|fail)   print_error   "Unable to restore Web Terminal." ;;
+            ost\|ok)      print_success "OpenSpeedTest restored" ;;
+            ost\|fail)    print_error   "OpenSpeedTest not restored$( [ "$b" = nginx ] && echo ' - nginx could not be re-installed')" ;;
+            ttyd\|fail)   print_error   "Web Terminal not restored - re-enable it in System Tweaks" ;;
+            pkg\|*)       if [ "$b" = ok ]; then print_success "Package re-installed: $a"
+                          elif grep -qx "pkg|$a|fail|nofeed" "$GLPERSIST_REPORT"; then print_error "Package not re-installed: $a - this firmware's package feed doesn't offer it"
+                          else print_error "Package not re-installed: $a - install it again in\nSystem Tweaks → Package and Persistence Manager"; fi ;;
         esac
     done < "$GLPERSIST_REPORT"
     press_any_key
@@ -8819,67 +9166,280 @@ get_action_text() {
     fi
 }
 
-create_lazarus_hook() {
-    local hook="/etc/uci-defaults/99-lazarus"
-    cat << 'EOF' > "$hook"
-#!/bin/sh
-# Lazarus Survival Engine - Post-Upgrade Package Restoration Hook
-#
-# This runs standalone from /etc/uci-defaults after a sysupgrade, with NONE of
-# the toolkit's helpers loaded - so the apk/opkg choice is inlined rather than
-# calling pkg_update/pkg_install, which do not exist in this context.
-if [ -f /etc/lazarus.list ]; then
-    if command -v apk >/dev/null 2>&1; then
-        apk update
-        for _lz in $(cat /etc/lazarus.list 2>/dev/null); do apk add "$_lz"; done
+# Package persistence (the "lazarus" re-install list, /etc/lazarus.list): glinet_persist owns it.
+# The old one-shot /etc/uci-defaults hook ran at the NEXT boot of any kind and deleted itself, was never on
+# the keep list, and ran before the network was up - so persisted packages never came back after a
+# firmware update (found 2026-09-28). Now the list + the glinet_persist service + its boot link are kept
+# from the moment a package is persisted, and after a firmware change the service waits for the network,
+# re-installs what's missing and records each result in its report. Name kept for the callers.
+create_lazarus_hook() { _glpersist_pkgs_sync; }
+_glpersist_pkgs_sync() {
+    rm -f /etc/uci-defaults/99-lazarus 2>/dev/null                 # retire the old one-shot hook
+    if [ -s "$(_lazlist)" ]; then
+        _glpersist_ensure_toolkit_installed || return 1
+        [ -x "$GLPERSIST_INIT" ] || _glpersist_install_service
+        mkdir -p "$GLPERSIST_DIR"
+        [ -f "$GLPERSIST_VERFILE" ] || glpersist_curver > "$GLPERSIST_VERFILE" 2>/dev/null
+        _glpersist_svc_snapshot
+        _glpersist_reassert_keeplist
     else
-        opkg update
-        for _lz in $(cat /etc/lazarus.list 2>/dev/null); do opkg install "$_lz"; done
+        _glpersist_keep_del "$(_lazlist)"
+        glpersist_any || glpersist_disable pkgs                     # nothing left to persist
     fi
-fi
-# Re-persist the healer list itself
-grep -qFx "/etc/lazarus.list" /etc/sysupgrade.conf || echo "/etc/lazarus.list" >> /etc/sysupgrade.conf
-exit 0
-EOF
-    chmod +x "$hook"
+    return 0
+}
+# After a firmware change: wait for the package feeds (the network comes up well after boot scripts),
+# then re-install every listed package that's missing. One report line per package.
+# A re-install turns a package's services ON (its install script enables them), so a service you'd switched off
+# would come back on. Each re-installed package's service state is recorded in the persistence folder (on the
+# keep list) and put back after the re-install. Read from the package DB - no opkg call (~3 s each on MIPS).
+_pkg_initscripts() {   # <pkg> -> the /etc/init.d scripts it installed
+    if [ "$(pkg_mgr)" = apk ]; then
+        awk -v p="$1" '/^P:/ { on = ($0 == "P:" p) } on && /^F:/ { d = ($0 == "F:etc/init.d") } on && d && /^R:/ { print "/etc/init.d/" substr($0, 3) }' \
+            /lib/apk/db/installed 2>/dev/null
+    else grep '^/etc/init.d/' "/usr/lib/opkg/info/$1.list" 2>/dev/null; fi
+}
+_glpersist_svc_snapshot() {   # records pkg|script|on/off; keeps earlier records for packages not installed right now
+    local f="${GLPERSIST_DIR:-/etc/glinet_utils/persist}/pkg_services" p sv
+    [ -s "$(_lazlist)" ] || return 0
+    mkdir -p "$(dirname "$f")"
+    {   for p in $(cat "$(_lazlist)"); do
+            [ "$p" = stress ] && continue
+            if _pm_present "$p"; then
+                for sv in $(_pkg_initscripts "$p"); do
+                    [ -x "$sv" ] || continue
+                    if "$sv" enabled 2>/dev/null; then echo "$p|$sv|on"; else echo "$p|$sv|off"; fi
+                done
+            else grep "^$p|" "$f" 2>/dev/null; fi
+        done; } > "$f.tmp.$$" || return 0
+    # unchanged -> leave the file alone (rewriting it moves its timestamp, and with it the fingerprint of
+    # what persists, which would force the slow archive measurement again)
+    if [ -f "$f" ] && [ "$(cat "$f.tmp.$$")" = "$(cat "$f")" ]; then rm -f "$f.tmp.$$"; else mv "$f.tmp.$$" "$f"; fi
+}
+_pkg_in_feed() {   # <pkg> - does the package feed (already updated) offer it?
+    if [ "$(pkg_mgr)" = apk ]; then apk search -x "$1" 2>/dev/null | grep -q .
+    else opkg list "$1" 2>/dev/null | grep -q "^$1 "; fi
+}
+_glpersist_pkgs_restore() {
+    local p n=0 flag=/tmp/.glpersist_pkgs.running
+    [ -s "$(_lazlist)" ] || return 0
+    : > "$flag"
+    until pkg_update >/dev/null 2>&1; do
+        n=$((n + 1)); [ "$n" -ge "${GLPERSIST_NET_TRIES:-45}" ] && break; sleep "${GLPERSIST_NET_WAIT:-20}"
+    done
+    for p in $(cat "$(_lazlist)"); do
+        _pm_present "$p" && { printf 'pkg|%s|ok\n' "$p" >> "$GLPERSIST_REPORT"; continue; }
+        if [ "$p" = stress ]; then
+            # the backend for THIS kernel - crossing 6.6 flips stress <-> stress-ng
+            _stress_link; pkg_install "$(_stress_backend)" >/dev/null 2>&1; _stress_link
+        else pkg_install "$p" >/dev/null 2>&1; fi
+        if _pm_present "$p"; then
+            # its services back the way they were: on (running) - or off, if you'd switched one off (the install
+            # script turns them on; a service with no record, e.g. first persisted on an older version, stays on)
+            { if [ "$(pkg_mgr)" = apk ]; then apk info -L "$p" 2>/dev/null | sed 's|^|/|'; else opkg files "$p" 2>/dev/null; fi; } \
+              | grep '^/etc/init.d/' | while read -r svc; do
+                    [ -x "$svc" ] || continue
+                    if grep -qxF "$p|$svc|off" "${GLPERSIST_DIR:-/etc/glinet_utils/persist}/pkg_services" 2>/dev/null
+                    then { "$svc" stop; "$svc" disable; } >/dev/null 2>&1
+                    else { "$svc" enable; "$svc" start; } >/dev/null 2>&1; fi
+                done
+            printf 'pkg|%s|ok\n' "$p"; logger -t glinet_persist "re-installed $p"
+        # say WHY: the new firmware's feed doesn't offer it (dropped / renamed), or it's there but won't install
+        elif _pkg_in_feed "$( [ "$p" = stress ] && _stress_backend || echo "$p")"; then printf 'pkg|%s|fail|install\n' "$p"; logger -t glinet_persist "could not re-install $p"
+        else printf 'pkg|%s|fail|nofeed\n' "$p"; logger -t glinet_persist "could not re-install $p - not in this firmware's package feed"; fi >> "$GLPERSIST_REPORT"
+    done
+    rm -f "$flag"
+}
+
+# =====================================================================================================
+# WHAT SURVIVES A FIRMWARE UPDATE - the persistence model (decided with Vincent 2026-09-29; follow it)
+# =====================================================================================================
+# A firmware update replaces the whole system; only files on the keep list (sysupgrade -l) come through.
+# The goal (Vincent): after the update the PROGRAM and its CONFIG are there and working. Three ways to get it:
+#   KEEP WHOLE - the item is self-contained (shell scripts, web files, static programs that link no firmware
+#                libraries): its files ride the keep list. Proven safe across every firmware change tested.
+#   RE-INSTALL - a package built against the firmware's libraries: its CONFIG rides the keep list and the
+#                program is re-installed after the update from the new firmware's feed (glinet_persist). Kept
+#                program files broke here: across an apk<->opkg change stress-ng, lscpu, openssl-util and rsync
+#                lost libraries and /usr/bin/diff was only an alternatives link (all-on matrix, .3.1). Every
+#                re-installed package the feed offered came back working. A service switched off stays off
+#                (persist/pkg_services). If the new feed doesn't offer it, the check says so.
+#   REBUILD    - toolkit settings: the settings ride the keep list; glinet_persist rebuilds the Web-UI
+#                patches and boot services from them.
+#
+#   Item                   Way         What rides the keep list
+#   ---------------------  ----------  -----------------------------------------------------------------
+#   Toolkit                keep whole  /usr/sbin/glinet_utils (it's what puts everything else back)
+#   OpenSpeedTest          keep whole  /www2 (all of it), its nginx config, its startup script, boot link;
+#                                      served by nginx - in GL's image; re-installed after an update if a
+#                                      firmware lacks it (_glpersist_ost_restore)
+#   AdGuardHome (updated)  keep whole  the program (static - no firmware libraries), startup script, config
+#   Bandwidth Limits       keep whole  netlimit config, service script, ifup hook (toolkit-written)
+#   SSH Keys               keep whole  /etc/dropbear/authorized_keys
+#   Backups                keep whole  /etc/glinet_utils/backups
+#   speedtest (Ookla),     keep whole  the program (+ Ookla's licence acceptance) - no feed offers them;
+#     speedtest-go                     self-contained, ran across every firmware change tested
+#   Fan Control            rebuild     setpoints + static speed (Web-UI patch, boot service rebuilt)
+#   Switch Indicator       rebuild     its Web-UI registry entry (Web-UI patch, poller rebuilt)
+#   Web Terminal (ttyd)    re-install  /etc/config/ttyd + certificate/key (Web-UI button re-applied)
+#   Tailscale              re-install  /etc/config/tailscale + /etc/tailscale (login / node identity)
+#   zram-swap              re-install  /etc/config/system (zram settings)
+#   LibreSpeed             re-install  /etc/config/librespeed-go (its settings, including on/off)
+#   htop / rsync / vim     re-install  htoprc / rsyncd.conf / .vimrc when present
+#   stress                 re-install  nothing; the engine follows the kernel (stress <6.6, stress-ng >=6.6)
+#   lscpu, apache (htpasswd), openssl-util, diffutils, iperf3, iputils-ping
+#                          re-install  nothing (no settings)
+# Rule for anything new: self-contained -> keep whole; links firmware libraries -> re-install + keep config.
+# =====================================================================================================
+# The Package Manager's catalogue, one "Package|Binary|Type|Config/Service Files" line each. Shared with
+# the Firmware Update check, which reports these (and the toolkit's own helpers) - not every package.
+_pm_utility_db() {
+    # Package|Binary|Type|Files kept across a firmware update
+    # Types: R = re-installed after a firmware update, only its CONFIG kept (the program comes back from the
+    #        new firmware's feed, built for it); B = the program itself kept as a file - only for binaries no
+    #        feed offers (Ookla speedtest, speedtest-go: self-contained, proven to run across firmware).
+    # Why (all-on matrix on .3.1, 2026-09-29): kept program files broke across an apk<->opkg firmware change
+    # (stress-ng, lscpu, openssl-util, rsync lost libraries; diff was only an alternatives link) while every
+    # re-installed package the feed offered came back working. Vincent: "the program + config must be there".
+    # Ookla ships no MIPS build, so on MIPS the internet speed test is speedtest-go (a GitHub
+    # binary, not an opkg package) - offer THAT as the installable entry there instead. Both
+    # install/remove via the special-cases in manage_packages' apply loop.
+    local _st_line="speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
+    case "$(uname -m)" in mips*) _st_line="speedtest-go|/usr/bin/speedtest-go|B|/usr/bin/speedtest-go" ;; esac
+    # ONE stress row - its backend (stress or stress-ng) follows the kernel (_stress_backend); re-installed
+    # after a firmware update, so it flips with the kernel. No config to keep.
+    printf '%s\n' "zram-swap|/etc/init.d/zram|R|/etc/config/system
+librespeed-go|/usr/bin/librespeed-go|R|/etc/config/librespeed-go
+stress|/usr/bin/stress|R|
+lscpu|/usr/bin/lscpu|R|
+apache|/usr/bin/htpasswd|R|
+openssl-util|/usr/bin/openssl|R|
+htop|/usr/bin/htop|R|/root/.config/htop/htoprc
+rsync|/usr/bin/rsync|R|/etc/rsyncd.conf
+diffutils|/usr/bin/diff|R|
+vim-fuller|/usr/bin/vim|R|/root/.vimrc
+$_st_line
+iperf3|/usr/bin/iperf3|R|
+tailscale|/usr/sbin/tailscale|R|/etc/config/tailscale /etc/tailscale
+iputils-ping|/usr/bin/ping|R|" | grep .
+}
+
+# ---- Features: the persistable items that aren't packages ----------------------------
+# The Package & Persistence Manager is the ONE place to see and change what survives a firmware update.
+# Besides packages it lists these, and each row calls the SAME switch the feature's own screen uses, so
+# there is no second copy of the state. A row shows only while the thing exists (no dead rows).
+# _pm_feat_rows [keep-list file] - one "key|label|kept 0/1|size KB|detail" line per row. "Kept" is
+# MEASURED on the router's own keep list (sysupgrade -l), not inferred from a flag.
+_pm_kb() { local p t=0 k; for p in "$@"; do [ -e "$p" ] || continue; k=$(du -sk "$p" 2>/dev/null | cut -f1); t=$((t + ${k:-0})); done; echo "$t"; }
+_pm_feat_rows() {
+    local kl="${1:-}" own=0 tk p n d lim ns nb=0
+    if [ -z "$kl" ]; then kl="${FW_TMP:-/tmp/.glinet_fw}/keep.pm"; mkdir -p "$(dirname "$kl")"; sysupgrade -l > "$kl" 2>/dev/null; own=1; fi
+    _pk() { grep -qxF "$1" "$kl" 2>/dev/null; }
+    _pg() { glpersist_is_on "$1" 2>/dev/null && _pk "${GLPERSIST_INIT:-/etc/init.d/glinet_persist}"; }
+    # the toolkit - always listed (it's running); it's what restores everything else after an update
+    tk="$INSTALL_PATH"; [ -f "$tk" ] || tk="$SCRIPT_PATH"
+    { _pk "$INSTALL_PATH" || _pk "$SCRIPT_PATH"; } && p=1 || p=0
+    printf 'toolkit|Toolkit|%s|%s|%s\n' "$p" "$(_pm_kb "$tk")" "$tk"
+    if glwebui_is_on ttyd 2>/dev/null || glpersist_is_on ttyd 2>/dev/null; then
+        _pg ttyd && p=1 || p=0
+        printf 'ttyd|Web Terminal|%s|%s|Web-UI tweak and ttyd\n' "$p" "$(_pm_kb /etc/config/ttyd /etc/ttyd.crt /etc/ttyd.key)"
+    fi
+    n=$(_fan_static_pct 2>/dev/null)
+    if glwebui_is_on fan 2>/dev/null || [ -n "$n" ] || glpersist_is_on fan 2>/dev/null; then
+        _pg fan && p=1 || p=0; d=""
+        glwebui_is_on fan 2>/dev/null && d="Web-UI setpoints"
+        [ -n "$n" ] && d="${d:+$d, }static speed $n%"
+        printf 'fan|Fan Control|%s|%s|%s\n' "$p" "$(_pm_kb "${GLWEBUI_DIR:-/etc/glinet_utils/webui}/fan" "${FAN_STATIC_FILE:-/etc/glinet_utils/fan_static}")" "${d:-fan settings}"
+    fi
+    if glwebui_is_on switch 2>/dev/null || glpersist_is_on switch 2>/dev/null; then
+        _pg switch && p=1 || p=0
+        printf 'switch|Switch Indicator|%s|%s|Web-UI tweak\n' "$p" "$(_pm_kb "${GLWEBUI_DIR:-/etc/glinet_utils/webui}/switch")"
+    fi
+    # limits: the service restores every row of its config, so they persist together - one row
+    lim=$(netlimit_conf_list 2>/dev/null | awk -F'|' '($2+0)>0||($3+0)>0{print $1}' | tr '\n' ' ' | sed 's/ $//; s/ /, /g')
+    if [ -n "$lim" ]; then
+        _pk "${NETLIMIT_CONF:-/etc/netlimit.conf}" && p=1 || p=0
+        printf 'limits|Bandwidth Limits|%s|%s|%s\n' "$p" "$(_pm_kb "${NETLIMIT_CONF:-/etc/netlimit.conf}")" "$lim"
+    fi
+    if _ost_installed 2>/dev/null; then
+        grep -q "^${OST_INSTALL_DIR:-/www2}/" "$kl" 2>/dev/null && p=1 || p=0
+        printf 'ost|OpenSpeedTest|%s|%s|%s\n' "$p" "$(_pm_kb "${OST_INSTALL_DIR:-/www2}")" "${OST_INSTALL_DIR:-/www2}"
+    fi
+    # AdGuardHome: only an updated build (an overlay copy) - GL's own build comes back with the firmware
+    if [ -f "${AGH_INIT:-/etc/init.d/adguardhome}" ] && { _agh_updates_persist 2>/dev/null || [ -f "$(_agh_upper 2>/dev/null)$(_agh_bin 2>/dev/null)" ]; }; then
+        _agh_updates_persist 2>/dev/null && p=1 || p=0
+        if _agh_fw_risk 2>/dev/null; then d="v$(_agh_cur_ver) would be replaced by the firmware build, which can't read its config"
+        else d="v$(_agh_cur_ver) would be replaced by the firmware build"; fi
+        printf 'agh|AdGuardHome|%s|%s|%s\n' "$p" "$(_pm_kb "$(_agh_bin)" /etc/init.d/adguardhome "$(_agh_config_path 2>/dev/null)")" "$d"
+    fi
+    # SSH keys: listed only when the toolkit can change it (on the user keep list, or not kept at all) -
+    # firmware that keeps them by default needs no switch
+    if [ -s /etc/dropbear/authorized_keys ] && { grep -qxF /etc/dropbear/authorized_keys "${FW_KEEPCONF:-/etc/sysupgrade.conf}" 2>/dev/null || ! _pk /etc/dropbear/authorized_keys; }; then
+        _pk /etc/dropbear/authorized_keys && p=1 || p=0
+        n=$(grep -c . /etc/dropbear/authorized_keys 2>/dev/null)
+        printf 'sshkeys|SSH Keys|%s|%s|%s key%s\n' "$p" "$(_pm_kb /etc/dropbear/authorized_keys)" "$n" "$([ "$n" = 1 ] || echo s)"
+    fi
+    for ns in $(ls "$BK_ROOT" 2>/dev/null); do nb=$(( nb + $(bk_list "$ns" 2>/dev/null | grep -c .) )); done
+    if [ "$nb" -gt 0 ]; then
+        grep -q "^$BK_ROOT/" "$kl" 2>/dev/null && p=1 || p=0
+        printf 'backups|Backups|%s|%s|%s in %s\n' "$p" "$(_pm_kb "$BK_ROOT")" "$nb" "$BK_ROOT"
+    fi
+    [ "$own" = 1 ] && rm -f "$kl"
+    return 0
+}
+# _pm_feat_set <key> <0|1> - flip one row through the feature's own switch, then MEASURE it.
+# 0 = done; 1 = didn't take; 2 = toolkit kept because something persisted still needs it.
+_pm_feat_set() {
+    local k="$1" on="$2" c="${FW_KEEPCONF:-/etc/sysupgrade.conf}" i dl ul wb got
+    case "$k" in
+        toolkit)
+            if [ "$on" = 1 ]; then _fw_keep_toolkit >/dev/null 2>&1
+            else
+                # glinet_persist runs the toolkit to put things back - it can't go while they persist
+                glpersist_any 2>/dev/null && return 2
+                _glpersist_keep_del "$INSTALL_PATH"; _glpersist_keep_del "$SCRIPT_PATH"
+            fi ;;
+        ttyd|fan|switch)
+            if [ "$on" = 1 ]; then glpersist_is_on "$k" || glpersist_enable "$k" >/dev/null 2>&1
+            else glpersist_is_on "$k" && glpersist_disable "$k" >/dev/null 2>&1; fi ;;
+        limits)
+            netlimit_conf_list 2>/dev/null | while IFS='|' read -r i dl ul wb _; do
+                [ -n "$i" ] && netlimit_conf_put "$i" "$dl" "$ul" "${wb:-0}" "$on"; done
+            netlimit_persist_sync ;;
+        ost)     _ost_persist_set "$on" quiet ;;
+        agh)     if [ "$on" = 1 ]; then _agh_persist_set on; else _agh_persist_set off; fi ;;
+        sshkeys) if [ "$on" = 1 ]; then _glpersist_keep_add /etc/dropbear/authorized_keys; else _glpersist_keep_del /etc/dropbear/authorized_keys; fi ;;
+        backups) if [ "$on" = 1 ]; then _glpersist_keep_add "$BK_ROOT"; else _glpersist_keep_del "$BK_ROOT"; fi ;;
+        *) return 1 ;;
+    esac
+    got=$(_pm_feat_rows | awk -F'|' -v k="$k" '$1==k{print $3; exit}')
+    [ "${got:-0}" = "$on" ]
 }
 
 manage_packages() {
-    # Define the Utility Database (Package|Binary|Config/Service Files)
-    # Types: R = Reinstall (Complex), B = Binary (Simple)
-    # Ookla ships no MIPS build, so on MIPS the internet speed test is speedtest-go (a GitHub
-    # binary, not an opkg package) - offer THAT as the installable entry there instead. Both
-    # install/remove via the special-cases in the apply loop below.
-    local _st_line="speedtest|/usr/bin/speedtest|B|/usr/bin/speedtest /root/.config/ookla/speedtest-cli.json"
-    case "$(uname -m)" in mips*) _st_line="speedtest-go|/usr/bin/speedtest-go|B|/usr/bin/speedtest-go" ;; esac
-    # stress-ng can crash routers on kernels < 6.6 - withhold it there (empty entry -> skipped by the
-    # init loop's blank-name guard); offered normally on 6.6+ where the kernel bug is fixed.
-    local _stressng_line="stress-ng|/usr/bin/stress-ng|B|/usr/bin/stress-ng"
-    _stressng_unsafe && _stressng_line=""
-    local UTILITY_DB="zram-swap|/etc/init.d/zram|R|/etc/init.d/zram /etc/config/system
-librespeed-go|/usr/bin/librespeed-go|R|/usr/bin/librespeed-go /etc/config/librespeed-go /etc/init.d/librespeed-go
-stress|/usr/bin/stress|B|/usr/bin/stress
-$_stressng_line
-lscpu|/usr/bin/lscpu|B|/usr/bin/lscpu
-apache|/usr/bin/htpasswd|R|/usr/bin/htpasswd
-openssl-util|/usr/bin/openssl|B|/usr/bin/openssl
-htop|/usr/bin/htop|B|/usr/bin/htop
-rsync|/usr/bin/rsync|B|/usr/bin/rsync
-diffutils|/usr/bin/diff|B|/usr/bin/diff
-vim-fuller|/usr/bin/vim|R|/usr/bin/vim
-$_st_line
-iperf3|/usr/bin/iperf3|B|/usr/bin/iperf3
-tailscale|/usr/sbin/tailscale|R|/etc/config/tailscale /etc/tailscale
-iputils-ping|/usr/bin/ping|B|/usr/bin/ping"
+    local UTILITY_DB; UTILITY_DB=$(_pm_utility_db)
 
     local map_file="/tmp/pkg_manage_map"
     local sys_conf="/etc/sysupgrade.conf"
     local laz_list="/etc/lazarus.list"
     local sort_mode="size"                    # size | name; toggled by [S]
     local sizes_file="/tmp/pkg_manage_sizes"  # name|sizeKB, computed once per entry
+    local keep_file="/tmp/pkg_manage_keep"    # name|KB of the files that row keeps across an update
+    # init_system_state runs under spin_run (a background subshell), so its measurements come back in files
+    local keep_totf="/tmp/pkg_manage_keeptot" # KB on the keep list right now (measured)
+    local keep_archf="/tmp/pkg_manage_keeparch" # KB the flash would pack them into (measured, compressed)
+    local feat_file="/tmp/pkg_manage_feat"    # the Features rows (_pm_feat_rows)
     local idx_sizes="/tmp/pkg_manage_idx"     # name|bytes from ONE batched 'opkg info' (see init)
-    local _pkg_opts="[A] All   [N] None   [#] Toggle   [S] Sort   [C] Confirm   [0] Cancel   [?] Help"
-    local _pkg_div; _pkg_div=$(awk -v n="${#_pkg_opts}" 'BEGIN{s="";for(i=0;i<n;i++)s=s"─";print s}')
+    # Two pages, one per section (Packages / Features) - together they outgrow a 36-row
+    # terminal. Footer = the standard paged nav line (as the AGH Lists Manager) + a selection line. On a
+    # paged screen None is [Z] so [N] stays Next; [A]/[Z] act on the CURRENT page only ("options match what
+    # you see") - ratified in the interaction-model standard, first used here (Vincent 2026-09-29).
+    local page=1 pages=1 pg_first pg_last
+    # Footer (input-line rule): the actions on this page's rows, then the page line closest to the input.
+    local _pkg_acts="[A] All   [Z] None   [S] Sort   [#] Toggle   [C] Confirm   [0] Cancel   [?] Help"
+    local _pkg_div; _pkg_div=$(awk -v n="${#_pkg_acts}" 'BEGIN{s="";for(i=0;i<n;i++)s=s"─";print s}')
+    # _pkg_page_rows <page> - the map rows on that page (1 = packages, 2 = Features)
+    _pkg_page_rows() { if [ "$1" = 2 ]; then awk -F'|' '$6=="F"' "$map_file"; else awk -F'|' '$6!="F"' "$map_file"; fi; }
     # Overlay filesystem: ubifs/jffs2 compress transparently (uncompressed sizes overstate real
     # flash use), f2fs/ext4 do not. Drives whether the storage projection is exact or an "≈"
     # floor - see _pkg_storage_line.
@@ -8904,11 +9464,7 @@ iputils-ping|/usr/bin/ping|B|/usr/bin/ping"
             # reports the installed size for BOTH installed and available (index) packages in one fast
             # local call ("<pkg>-<ver> installed size:\n284 KiB"), so it fills the whole column. Fall
             # back to du only for a toolkit-made symlink apk doesn't know (e.g. stress -> stress-ng).
-            kb=$(apk info -s "$name" 2>/dev/null | awk '
-                $2=="B"   {printf "%d",($1+1023)/1024; exit}
-                $2=="KiB" {printf "%d",$1;             exit}
-                $2=="MiB" {printf "%d",$1*1024;        exit}
-                $2=="GiB" {printf "%d",$1*1048576;     exit}')
+            kb=$(_apk_footprint_kb "$name")   # installed: its size; not installed: + the dependencies it pulls in
             case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
             # non-index binaries (Ookla speedtest, speedtest-go) aren't in apk either - use the estimate
             if [ "$kb" -le 0 ]; then bytes=$(_nonindex_bytes "$name"); [ "$bytes" -gt 0 ] && kb=$(( (bytes + 1023) / 1024 )); fi
@@ -8934,12 +9490,13 @@ iputils-ping|/usr/bin/ping|B|/usr/bin/ping"
             # not installed: estimated INSTALL size (index Installed-Size), from the pre-built
             # map (init_system_state parses it once - see there for why we don't loop opkg).
             bytes=$(_nonindex_bytes "$name")   # GitHub/Ookla binaries: fixed estimate, not in the index
-            [ "$bytes" -eq 0 ] && bytes=$(grep -m1 "^$name|" "$idx_sizes" 2>/dev/null | cut -d'|' -f2)
+            [ "$bytes" -eq 0 ] && bytes=$(_pkg_index_footprint "$name")
             case "$bytes" in ''|*[!0-9]*) bytes=0 ;; esac
             [ "$bytes" -gt 0 ] && kb=$(( (bytes + 1023) / 1024 ))
         fi
         printf '%s' "${kb:-0}"
     }
+    _pkg_index_footprint() { _opkg_footprint_bytes "$1" "$idx_sizes"; }   # <pkg> -> bytes (see _opkg_footprint_bytes)
     _fmt_kb() {
         local k="${1:-0}"; case "$k" in ''|*[!0-9]*) k=0 ;; esac
         [ "$k" -le 0 ] && { printf -- '-'; return; }
@@ -8949,7 +9506,7 @@ iputils-ping|/usr/bin/ping|B|/usr/bin/ping"
     # value here, not "unknown").
     _fmt_space() {
         local k="${1:-0}"; case "$k" in ''|*[!0-9]*) k=0 ;; esac
-        if   [ "$k" -ge 1048576 ]; then awk -v k="$k" 'BEGIN{printf "%.2fG", k/1048576}'
+        if   [ "$k" -ge 1048576 ]; then awk -v k="$k" 'BEGIN{printf "%.1fG", k/1048576}'
         elif [ "$k" -ge 1024 ];    then awk -v k="$k" 'BEGIN{printf "%.1fM", k/1024}'
         else printf '%dK' "$k"; fi
     }
@@ -8973,25 +9530,25 @@ EOF
             case "$s" in ''|*[!0-9]*) s=0 ;; esac
             if [ "$ti" -eq 1 ]; then delta=$((delta - s)); else delta=$((delta + s)); fi
         done < "$map_file"
-        printf " %bStorage:%b  %s free of %s" "$CYAN" "$RESET" "$(_fmt_space "$free")" "$(_fmt_space "$tot")"
-        if [ "$delta" -ne 0 ]; then
-            local proj=$((free + delta)); [ "$proj" -lt 0 ] && proj=0
-            local approx="" col="$GREEN"
-            [ "$fs_comp" -eq 1 ] && approx="≈ "
-            [ "$proj" -lt 10240 ] && col="$YELLOW"      # < 10M projected free -> flag amber
-            printf "   %b→%b  %b%s%s%b after changes" "$GREY" "$RESET" "$col" "$approx" "$(_fmt_space "$proj")" "$RESET"
-            [ "$proj" -lt 10240 ] && printf "  %b(low)%b" "$YELLOW" "$RESET"
-        fi
+        # One number, like the AdGuardHome meter: the free space you'll have if you Confirm (with nothing
+        # staged, that's simply what's free now). On a compressing overlay a projection is a "≈" floor.
+        local proj=$((free + delta)); [ "$proj" -lt 0 ] && proj=0
+        local approx="" col="$BLUE"
+        [ "$delta" -ne 0 ] && [ "$fs_comp" -eq 1 ] && approx="≈ "
+        [ "$proj" -lt 10240 ] && col="$YELLOW"          # < 10M free -> amber
+        printf " %bStorage:%b  %b%s%s free%b" "$CYAN" "$RESET" "$col" "$approx" "$(_fmt_space "$proj")" "$RESET"
+        [ "$proj" -lt 10240 ] && printf "  %b(low)%b" "$YELLOW" "$RESET"
         printf "\n"
     }
     # Re-sort the map by $sort_mode and renumber the visible index (field 1).
     _pkg_resort() {
         # busybox sort can't sort by a mid-line -k field reliably (sort -t'|' -k2,2 is
         # a no-op there), so annotate each row with its sort key (name, or size KB) in a
-        # leading tab-delimited field, sort on that, then strip it back off.
+        # leading tab-delimited field, sort on that, then strip it back off. Each page sorts
+        # on its own: packages (page 1) first, then the Features rows (type F, page 2).
         local tmp="${map_file}.rs"
-        {
-            while IFS= read -r _l; do
+        _pkg_sort_group() {   # <awk filter> - that group's rows, sorted by $sort_mode
+            awk -F'|' "$1" "$map_file" | while IFS= read -r _l; do
                 _n=$(printf '%s' "$_l" | cut -d'|' -f2)
                 if [ "$sort_mode" = name ]; then
                     printf '%s\t%s\n' "$_n" "$_l"
@@ -8999,22 +9556,26 @@ EOF
                     _k=$(grep -m1 "^$_n|" "$sizes_file" 2>/dev/null | cut -d'|' -f2); : "${_k:=0}"
                     printf '%s\t%s\n' "$_k" "$_l"
                 fi
-            done < "$map_file"
-        } | if [ "$sort_mode" = name ]; then sort; else sort -rn; fi | cut -f2- > "$tmp"
+            done | if [ "$sort_mode" = name ]; then sort; else sort -rn; fi | cut -f2-
+        }
+        { _pkg_sort_group '$6!="F"'; _pkg_sort_group '$6=="F"'; } > "$tmp"
         awk -F'|' -v OFS='|' '{$1=NR; print}' "$tmp" > "$map_file"
         rm -f "$tmp"
     }
     
     # Initialization: Scan current system state
     init_system_state(){
-    rm -f "$map_file" "$sizes_file" "$idx_sizes"
+    rm -f "$map_file" "$sizes_file" "$idx_sizes" "$keep_file" "$feat_file" "$keep_totf" "$keep_archf"
     # Not-installed sizes come from the package index; refresh it when empty (opkg keeps
     # the lists under /tmp, so they vanish on reboot). Runs behind the caller's spinner.
     # Refresh only when the index is empty AND the internet is actually up (a quick ping,
     # so an offline entry doesn't wait out the timeout). Bound the update at 60s - a full
     # refresh is ~30s on a slow MIPS box - so a stalled feed can't hang. Anything still
     # unknown afterwards falls back to "-".
-    if [ "$(pkg_mgr)" = opkg ] && [ -z "$(find /var/opkg-lists /tmp/opkg-lists -type f 2>/dev/null)" ] \
+    # every package's size already measured this session -> no index work at all
+    local _need=0 _n
+    for _n in $(echo "$UTILITY_DB" | cut -d'|' -f1); do grep -q "^$_n|" "$PKG_SIZE_CACHE" 2>/dev/null || { _need=1; break; }; done
+    if [ "$_need" = 1 ] && [ "$(pkg_mgr)" = opkg ] && [ -z "$(find /var/opkg-lists /tmp/opkg-lists -type f 2>/dev/null)" ] \
        && ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
         if command -v timeout >/dev/null 2>&1; then timeout 60 opkg update >/dev/null 2>&1
         else opkg update >/dev/null 2>&1; fi
@@ -9029,14 +9590,16 @@ EOF
     # for compressible binaries (e.g. librespeed-go), so a not-installed size is a best-effort
     # estimate; the storage projection treats it as such. Absent names -> "-".
     : > "$idx_sizes"
-    if [ "$(pkg_mgr)" = opkg ]; then
+    if [ "$_need" = 1 ] && [ "$(pkg_mgr)" = opkg ]; then
         local _files _f
         # /var is a symlink to /tmp on OpenWrt, so both globs hit the same feeds - dedupe by
         # basename (keep the first path per feed) so we decompress each feed once, not twice.
         _files=$(find /var/opkg-lists /tmp/opkg-lists -type f 2>/dev/null | awk -F/ '!seen[$NF]++')
         for _f in $_files; do
             zcat "$_f" 2>/dev/null || cat "$_f" 2>/dev/null
-        done | awk '/^Package: /{n=$2} /^Installed-Size: /{if(n!=""){print n"|"$2; n=""}}' > "$idx_sizes"
+        done | awk '/^Package: /{ if (n != "") print n "|" sz "|" dp; n = $2; sz = ""; dp = "" }
+                    /^Installed-Size: /{ sz = $2 } /^Depends: /{ dp = substr($0, 10) }
+                    END { if (n != "") print n "|" sz "|" dp }' | awk -F'|' '$2 != "" && !seen[$1]++' > "$idx_sizes"   # same shape as _opkg_index_table
     fi
     local i=1
     echo "$UTILITY_DB" | while IFS='|' read -r name bin type paths; do
@@ -9047,16 +9610,65 @@ EOF
         # only reflect it when installed, so the Persist column can never show a checked box for a
         # package that isn't there.
         if [ "$inst" -eq 1 ]; then
-            for p in $paths; do
-                if grep -qFx "$p" "$sys_conf" 2>/dev/null; then pers=1; break; fi
-            done
+            if [ "$type" = R ]; then
+                # re-installed after an update: persisted = on the re-install list (its config lines ride along)
+                grep -qxF "$name" "$laz_list" 2>/dev/null && pers=1
+            else
+                for p in $paths; do
+                    if grep -qFx "$p" "$sys_conf" 2>/dev/null; then pers=1; break; fi
+                done
+            fi
         fi
         # Format: Index|Name|Target_I|Target_P|Action|Type|Paths|Orig_I|Orig_P
         echo "$i|$name|$inst|$pers|No Change|$type|$paths|$inst|$pers" >> "$map_file"
-        printf '%s|%s\n' "$name" "$(_pkg_size "$name" "$bin" "$paths")" >> "$sizes_file"
+        local _sz; _sz=$(grep -m1 "^$name|" "$PKG_SIZE_CACHE" 2>/dev/null | cut -d'|' -f2)
+        if [ -z "$_sz" ]; then _sz=$(_pkg_size "$name" "$bin" "$paths"); printf '%s|%s\n' "$name" "$_sz" >> "$PKG_SIZE_CACHE"; fi
+        printf '%s|%s\n' "$name" "$_sz" >> "$sizes_file"
+        printf '%s|%s\n' "$name" "$(_pm_kb $paths)" >> "$keep_file"
         i=$((i+1))
     done
+    # Features (persist only - Install is fixed at 1, type F, the "paths" field holds the key)
+    _pm_feat_rows > "$feat_file"
+    while IFS='|' read -r _k _lb _pr _kb _; do
+        [ -n "$_k" ] || continue
+        echo "0|$_lb|1|$_pr|No Change|F|$_k|1|$_pr" >> "$map_file"
+        printf '%s|%s\n' "$_lb" "$_kb" >> "$sizes_file"; printf '%s|%s\n' "$_lb" "$_kb" >> "$keep_file"
+    done < "$feat_file"
+    # what the keep list carries right now (every file sysupgrade would pack), in KB
+    sysupgrade -l 2>/dev/null | while IFS= read -r _f; do [ -f "$_f" ] && printf '%s\n' "$_f"; done \
+        | xargs du -k 2>/dev/null | awk '{s+=$1} END{print s+0}' > "$keep_totf"
+    # from Firmware Update: the archive the flash would really pack (compressed), measured once
+    echo 0 > "$keep_archf"   # opened from Firmware Update: measured after this (_fw_arch_kb), never estimated
     _pkg_resort
+    # opened from Firmware Update: stage everything the update would remove as "Enable Persistence"
+    if [ "${PM_FW_STAGE:-0}" = 1 ]; then
+        while IFS='|' read -r idx name ti tp act type paths oi op; do
+            if [ "$op" = 0 ] && [ "$oi" = 1 ] && { { [ "$type" = F ] && grep -qxF "$paths" "${FW_TMP:-/tmp/.glinet_fw}/risk.keys" 2>/dev/null; } \
+                 || { [ "$type" != F ] && grep -qxF "$name" "${FW_TMP:-/tmp/.glinet_fw}/pk.lost" 2>/dev/null; }; }; then
+                echo "$idx|$name|1|1|$(get_action_text 1 1 1 0)|$type|$paths|$oi|$op"
+            else echo "$idx|$name|$ti|$tp|$act|$type|$paths|$oi|$op"; fi
+        done < "$map_file" > "$map_file.st" && mv "$map_file.st" "$map_file"
+    fi
+    }
+    # Persist line: what a firmware update carries if you Confirm (the staged persistence changes included).
+    # Opened from Firmware Update it adds the memory meter for the flash (image + kept files).
+    _pkg_keep_line() {
+        local delta=0 nm tp op k proj keep_tot keep_arch
+        keep_tot=$(tr -dc '0-9' < "$keep_totf" 2>/dev/null); : "${keep_tot:=0}"
+        keep_arch=$(tr -dc '0-9' < "$keep_archf" 2>/dev/null); : "${keep_arch:=0}"
+        while IFS='|' read -r _ nm _ tp _ _ _ _ op; do
+            [ -n "$nm" ] && [ "$tp" != "$op" ] || continue
+            k=$(grep -m1 "^$nm|" "$keep_file" 2>/dev/null | cut -d'|' -f2); case "$k" in ''|*[!0-9]*) k=0 ;; esac
+            if [ "$tp" = 1 ]; then delta=$((delta + k)); else delta=$((delta - k)); fi
+        done < "$map_file"
+        proj=$((keep_tot + delta)); [ "$proj" -lt 0 ] && proj=0
+        printf " %bPersist:%b  %b%s%b\n" "$CYAN" "$RESET" "$BLUE" "$(_fmt_space "$proj")" "$RESET"   # what an update carries if you Confirm
+        # the MEASURED archive for what persists now; staged changes are measured after Confirm (no estimate)
+        if [ -n "${PM_FW_IMAGE_KB:-}" ]; then
+            if [ "$delta" -ne 0 ]; then _fw_mem_meter "$PM_FW_IMAGE_KB" "$keep_arch" "  ${GREY}(updates after Confirm)${RESET}"
+            else _fw_mem_meter "$PM_FW_IMAGE_KB" "$keep_arch"; fi
+        fi
+        return 0
     }
 
     # Standard setup-screen flow: show the header, then a spinner while sizes are
@@ -9065,21 +9677,36 @@ EOF
     clear
     print_centered_header "Package & Persistence Manager"
     spin_run "Collecting package sizes" init_system_state
+    # from Firmware Update: the Update Memory meter's archive size - measured (usually already done in the
+    # background since Firmware Update opened; this waits only for the rest)
+    if [ -n "${PM_FW_IMAGE_KB:-}" ]; then
+        spin_run "Measuring what persists" _fw_arch_kb; tr -dc '0-9' < "$SPIN_LOG" > "$keep_archf"
+    fi
 
     while true; do
         clear
         print_centered_header "Package & Persistence Manager"
+        # a message about the whole screen sits right under the title (as the Lists Manager's state warning)
+        [ "${PM_FW_STAGE:-0}" = 1 ] && { print_info "Items the firmware update would remove are pre-selected to persist"; printf "\n"; }
         _pkg_storage_line          # print_centered_header already leaves one blank line above
+        _pkg_keep_line
         printf "\n"
+        pages=1; awk -F'|' '$6=="F"{f=1} END{exit !f}' "$map_file" 2>/dev/null && pages=2
+        [ "$page" -gt "$pages" ] && page=$pages
+        pg_first=$(_pkg_page_rows "$page" | head -1 | cut -d'|' -f1); pg_last=$(_pkg_page_rows "$page" | tail -1 | cut -d'|' -f1)
         # ↓ marks the sorted column; pre-padded to the same display width as the data
         # columns (%-19s / %-7s) so the arrow's byte width doesn't shift the layout.
-        if [ "$sort_mode" = name ]; then _hn="Package Name ↓     "; _hs="Size   "
-        else                             _hn="Package Name       "; _hs="Size ↓ "; fi
+        local _hl="Package Name"; [ "$page" = 2 ] && _hl="Name"
+        # pad by hand: busybox printf pads by BYTES and the 3-byte ↓ would shift the columns
+        if [ "$sort_mode" = name ]; then _hn="$_hl ↓$(printf '%*s' $((17 - ${#_hl})) '')"; _hs="Size   "
+        else                             _hn=$(printf '%-19s' "$_hl");                    _hs="Size ↓ "; fi
         printf "       %-7s %-7s %s %s %s\n" "Install" "Persist" "$_hn" "$_hs" "Planned Action"
         printf " %s\n" "$_pkg_div"
+        if [ "$page" = 2 ]; then printf " %bFeatures%b\n" "$HDR2" "$RESET"; else printf " %bPackages%b\n" "$HDR2" "$RESET"; fi
 
-        while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
+        _pkg_page_rows "$page" | while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
             local i_box="  [ ]  "; [ "$i_t" -eq 1 ] && i_box="  [✓]  "
+            [ "$type" = F ] && i_box="   -   "
             local p_box="  [ ]  "; [ "$p_t" -eq 1 ] && p_box="  [✓]  "
             local sz; sz=$(grep -m1 "^$name|" "$sizes_file" 2>/dev/null | cut -d'|' -f2)
             # Semantic action colour, matching the confirm screen (green = install/persist,
@@ -9092,40 +9719,38 @@ EOF
                 *Install*|*Enable*)             _ac="$GREEN" ;;
                 *)                              _ac="$RESET" ;;
             esac
-            printf " %-5s %s %s %-19s %-7s %b%s%b\n" "$idx." "$i_box" "$p_box" "$name" "$(_fmt_kb "${sz:-0}")" "$_ac" "$action" "${RESET}"
-        done < "$map_file"
+            local _dn="$name"; [ "$name" = stress ] && [ "$(_stress_backend)" = stress-ng ] && _dn="stress (stress-ng)"
+            local _av="$action"     # display only - the apply loop matches on the action text itself
+            [ "$type" = R ] && case "$action" in *"Install + Persist"|*"Enable Persistence") _av="$action (via reinstall)" ;; esac
+            printf " %-5s %s %s %-19s %-7s %b%s%b\n" "$idx." "$i_box" "$p_box" "$_dn" "$(_fmt_kb "${sz:-0}")" "$_ac" "$_av" "${RESET}"
+        done
 
         printf " %s\n" "$_pkg_div"
-        printf " %s\n" "$_pkg_opts"
-        pkg_count=$(wc -l < "$map_file" 2>/dev/null | tr -dc '0-9')
-        printf "\n Choose [%s/A/N/S/C/0/?]: " "$(picker_range "$pkg_count")"
+        printf " %s\n" "$_pkg_acts"
+        printf " [P] Previous   Page %s of %s   [N] Next\n" "$page" "$pages"
+        printf "\n Choose [%s-%s/A/Z/S/C/P/N/0/?]: " "$pg_first" "$pg_last"
         read -r cmd
         cmd=$(echo "$cmd" | tr 'A-Z' 'a-z')
 
         case "$cmd" in
-            a|A) 
-                # Step 1: Force targets to 1|1 for all rows
-                awk -F'|' -v OFS='|' '{$3=1; $4=1; print}' "$map_file" > "${map_file}.tmp"
-                
-                # Step 2: Re-calculate the "Smart" action text for all 9 columns
+            a|A|z|Z)
+                # [A] All / [Z] None - the CURRENT page only. Packages: All = install + persist, None = remove
+                # (+ unpersist). Features: persist on / off (Install stays fixed at 1).
+                local _all=0; case "$cmd" in a|A) _all=1 ;; esac
                 while IFS='|' read -r idx name ti tp act type paths oi op; do
-                    new_act=$(get_action_text 1 1 "$oi" "$op")
-                    echo "$idx|$name|1|1|$new_act|$type|$paths|$oi|$op"
-                done < "${map_file}.tmp" > "$map_file"
-                rm -f "${map_file}.tmp"
+                    if { [ "$page" = 2 ] && [ "$type" = F ]; } || { [ "$page" != 2 ] && [ "$type" != F ]; }; then
+                        if [ "$type" = F ]; then ti=1; else ti=$_all; fi
+                        tp=$_all; act=$(get_action_text "$ti" "$tp" "$oi" "$op")
+                    fi
+                    echo "$idx|$name|$ti|$tp|$act|$type|$paths|$oi|$op"
+                done < "$map_file" > "${map_file}.tmp" && mv "${map_file}.tmp" "$map_file"
                 ;;
-            n|N)
-                # Step 1: Force targets to 0|0 for all rows
-                awk -F'|' -v OFS='|' '{$3=0; $4=0; print}' "$map_file" > "${map_file}.tmp"
-                
-                # Step 2: Re-calculate the "Smart" action text for all 9 columns
-                while IFS='|' read -r idx name ti tp act type paths oi op; do
-                    new_act=$(get_action_text 0 0 "$oi" "$op")
-                    echo "$idx|$name|0|0|$new_act|$type|$paths|$oi|$op"
-                done < "${map_file}.tmp" > "$map_file"
-                rm -f "${map_file}.tmp"
-                ;;
+            n|N) [ "$page" -lt "$pages" ] && page=$((page + 1)) ;;
+            p|P) [ "$page" -gt 1 ] && page=$((page - 1)) ;;
             [1-9]*)
+                # only the current page's numbers (what's on screen)
+                case "$cmd" in *[!0-9]*) print_error "Invalid option"; sleep 1; continue ;; esac
+                if [ "$cmd" -lt "${pg_first:-1}" ] || [ "$cmd" -gt "${pg_last:-0}" ]; then print_error "Invalid option"; sleep 1; continue; fi
                 if grep -q "^$cmd|" "$map_file"; then
                     local line=$(grep "^$cmd|" "$map_file")
                     # Extract columns (Note the new positions for Orig_I and Orig_P)
@@ -9137,9 +9762,12 @@ EOF
                     local o_i=$(echo "$line" | cut -d'|' -f8)
                     local o_p=$(echo "$line" | cut -d'|' -f9)
                     
-                    # 3-Way Cycle: (0,0) -> (1,0) -> (1,1) -> Back to (0,0)
+                    # 3-Way Cycle: (0,0) -> (1,0) -> (1,1) -> Back to (0,0); a Features
+                    # row only flips its persistence
                     local next_i=0; local next_p=0
-                    if [ "$cur_i" -eq 0 ] && [ "$cur_p" -eq 0 ]; then
+                    if [ "$type" = F ]; then
+                        next_i=1; [ "$cur_p" -eq 1 ] && next_p=0 || next_p=1
+                    elif [ "$cur_i" -eq 0 ] && [ "$cur_p" -eq 0 ]; then
                         next_i=1; next_p=0
                     elif [ "$cur_i" -eq 1 ] && [ "$cur_p" -eq 0 ]; then
                         next_i=1; next_p=1
@@ -9191,7 +9819,7 @@ EOF
                 done < "$map_file"
 
                 if [ -z "$to_add" ] && [ -z "$to_rem" ]; then
-                    print_error "No changes planned"; sleep 2; continue
+                    print_info "No changes to apply"; sleep 2; continue
                 fi
 
                 clear
@@ -9201,14 +9829,24 @@ EOF
                 
                 printf "Proceed with changes? [y/N]: "; read -r confirm; printf "\n"
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
-                    install_fail=0; rem_kept=""; rem_fail=""; rem_forced=""
+                    install_fail=0; rem_kept=""; rem_fail=""; rem_forced=""; feat_fail=""; feat_note=""; tk_target=""
                     # map_file columns: idx|name|i_t|p_t|action|type|paths|o_i|o_p
                     while IFS='|' read -r idx name i_t p_t action type paths o_i o_p; do
                         [ "$action" == "No Change" ] && continue
+                        # Features: the feature's own switch, measured. The toolkit goes
+                        # LAST - glinet_persist needs it while anything else still persists.
+                        if [ "$type" = F ]; then
+                            [ "$paths" = toolkit ] && { tk_target="$p_t"; continue; }
+                            spin_run "$([ "$p_t" = 1 ] && echo Keeping || echo Releasing) $name" _pm_feat_set "$paths" "$p_t" </dev/null \
+                                || feat_fail="${feat_fail}\n     - $name"
+                            continue
+                        fi
                         
                         # EXECUTE REMOVALS
                         if [[ "$action" == *"> Remove"* ]] || [[ "$action" == *"> Unpersist"* ]]; then
-                            if [ "$i_t" -eq 0 ]; then
+                            if [ "$i_t" -eq 0 ] && [ "$name" = stress ]; then
+                                _stress_remove || rem_fail="${rem_fail}\n     - stress (could not be removed)"
+                            elif [ "$i_t" -eq 0 ]; then
                                 if pkg_is_installed "$name"; then
                                     # Tailscale: remove the GL wrapper (the dependent) FIRST so the base
                                     # package then removes cleanly and frees its ~6.4M, instead of hitting
@@ -9262,13 +9900,15 @@ EOF
 
                             # Standard cleanup for paths and survival lists
                             for p in $paths; do sed -i "\|$p|d" "$sys_conf" 2>/dev/null; done
-                            [ -f "$laz_list" ] && sed -i "\|$name|d" "$laz_list" 2>/dev/null
+                            [ -f "$laz_list" ] && { sed -i "\|^$name\$|d" "$laz_list" 2>/dev/null; _glpersist_pkgs_sync; }
                         fi
 
                         # EXECUTE INSTALLS
                         if [[ "$action" == *"Install"* ]] || [[ "$action" == *"Persist"* ]]; then
                             if [ "$i_t" -eq 1 ]; then
-                                if [ "$name" == "speedtest" ]; then
+                                if [ "$name" == "stress" ]; then
+                                    _stress_install || install_fail=$((install_fail + 1))
+                                elif [ "$name" == "speedtest" ]; then
                                     install_ookla_speedtest
                                 elif [ "$name" == "speedtest-go" ]; then
                                     install_speedtest_go /usr/bin || install_fail=$((install_fail + 1))
@@ -9296,11 +9936,19 @@ EOF
                                 # Persistence") - actually strip its sysupgrade + boot-restore entries
                                 # (this path used to do nothing, so persistence never got removed).
                                 for p in $paths; do sed -i "\|$p|d" "$sys_conf" 2>/dev/null; done
-                                [ -f "$laz_list" ] && sed -i "\|$name|d" "$laz_list" 2>/dev/null
+                                [ -f "$laz_list" ] && { sed -i "\|^$name\$|d" "$laz_list" 2>/dev/null; _glpersist_pkgs_sync; }
                             fi
                         fi
                     done < "$map_file"
-                    if [ "$install_fail" -eq 0 ] && [ -z "$rem_fail" ] && [ -z "$rem_kept" ] && [ -z "$rem_forced" ]; then
+                    if [ -n "$tk_target" ]; then
+                        spin_run "$([ "$tk_target" = 1 ] && echo Keeping || echo Releasing) the toolkit" _pm_feat_set toolkit "$tk_target"
+                        case $? in
+                            0) : ;;
+                            2) feat_note="${feat_note}\n     - Toolkit (kept - it restores what's still set to persist)" ;;
+                            *) feat_fail="${feat_fail}\n     - Toolkit" ;;
+                        esac
+                    fi
+                    if [ "$install_fail" -eq 0 ] && [ -z "$rem_fail" ] && [ -z "$rem_kept" ] && [ -z "$rem_forced" ] && [ -z "$feat_fail" ] && [ -z "$feat_note" ]; then
                         print_success "System changes applied"
                     else
                         print_warning "Changes applied, with exceptions:"
@@ -9308,8 +9956,15 @@ EOF
                         [ -n "$rem_kept" ]   && { printf "   %bKept - required by other installed packages:%b" "$YELLOW" "$RESET"; printf "$rem_kept\n"; }
                         [ -n "$rem_fail" ]   && { printf "   %bCould not be removed:%b" "$RED" "$RESET"; printf "$rem_fail\n"; }
                         [ -n "$rem_forced" ] && { printf "   %bForce-removed (dependent packages may now be broken):%b" "$YELLOW" "$RESET"; printf "$rem_forced\n"; }
+                        [ -n "$feat_fail" ]  && { printf "   %bPersistence didn't change:%b" "$RED" "$RESET"; printf "$feat_fail\n"; }
+                        [ -n "$feat_note" ]  && { printf "   %bNot changed:%b" "$YELLOW" "$RESET"; printf "$feat_note\n"; }
                     fi
+                    # installed/removed packages: their size changes (a real measurement replaces the estimate)
+                    awk -F'|' '$6!="F" && $3!=$8 {print $2}' "$map_file" | while read -r _n; do
+                        [ -n "$_n" ] && sed -i "/^$_n|/d" "$PKG_SIZE_CACHE" 2>/dev/null; done
                     press_any_key
+                    # opened from Firmware Update: back to the update (it re-checks what's kept)
+                    [ "${PM_FW_STAGE:-0}" = 1 ] && { rm -f "$map_file" "$sizes_file" "$idx_sizes" "$keep_file" "$feat_file" "$keep_totf" "$keep_archf" 2>/dev/null; return; }
                     clear
                     print_centered_header "Package & Persistence Manager"
                     spin_run "Refreshing package list" init_system_state
@@ -9317,7 +9972,7 @@ EOF
                 fi
                 ;;
             s) [ "$sort_mode" = size ] && sort_mode=name || sort_mode=size; _pkg_resort ;;
-            0) rm -f "$map_file" "$sizes_file" "$idx_sizes" 2>/dev/null; return ;;
+            0) rm -f "$map_file" "$sizes_file" "$idx_sizes" "$keep_file" "$feat_file" "$keep_totf" "$keep_archf" 2>/dev/null; return ;;
             \?|h|H|❓) show_package_help ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
@@ -9573,6 +10228,11 @@ Options
 7. Toolkit Management
    Install this script to /usr/sbin/glinet_utils so it can be run
    from anywhere. Manage sysupgrade persistence and updates.
+
+8. Firmware Update
+   Update the firmware from GL.iNet's catalogue - the latest build in
+   the current channel, another channel, or an older build - showing
+   first what the update wouldn't keep.
 
 Web-UI overlays (3 and 4) plus the Fan slider range all paint the same
 admin-panel bundle. They share one injection registry, so installing or
@@ -9984,7 +10644,7 @@ DS_EOF
 
         # Footer / navigation (mirrors the Hardware Info pager)
         printf "\n ──────────────────────────────────────────────────────────────────────────────\n"
-        printf " [P] Prev   "
+        printf " [P] Previous   "
         local i=1
         while [ "$i" -le "$total" ]; do
             if [ "$i" -eq "$page_num" ]; then
@@ -12733,7 +13393,8 @@ Package & Persistence Manager - Quick Help
 What it does
 ────────────
 Installs the optional tools the toolkit can use (speed tests, benchmarks and
-other utilities) and manages whether they survive a reboot.
+other utilities), and is the one place to choose what survives a firmware
+update - packages, and the toolkit's features and settings.
 
 Install / remove
 ────────────────
@@ -12752,20 +13413,48 @@ Size & storage
     it can be removed from the active partition, returning on a firmware reset); not-installed
     rows are the package index's declared install size, so they are an estimate. "-" means the
     size could not be determined (e.g. a package the index doesn't list).
-  • The Storage line shows the overlay's free space and, once you stage changes, the projected
-    free space after them. On a compressing overlay (ubifs/jffs2) that projection is a
-    conservative "≈" floor - real free space is usually a little higher - and it turns amber
-    when it would get low; on f2fs/ext4 it is exact.
+  • Storage is the free space you'll have if you Confirm - with nothing staged, what's free
+    now. On a compressing overlay (ubifs/jffs2) a staged change makes it a conservative "≈"
+    floor - real free space is usually a little higher; on f2fs/ext4 it is exact. It turns
+    amber when it would get low.
   • Each install checks free space first and is skipped, with the shortfall shown, if
     the package won't fit - so a full overlay never leaves a half-installed package.
-  • [S] Sort toggles largest-first (the default) and alphabetical.
+  • [S] Sort toggles largest-first (the default) and alphabetical, on both pages.
+
+Pages
+─────
+Page 1 is Packages, page 2 is Features - [N] Next / [P] Previous
+move between them, and only the numbers on the current page are accepted.
+[A] All and [Z] None act on the current page only: on Packages, All marks
+everything for install + persistence and None for removal; on Features they
+switch persistence on or off.
 
 Persistence
 ───────────
-Many models wipe added packages on reboot. Persistence re-installs your marked
-tools automatically at boot so they are always there; turn it off to save space
-and install on demand instead. Persistence applies only to installed packages -
-uninstalling a tool also clears its persistence.
+Everything you add survives a reboot. A firmware update is different: it
+replaces the system and keeps only what's on the keep list. Persist a package
+and it comes back after an update - re-installed once the network is up
+("via reinstall"), or, for the few tools no package feed offers, its program
+kept as a file. A re-installed package costs only its settings files, so it
+barely moves the Persist line. Persistence applies only to installed
+packages - uninstalling a tool also clears its persistence.
+
+Features
+────────
+Page 2 lists the toolkit's own items that an update would otherwise remove:
+the toolkit itself, the Web Terminal, fan settings, the switch indicator,
+bandwidth limits, OpenSpeedTest, an updated AdGuardHome, SSH keys and backups.
+A row shows only while that thing is in use. Toggling one changes the same
+setting as its own screen - it isn't a second copy.
+The toolkit stays kept while anything else persists: it's what puts them back.
+
+Persist
+───────
+The Persist line is how much a firmware update carries if you Confirm - with
+nothing staged, what it carries now. Opened from Firmware Update, everything the
+update would remove comes pre-staged as Enable Persistence, and the Update
+Memory meter shows whether the image plus what persists fits in the router's
+RAM (the kept files are packed, so they need less than the Persist line).
 
 Notes
 ─────
@@ -12839,7 +13528,7 @@ pkg_db_restore() {
     if bk_restore "$_ns" "$ts_sel" "$_db"; then
         spin_run "Verifying the package index" pkg_update
         if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
-            print_warning "Restored, but opkg still reports parse errors - the backup may predate the corruption; try 'Rebuild the package index cache'"
+            print_warning "Restored, but opkg still reports parse errors - the backup may predate the corruption;\ntry 'Rebuild the package index cache'"
         else
             print_success "Database restored from $(bk_date "$ts_sel")."
         fi
@@ -13039,7 +13728,7 @@ _pkg_db_repair_flow() {
     # Exhausted - honest, consistent guidance (offer a restore only if the user actually has backups).
     print_error "The database could not be repaired automatically"
     if [ "$(bk_list "$_ns" "$_base" | grep -c .)" -gt 0 ]; then
-        print_info "Restore an earlier backup (from before the corruption) via 'Backup & Restore', or re-flash the firmware"
+        print_info "Restore an earlier backup (from before the corruption) via 'Backup & Restore',\nor re-flash the firmware"
     else
         print_info "No earlier package-database backup exists to restore - re-flash the firmware to recover"
     fi
@@ -13113,7 +13802,7 @@ pkg_cache_rebuild_action() {
     printf "\n"
     spin_run "Rebuilding the package index cache" pkg_cache_rebuild
     if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
-        print_warning "The index was refreshed but opkg still reports parse errors - the installed database may be corrupted (try 'Repair the installed database')"
+        print_warning "The index was refreshed but opkg still reports parse errors - the installed database\nmay be corrupted (try 'Repair the installed database')"
     else
         print_success "Package index cache rebuilt"
     fi
@@ -13227,6 +13916,1155 @@ repair_package_system() {
     done
 }
 
+# ============================================================
+# Firmware Update (System Tweaks ▸ 8)
+# ============================================================
+# GL.iNet publishes every build of every model in ONE public catalogue (its Download Center reads it):
+#   $FW_API/model/info?model=<m>       GL firmware; stage RELEASE = Stable, TESTING = Beta, SNAPSHOT =
+#                                      Nightly, RC. CLEAN (a plain OpenWrt image without GL.iNet's
+#                                      interface) and LEGACY builds are deliberately NOT offered.
+#   $FW_API/model/info?model=<m>-open  the OpenWrt-track builds (op24 / op25 in the file name)
+# Each build: version, stage, release_time, release_note (HTML), download[] {name, link, sha256, size}.
+# Measured 2026-09-26. GL's own web-UI check (the `upgrade` RPC) only offers the next build on the
+# router's current track - the catalogue is what lets us offer every channel, and older builds.
+# Flashing follows GL's one_click_upgrade step for step (download -> size -> sha256 -> GL signature ->
+# not_keep_config parts -> sysupgrade), but each step is shown and its RESULT checked, and we add
+# `sysupgrade -T` (OpenWrt's own image + keep-settings compatibility test) and the list of what the
+# update would not keep, measured from `sysupgrade -l` (the router's own keep list).
+FW_API="${FW_API:-https://firmware-api.gl-inet.com/cloud-api}"
+FW_IMG="${FW_IMG:-/tmp/firmware.img}"
+FW_ETC="${FW_ETC:-/etc}"                                     # glversion / version.* (e2e hook)
+FW_TMP="${FW_TMP:-/tmp/.glfw.$$}"                            # per-session catalogue cache
+FW_KEEPCONF="${FW_KEEPCONF:-/etc/sysupgrade.conf}"           # the user keep list (e2e hook)
+
+_fw_model() {
+    local m; m=$(uci -q get board_special.hardware.model 2>/dev/null)
+    [ -n "$m" ] || m=$(cat /proc/gl-hw-info/model 2>/dev/null)
+    printf '%s' "$m" | tr 'A-Z' 'a-z' | tr -d ' \n'
+}
+_fw_fetch() {   # <url> <out> - 0 only when a non-empty file arrived
+    rm -f "$2"
+    if command -v curl >/dev/null 2>&1; then curl -s -f -L -m 20 --connect-timeout 8 "$1" -o "$2" 2>/dev/null
+    else wget -q -T 20 -O "$2" "$1" 2>/dev/null; fi
+    [ -s "$2" ]
+}
+# The installed build, from GL's version files: glversion "4.9.1" / "4.9.1-op25", version.type
+# "release1" / "beta3", version.build "1052". Label format matches the catalogue's: "4.9.1 (op25 beta3)".
+_fw_cur() {
+    FW_CUR_VER=$(cat "$FW_ETC/glversion" 2>/dev/null | tr -d ' \n')
+    FW_CUR_TYPE=$(cat "$FW_ETC/version.type" 2>/dev/null | tr -d ' \n')
+    FW_CUR_BUILD=$(cat "$FW_ETC/version.build" 2>/dev/null | tr -dc '0-9')
+    local op; op=$(printf '%s' "$FW_CUR_VER" | grep -oE 'op2[0-9]' | head -1)
+    FW_CUR_LABEL="${FW_CUR_VER%%-op*} (${op:+$op }${FW_CUR_TYPE:-?})"
+    case "$FW_CUR_VER" in
+        *-op25*) FW_CUR_CHAN="OPENWRT 25" ;;
+        *-op24*) FW_CUR_CHAN="OPENWRT 24" ;;
+        *) case "$FW_CUR_TYPE" in
+               release*)            FW_CUR_CHAN=STABLE ;;
+               beta*)               FW_CUR_CHAN=BETA ;;
+               snapshot*|nightly*)  FW_CUR_CHAN=NIGHTLY ;;
+               rc*)                 FW_CUR_CHAN=RC ;;
+               *)                   FW_CUR_CHAN=UNKNOWN ;;
+           esac ;;
+    esac
+}
+_fw_chan_ord() { case "$1" in STABLE) echo 1 ;; BETA) echo 2 ;; NIGHTLY) echo 3 ;; RC) echo 4 ;; "OPENWRT 25") echo 5 ;; "OPENWRT 24") echo 6 ;; *) echo 7 ;; esac; }
+_fw_chan_color() { [ "$1" = STABLE ] && printf '%s' "$GREEN" || printf '%s' "$YELLOW"; }
+
+# Fetch the catalogue into $FW_TMP/cat, one build per line, channels in menu order, newest first:
+#   channel|label|name|link|sha256|size|epoch|build|date|version|stage|src
+# Returns 0 when GL's server answered (even with no builds for this model), 1 when unreachable.
+_fw_catalog() {
+    local m src j n i V S D N L H Z k nm ln sh sz chan tag ep bd lbl got=1
+    m=$(_fw_model); mkdir -p "$FW_TMP"; : > "$FW_TMP/cat"; : > "$FW_TMP/cat.raw"
+    [ -n "$m" ] || return 1
+    for src in "$m" "$m-open"; do
+        j="$FW_TMP/$src.json"
+        _fw_fetch "$FW_API/model/info?model=$src" "$j" || continue
+        got=0
+        n=$(jsonfilter -i "$j" -e '@.info[*].version' 2>/dev/null | grep -c .)
+        i=0
+        while [ "$i" -lt "${n:-0}" ]; do
+            V=""; S=""; D=""; N=""; L=""; H=""; Z=""
+            eval "$(jsonfilter -i "$j" -e "V=@.info[$i].version" -e "S=@.info[$i].stage" -e "D=@.info[$i].release_time" \
+                -e "N=@.info[$i].download[*].name" -e "L=@.info[$i].download[*].link" -e "H=@.info[$i].download[*].sha256" \
+                -e "Z=@.info[$i].download[*].size" 2>/dev/null)"
+            i=$((i + 1))
+            case "$S" in CLEAN|LEGACY) continue ;; esac
+            # the "common upgrade" file: .tar when offered, else the .bin - never the U-Boot-only .img
+            k=$(printf '%s\n' $N | awk '/\.tar$/{print NR; exit}')
+            [ -n "$k" ] || k=$(printf '%s\n' $N | awk '!/\.img$/{print NR; exit}')
+            [ -n "$k" ] || continue
+            nm=$(printf '%s\n' $N | sed -n "${k}p"); ln=$(printf '%s\n' $L | sed -n "${k}p")
+            sh=$(printf '%s\n' $H | sed -n "${k}p"); sz=$(printf '%s\n' $Z | sed -n "${k}p")
+            case "$src" in
+                *-open) case "$nm" in *op25*) chan="OPENWRT 25" ;; *op24*) chan="OPENWRT 24" ;; *) continue ;; esac ;;
+                *) case "$S" in RELEASE) chan=STABLE ;; TESTING) chan=BETA ;; SNAPSHOT|NIGHTLY) chan=NIGHTLY ;; RC) chan=RC ;; *) continue ;; esac ;;
+            esac
+            tag=$(printf '%s' "$nm" | grep -oE '(op2[0-9][_-])?(release|beta|rc|snapshot|nightly)[0-9]*' | head -1 | tr '_-' '  ')
+            [ -n "$tag" ] || tag=$(printf '%s' "$nm" | grep -oE 'op2[0-9]' | head -1)
+            lbl="$V${tag:+ ($tag)}"
+            bd=$(printf '%s' "$nm" | sed -n 's/.*[_-]\([0-9]\{3,5\}\)-[0-9]\{4\}-[0-9]\{9,11\}\.[a-z]*$/\1/p')
+            ep=$(printf '%s' "$nm" | sed -n 's/.*-\([0-9]\{9,11\}\)\.[a-z]*$/\1/p')
+            case "$sz" in ''|*[!0-9]*) sz=0 ;; esac
+            # annotate (channel order + inverted epoch) so a plain sort gives menu order, newest first
+            printf '%s%010d %s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$(_fw_chan_ord "$chan")" $((9999999999 - ${ep:-0})) \
+                "$chan" "$lbl" "$nm" "$ln" "$sh" "$sz" "${ep:-0}" "${bd:-0}" "${D%% *}" "$V" "$S" "$src" >> "$FW_TMP/cat.raw"
+        done
+    done
+    sort "$FW_TMP/cat.raw" | sed 's/^[0-9]* //' > "$FW_TMP/cat"
+    _fw_fetch "$FW_API/products?modelType=ROUTER" "$FW_TMP/products.json" \
+        && FW_NAME=$(jsonfilter -i "$FW_TMP/products.json" -e "@.info[@.code=\"$m\"].name" 2>/dev/null | head -1)
+    return $got
+}
+_fw_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }   # <row> <n>
+# dotted-version compare: prints -1 / 0 / 1 for $1 vs $2
+_fw_vercmp() { awk -v a="$1" -v b="$2" 'BEGIN{na=split(a,x,".");nb=split(b,y,".");n=na>nb?na:nb
+    for(i=1;i<=n;i++){p=x[i]+0;q=y[i]+0;if(p>q){print 1;exit}if(p<q){print -1;exit}}print 0}'; }
+# Where a target build sits relative to the installed one: UPGRADE / DOWNGRADE / SAME.
+_fw_direction() {   # <row>
+    local v b c; v=$(_fw_field "$1" 10); b=$(_fw_field "$1" 8); c=$(_fw_vercmp "$v" "${FW_CUR_VER%%-op*}")
+    case "$c" in 1) echo UPGRADE; return ;; -1) echo DOWNGRADE; return ;; esac
+    if [ "${b:-0}" -gt 0 ] && [ "${FW_CUR_BUILD:-0}" -gt 0 ]; then
+        [ "$b" -gt "$FW_CUR_BUILD" ] && { echo UPGRADE; return; }
+        [ "$b" -lt "$FW_CUR_BUILD" ] && { echo DOWNGRADE; return; }
+        [ "$(_fw_field "$1" 1)" = "$FW_CUR_CHAN" ] && { echo SAME; return; }
+    fi
+    [ "$(_fw_field "$1" 2)" = "$FW_CUR_LABEL" ] && [ "$(_fw_field "$1" 1)" = "$FW_CUR_CHAN" ] && { echo SAME; return; }
+    echo UPGRADE
+}
+# Update state for the INSTALLED channel: FW_UPD = AVAILABLE / UPTODATE / UNKNOWN, FW_UPD_ROW = the newest build.
+_fw_update_state() {
+    FW_UPD=UNKNOWN; FW_UPD_ROW=""
+    [ -s "$FW_TMP/cat" ] || return 0
+    FW_UPD_ROW=$(awk -F'|' -v c="$FW_CUR_CHAN" '$1==c{print; exit}' "$FW_TMP/cat")
+    [ -n "$FW_UPD_ROW" ] || return 0
+    [ "$(_fw_direction "$FW_UPD_ROW")" = UPGRADE ] && FW_UPD=AVAILABLE || FW_UPD=UPTODATE
+}
+_fw_upd_disp() {
+    case "$FW_UPD" in
+        AVAILABLE) printf '%bAVAILABLE%b (%s)' "$YELLOW" "$RESET" "$(_fw_field "$FW_UPD_ROW" 2 | sed 's/ (/ /; s/)$//')" ;;
+        UPTODATE)  printf '%bUP TO DATE%b' "$GREEN" "$RESET" ;;
+        *)         printf '%bUNKNOWN%b (offline)' "$GREY" "$RESET" ;;
+    esac
+}
+
+# What a firmware update would NOT keep, measured against the router's own keep list (`sysupgrade -l`).
+# One "Item|detail" line each. $1 = keep (settings kept) | wipe (everything goes - listed plainly).
+# Installed packages, one per line, from the package database. Changed 2026-10-03 (Vincent): this used to
+# leave out packages the CURRENT firmware carries (/rom) and dependencies, assuming the next firmware brings
+# them back - unverifiable, so any installed Package Manager package that isn't persisted is reported.
+_fw_installed_pkgs() {   # every installed package (the caller keeps only the Package Manager's)
+    local r="${FW_ROOTFS:-}"        # e2e hook: a fake root; empty on a router
+    # Firmware-provided ones count too: whether the NEXT firmware carries them is unknown (we can't read
+    # the image's package list), and persisting costs ~nothing - the re-install skips what's already there.
+    if [ "$(pkg_mgr)" = apk ]; then
+        sed -n 's/^P://p' "$r/lib/apk/db/installed" 2>/dev/null | sort -u
+    else
+        awk 'BEGIN{RS=""} /Status:[^\n]* installed/ { if (match($0,/Package: [^\n]+/)) print substr($0,RSTART+9,RLENGTH-9) }' \
+            "$r/usr/lib/opkg/status" 2>/dev/null | sort -u
+    fi
+}
+# The packages the update check reports: the Package & Persistence Manager's list - what a user chose to
+# install. Features that bring a package (Web Terminal's ttyd, OpenSpeedTest's nginx) have their own row;
+# helpers installed on demand (stty, fping, timeout...) are left out - the toolkit puts them back itself
+# the next time it needs them, so losing one costs nothing (risk = probability x impact). GL.iNet's own
+# add-ons (LuCI, netify...) and packages installed outside the toolkit are GL's updater's to handle.
+_fw_toolkit_pkgs() { _pm_utility_db | cut -d'|' -f1 | sort -u; }
+_fw_pkg_files() {   # <pkg> -> the package's installed files, one absolute path per line
+    if [ "$(pkg_mgr)" = apk ]; then apk info -L "$1" 2>/dev/null | grep '^[a-z]' | sed 's|^|/|'
+    else opkg files "$1" 2>/dev/null | grep '^/'; fi
+}
+_fw_risk_label() {   # short labels - they sit in the 15-wide key column of STATUS and the flash screen
+    case "$1" in toolkit) echo Toolkit ;; ttyd) echo "Web Terminal" ;; fan) echo "Fan Control" ;; switch) echo Switch ;;
+        limits) echo Limits ;; ost) echo OpenSpeedTest ;; agh) echo AdGuardHome ;; sshkeys) echo "SSH Keys" ;;
+        backups) echo Backups ;; *) echo "$1" ;; esac
+}
+_fw_risk_detail() {   # <key> <detail> - the detail reworded where the short label needs it
+    case "$1" in switch) echo "position indicator (Web-UI tweak)" ;; limits) echo "bandwidth on $2" ;; *) echo "$2" ;; esac
+}
+_fw_at_risk() {
+    local mode="${1:-keep}" kl="$FW_TMP/keep" p laz key per det
+    mkdir -p "$FW_TMP"; sysupgrade -l > "$kl" 2>/dev/null; : > "$FW_TMP/risk.keys"
+    _kept() { [ "$mode" = keep ] && grep -qxF "$1" "$kl" 2>/dev/null; }
+    [ "$mode" = wipe ] && printf 'Settings|Wi-Fi, admin password, network, VPNs - every setting\n'
+    # features and settings - the same rows the Package & Persistence Manager shows (keys recorded so
+    # the manager, opened from here, stages exactly these)
+    _pm_feat_rows "$kl" > "$FW_TMP/feat"
+    while IFS='|' read -r key _ per _ det; do
+        [ -n "$key" ] || continue
+        if [ "$mode" = keep ]; then
+            [ "$per" = 1 ] && continue
+            # an updated AdGuardHome only matters when GL's build can't read its config (probability x impact)
+            [ "$key" = agh ] && ! _agh_fw_risk 2>/dev/null && continue
+        fi
+        echo "$key" >> "$FW_TMP/risk.keys"
+        printf '%s|%s\n' "$(_fw_risk_label "$key")" "$(_fw_risk_detail "$key" "$det")"
+    done < "$FW_TMP/feat"
+    laz=$(cat "$(_lazlist)" 2>/dev/null)
+    _fw_toolkit_pkgs > "$FW_TMP/pk.tk"
+    { _fw_installed_pkgs | sed 's/^stress-ng$/stress/' | sort -u | grep -xF -f "$FW_TMP/pk.tk"; } | while read -r p; do [ -n "$p" ] || continue
+        [ "$p" = stress ] && ! _stress_installed && continue   # the Package Manager's test for stress, so the two agree
+        # persisted = on the re-install list AND both the list and the service that re-installs it are kept
+        if [ "$mode" = keep ] && printf '%s\n' "$laz" | grep -qxF "$p" && _kept "$(_lazlist)" && _kept "$GLPERSIST_INIT"; then continue; fi
+        # ...or kept as files, the Package Manager's other way (its executable is on the keep list)
+        if [ "$mode" = keep ] && _fw_pkg_files "$p" | grep -E '^/(usr/)?s?bin/' | grep -qxF -f "$kl" 2>/dev/null; then continue; fi
+        printf '%s\n' "$p"; done > "$FW_TMP/pk.lost"
+    # catalogue entries that aren't packages (the Ookla / GitHub speed test binaries): lost unless kept as files.
+    # A re-install row counts as kept when it's on the (kept) re-install list - even if only its program file is
+    # there (an older version restored files, so the package manager may not know it; found on .8.1 2026-09-29)
+    _pm_utility_db | while IFS='|' read -r p b t _; do
+        grep -qxF "$p" "$FW_TMP/pk.lost" && continue
+        [ "$t" = R ] && [ "$mode" = keep ] && printf '%s\n' "$laz" | grep -qxF "$p" && _kept "$(_lazlist)" && _kept "$GLPERSIST_INIT" && continue
+        [ -f "${FW_ROOTFS:-}$b" ] && [ ! -e "${FW_ROOTFS:-}/rom$b" ] || continue
+        pkg_is_installed "$p" && continue                           # a package - judged above
+        [ "$mode" = keep ] && _kept "$b" && continue
+        printf '%s\n' "$p"; done >> "$FW_TMP/pk.lost"
+    # the full list, inline (the toolkit's list is short - at most the Package Manager's 15)
+    [ -s "$FW_TMP/pk.lost" ] && printf 'Packages|%s\n' "$(awk '{printf "%s%s", (NR>1 ? ", " : ""), $0}' "$FW_TMP/pk.lost")"
+    return 0
+}
+_fw_risk_scan() { _fw_at_risk "${1:-keep}" > "$FW_TMP/risk.${1:-keep}" 2>/dev/null; }   # spin_run-able
+_fw_risk_rows() {   # <risk-file> - indented white key, blue value (the indent cascade); long values wrap
+    local k v                                  # under the value column (col 20), never mid-word
+    while IFS='|' read -r k v; do
+        [ -n "$k" ] || continue
+        printf "     %-15s%b%s%b\n" "$k:" "$BLUE" "$(printf '%s\n' "$v" | _fw_wrap 68 0 | sed '2,$s/^/                    /')" "$RESET"
+    done < "$1"
+}
+
+# ---- flashing steps: each returns a real result, callers never assume success ----
+_fw_download() {   # <link> <size> - progress line, then the gear line stays (spin_run convention)
+    local link="$1" want="$2" pid got pct c spin='-\|/' mb
+    rm -f "$FW_IMG"
+    if command -v curl >/dev/null 2>&1; then curl -s -f -L --connect-timeout 10 -m 1800 "$link" -o "$FW_IMG" 2>/dev/null &
+    else wget -q -T 30 -O "$FW_IMG" "$link" 2>/dev/null & fi
+    pid=$!; mb=$(( (want + 524288) / 1048576 ))
+    while kill -0 "$pid" 2>/dev/null; do
+        got=$(ls -l "$FW_IMG" 2>/dev/null | awk '{print $5}'); : "${got:=0}"
+        pct=0; [ "$want" -gt 0 ] && pct=$(( got / (want / 100 + 1) )); [ "$pct" -gt 100 ] && pct=100
+        c=${spin%"${spin#?}"}; spin=${spin#?}$c
+        printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}Downloading the firmware${RESET} %s%% of %s MB %s " "$pct" "$mb" "$c"
+        usleep 200000 2>/dev/null || sleep 1
+    done
+    wait "$pid"; FW_DL_RC=$?
+    printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}Downloading the firmware${RESET}\033[K\n"
+    got=$(ls -l "$FW_IMG" 2>/dev/null | awk '{print $5}')
+    [ "$FW_DL_RC" = 0 ] && [ "${got:-0}" = "$want" ]
+}
+_fw_verify_sha() { [ "$(sha256sum "$FW_IMG" 2>/dev/null | cut -d' ' -f1)" = "$1" ]; }
+_fw_verify_sig() {   # 0 signed by GL.iNet, 1 bad/missing signature, 2 no signing key on this router
+    [ -e /etc/key-build.pub ] || return 2
+    rm -f /tmp/firmware.sig
+    fwtool -t -s /tmp/firmware.sig "$FW_IMG" >/dev/null 2>&1 || { rm -f /tmp/firmware.sig; return 1; }
+    local rc=0; usign -V -p /etc/key-build.pub -x /tmp/firmware.sig -m "$FW_IMG" -q >/dev/null 2>&1 || rc=1
+    rm -f /tmp/firmware.sig; return $rc
+}
+_fw_image_test() {   # <keep|wipe> - OpenWrt's own check: right board, and (when keeping) compatible settings
+    rm -f /tmp/sysupgrade.meta; fwtool -q -i /tmp/sysupgrade.meta "$FW_IMG" >/dev/null 2>&1
+    if [ "$1" = wipe ]; then sysupgrade -T -n "$FW_IMG"; else sysupgrade -T "$FW_IMG"; fi
+}
+_fw_reset_parts() {   # files GL's metadata says this build must NOT keep (GL removes them before flashing)
+    [ -s /tmp/sysupgrade.meta ] || return 0
+    jsonfilter -i /tmp/sysupgrade.meta -e '@.upgrade_control.not_keep_config_part[*].path' 2>/dev/null
+}
+
+# ---- update history, the pre-update snapshot, and the post-update health check ----
+# Every update attempt gets a plain-text log (read in View Update History) and a key=value state file,
+# kept in $FW_HIST - which is on the keep list, so a kept-settings update carries its own record across
+# the flash. The state holds what was true BEFORE the update (SSH keys, AdGuardHome, limits, zram, the
+# re-install list, Web-UI tweaks, what wasn't persisted); the next start compares the router against it.
+# status: started -> cancelled | failed | flashing -> ok | issues | pending (-> ok | issues, re-checked).
+FW_HIST="${FW_HIST:-/etc/glinet_utils/fw_history}"
+FW_HIST_KEEP="${FW_HIST_KEEP:-10}"                            # attempts kept in the history
+FW_PENDING_MAX="${FW_PENDING_MAX:-3600}"                     # s after the flash before PENDING becomes ISSUE
+
+_fw_now()   { date '+%Y-%m-%d %H:%M:%S'; }
+_fw_st()    { sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1; }                 # <state> <key>
+_fw_st_set() {                                                                   # <state> <key> <value>
+    local t="$1.tmp.$$"; grep -v "^$2=" "$1" > "$t" 2>/dev/null; printf '%s=%s\n' "$2" "$3" >> "$t"; mv "$t" "$1"
+}
+_fw_log()   { [ -n "${FW_LOG:-}" ] && printf '%s\n' "$*" >> "$FW_LOG"; }
+_fw_uptime() { awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 99999; }
+_fw_hist_latest() { ls -1 "$FW_HIST"/*.state 2>/dev/null | sort | tail -1; }   # newest state file
+_fw_hist_init() {
+    mkdir -p "$FW_HIST"
+    grep -qxF "$FW_HIST/" "$FW_KEEPCONF" 2>/dev/null || printf '%s/\n' "$FW_HIST" >> "$FW_KEEPCONF"
+    # keep the newest $FW_HIST_KEEP attempts (log + state share a timestamp name)
+    ls -1 "$FW_HIST"/*.state 2>/dev/null | sort -r | tail -n +$((FW_HIST_KEEP + 1)) | while read -r s; do
+        rm -f "$s" "${s%.state}.log"; done
+}
+# The attempt's record joins the history: pruning and the keep-list entry happen here too (both change
+# what persists, so they wait for the measurement).
+_fw_record_commit() {
+    case "${FW_STATE:-}" in "$FW_TMP"/*) ;; *) return 0 ;; esac
+    _fw_hist_init
+    mv "$FW_STATE" "$FW_HIST/" 2>/dev/null && FW_STATE="$FW_HIST/${FW_STATE##*/}"
+    mv "$FW_LOG" "$FW_HIST/" 2>/dev/null && FW_LOG="$FW_HIST/${FW_LOG##*/}"
+}
+# Start a record for one attempt: header, the before-snapshot, and what the update won't keep.
+_fw_begin() {   # <row> <keep|wipe> <risk-file>
+    local ts n p tw="" laz
+    ts=$(date '+%Y%m%d-%H%M%S')
+    _glpersist_svc_snapshot 2>/dev/null           # services' on/off, for the re-install after the update
+    # The record starts in the flow's RAM work dir and joins the history (which IS kept) only after
+    # "Measuring what persists" (_fw_record_commit): writing kept files first would change what persists
+    # between the background measurement and the flash flow, forcing a second 20 s+ measurement.
+    mkdir -p "$FW_TMP"; FW_STATE="$FW_TMP/$ts.state"; FW_LOG="$FW_TMP/$ts.log"; : > "$FW_STATE"; : > "$FW_LOG"
+    for t in fan ttyd switch; do glwebui_is_on "$t" 2>/dev/null && glpersist_is_on "$t" 2>/dev/null && tw="${tw:+$tw }$t"; done
+    laz=$(cat "$(_lazlist)" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')
+    n=$(grep -c . /etc/dropbear/authorized_keys 2>/dev/null); : "${n:=0}"
+    {
+        printf 'when=%s\nstatus=started\nmode=%s\n' "$(_fw_now)" "$2"
+        printf 'from=%s\nfrom_chan=%s\nto=%s\nto_chan=%s\n' "$FW_CUR_LABEL" "$FW_CUR_CHAN" "$(_fw_field "$1" 2)" "$(_fw_field "$1" 1)"
+        printf 'lan=%s\nkeys=%s\n' "$(uci -q get network.lan.ipaddr 2>/dev/null)" "$n"
+        printf 'toolkit_kept=%s\n' "$(toolkit_persistence_enabled && echo 1 || echo 0)"
+        printf 'agh=%s\n' "$( [ -f "$AGH_INIT" ] && { is_agh_running && echo running || echo stopped; } || echo none)"
+        printf 'limits=%s\n' "$(netlimit_conf_list 2>/dev/null | awk -F'|' '(($2+0)>0||($3+0)>0) && ($5+0)>0 {print $1}' | tr '\n' ' ' | sed 's/ *$//')"
+        printf 'zram=%s\n' "$(grep -q zram /proc/swaps 2>/dev/null && echo on || echo off)"
+        # the static speed is only expected back when fan persistence was on (otherwise it's REMOVED, not an issue)
+        printf 'fan_static=%s\n' "$( [ "$2" = keep ] && glpersist_is_on fan 2>/dev/null && _fan_static_pct)"
+        printf 'ost=%s\n' "$( [ "$2" = keep ] && glpersist_is_on ost 2>/dev/null && { "$OST_STARTUP_SCRIPT" enabled 2>/dev/null && echo on || echo off; })"
+        printf 'lazarus=%s\ntweaks=%s\n' "$laz" "$tw"
+        # Package Manager entries kept as files (B type): after the update each must still RUN - a binary
+        # can survive while a library it needs doesn't (e.g. across an opkg <-> apk firmware change)
+        printf 'kept_bins=%s\n' "$( [ "$2" = keep ] && _pm_utility_db | while IFS='|' read -r n b t _; do
+            # a link isn't a kept program (apk's alternatives: /usr/bin/diff -> /usr/libexec/diff-gnu, found on .3.1)
+            [ "$t" = B ] && [ -f "$b" ] && [ ! -L "$b" ] && grep -qxF "$b" "$FW_TMP/keep" 2>/dev/null && printf '%s:%s ' "$n" "$b"; done | sed 's/ *$//')"
+    } >> "$FW_STATE"
+    while IFS='|' read -r k v; do [ -n "$k" ] && [ "$k" != Packages ] && printf 'lost=%s: %s\n' "$k" "$v" >> "$FW_STATE"; done < "$3"
+    [ "$2" = keep ] && printf 'lost_pkgs=%s\n' "$(cat "$FW_TMP/pk.lost" 2>/dev/null | tr '\n' ' ' | sed 's/ *$//')" >> "$FW_STATE"
+    _fw_log "Firmware update - $(_fw_now)"
+    _fw_log "  From:      $(_fw_from_line)"
+    _fw_log "  To:        $(_fw_to_line "$1")"
+    _fw_log "  Settings:  $( [ "$2" = keep ] && echo KEPT || echo WIPED)"
+    _fw_log "Before the update"
+    _fw_log "  SSH keys:        $n"
+    _fw_log "  AdGuardHome:     $(_fw_st "$FW_STATE" agh)"
+    _fw_log "  Bandwidth limits (persisted): $(_fw_st "$FW_STATE" limits | sed 's/^$/none/')"
+    _fw_log "  zram swap:       $(_fw_st "$FW_STATE" zram)"
+    _fw_log "  Re-install list: ${laz:-none}"
+    _fw_log "  Web-UI tweaks (persisted): $(echo ${tw:-none})"   # echo trims the list's stray spaces
+    if [ -s "$3" ]; then _fw_log "  Not persisted (won't survive):"; while IFS='|' read -r k v; do _fw_log "    $k: $v"; done < "$3"
+    else _fw_log "  Not persisted:   none"; fi
+    _fw_log "Steps"
+}
+# ---- memory for the flash ---------------------------------------------------------------------
+# The image is downloaded into /tmp (RAM) and sysupgrade packs the keep list into /tmp too. What limits
+# that is the SMALLER of free tmpfs and MemAvailable - running services (Tailscale, AdGuardHome) count.
+# The keep archive packs ~5x (246 KB for 1.2 MB of files), so it's built and measured, not guessed.
+# The red line is MEASURED, not borrowed (Mango 2, 128 MB, 35 MB image, Tailscale running, zram active,
+# 6 real flashes 2026-09-29 - memory held by an incompressible process):
+#   available before  after (avail / zram free)  result
+#   40 MB             10 / 47 MB                 flashed, responsive
+#   40 MB              6 / 21 MB                 flashed, responsive
+#   36 MB              7 / 28 MB                 flashed, responsive
+#   30 MB              5 /  0 MB                 flashed, responsive
+#   30 MB              2 /  0 MB                 THRASHED - no ping/SSH for minutes, no OOM kill
+# With zram the flash is safe down to available = image + kept; ~6 MB below that zram fills and it's a
+# coin flip. And WITHOUT swap (MT5000, 1 GB, no zram, 68 MB update, 5 real flashes 2026-09-29):
+#   available before  vs image + kept  after download   result
+#   100 MB            +8 (31 MB kept)  36 MB            flashed, responsive
+#    64 MB            -4                9 MB            flashed, responsive
+#    56 MB            -12               6 MB            flashed, responsive
+#    47 MB            -21               0 MB            flashed, responsive - the edge
+#    43 MB            -25               OOM KILL        flashed, but a process was killed
+# Without swap the kernel reclaims cache first and fails with a clean kill, not a thrash. So ONE red line
+# for both: available below image + kept - a measured cushion of ~6 MB with zram, ~21 MB without. No extra
+# reserve (an unmeasured 8 MB one was tried and flagged the healthy trials above as "won't fit").
+# (GL.iNet's own rule for the Mango 2 is tmpfs AND free swap > image + 12 MB; its browser upload streams
+# the image once - no double copy.)
+FW_MEM_RESERVE_KB="${FW_MEM_RESERVE_KB:-}"
+_fw_mem_reserve_kb() { echo "${FW_MEM_RESERVE_KB:-0}"; }   # measured: none needed, with or without zram
+_fw_mem_free_kb() {
+    local t m; t=$(space_free_kb /tmp); m=$(awk '/^MemAvailable:/{print $2}' "${FW_MEMINFO:-/proc/meminfo}" 2>/dev/null)
+    case "$m" in ''|*[!0-9]*) m=$t ;; esac; [ "$m" -lt "$t" ] && t=$m; echo "$t"
+}
+# What persists is packed by the flash into an archive that sits in RAM - its size is MEASURED for real,
+# never estimated (Vincent 2026-10-03): the same `tar -czf` of the same file list that `sysupgrade -b`
+# runs, streamed into a byte count (byte-identical to `sysupgrade -b` - 43,940,119 B both ways on .3.1 -
+# and nothing held in RAM). Not `sysupgrade -b` itself: it shares /tmp/sysupgrade.conffiles with
+# `sysupgrade -l`, which deletes it on exit, so any -l (the toolkit runs several) breaks a -b in flight.
+# It's slow (21 s for 67 MB on an MT3000 - it compresses), so each result is remembered against a
+# fingerprint of what persists (every kept file's path, size and time; 0.5 s), and it starts in the
+# background when Firmware Update opens / redraws or what persists changes - usually done before the
+# Package Manager or the flash flow needs it; they wait only for the rest. Session files, removed on exit.
+FW_ARCH_CACHE="/tmp/.glinet_fwarch.$$"
+_fw_keep_list() {   # <file> - what the flash would pack, from sysupgrade itself (foreground only: see above)
+    sysupgrade -l > "$1" 2>/dev/null
+}
+_fw_keep_fp() {   # <list> - its fingerprint
+    while IFS= read -r f; do [ -e "$f" ] && ls -ln "$f" 2>/dev/null; done < "$1" | md5sum | cut -c1-32
+}
+_fw_keep_archive_kb() {   # <list> - pack it exactly as sysupgrade -b does and count the bytes (the slow part)
+    tar czf - -T "$1" 2>/dev/null | wc -c | awk '{print int(($1 + 1023) / 1024)}'
+}
+# stop a background measurement AND its children (tar / wc are grandchildren of the job's shell, so a plain
+# kill of the job would leave them compressing for another ~20 s) - walks /proc for children by parent pid
+_fw_kill_tree() {   # <pid>
+    local p pp
+    for p in /proc/[0-9]*; do
+        { read -r _ _ _ pp _ < "$p/stat"; } 2>/dev/null && [ "$pp" = "$1" ] && _fw_kill_tree "${p#/proc/}"
+    done
+    kill "$1" 2>/dev/null
+}
+_fw_arch_cached() { grep -m1 "^$1|" "$FW_ARCH_CACHE" 2>/dev/null | cut -d'|' -f2; }   # <fingerprint>
+_fw_arch_store() { [ "${2:-0}" -gt 0 ] 2>/dev/null && printf '%s|%s\n' "$1" "$2" >> "$FW_ARCH_CACHE"; }   # a failed (0) run is never kept
+_fw_arch_bg_start() {   # measure in the background - unless this set is measured, or being measured
+    local l="/tmp/.fw_keeplist.$$.bg" fp
+    _fw_keep_list "$l"; fp=$(_fw_keep_fp "$l")
+    [ -n "$(_fw_arch_cached "$fp")" ] && return 0
+    [ -n "${FW_ARCH_PID:-}" ] && kill -0 "$FW_ARCH_PID" 2>/dev/null && [ "${FW_ARCH_FP:-}" = "$fp" ] && return 0
+    [ -n "${FW_ARCH_PID:-}" ] && _fw_kill_tree "$FW_ARCH_PID"        # an older set's run is no longer needed
+    cp "$l" "$l.$fp" 2>/dev/null; FW_ARCH_FP=$fp
+    ( _fw_arch_store "$fp" "$(_fw_keep_archive_kb "$l.$fp")"; rm -f "$l.$fp" ) </dev/null >/dev/null 2>&1 &
+    FW_ARCH_PID=$!
+}
+_fw_arch_kb() {   # the measured size of what persists NOW: remembered, the background result, or measured now
+    local l="/tmp/.fw_keeplist.$$.fg" fp k
+    _fw_keep_list "$l"; fp=$(_fw_keep_fp "$l"); k=$(_fw_arch_cached "$fp")
+    if [ -z "$k" ] && [ "${FW_ARCH_FP:-}" = "$fp" ] && [ -n "${FW_ARCH_PID:-}" ]; then
+        while kill -0 "$FW_ARCH_PID" 2>/dev/null; do usleep 200000 2>/dev/null || sleep 1; done
+        k=$(_fw_arch_cached "$fp")
+    fi
+    if [ -z "$k" ]; then k=$(_fw_keep_archive_kb "$l"); _fw_arch_store "$fp" "$k"; fi
+    rm -f "$l"; echo "${k:-0}"
+}
+_fw_mb() { echo $(( (${1:-0} + 1023) / 1024 )); }
+# _fw_mem_meter <image KB> <kept KB> - the Update Memory meter (the AdGuardHome meter's 20 cells: green,
+# then yellow from 15, red from 19). Returns 0 fits, 1 close (still fits - no word), 2 won't fit. Sets FW_MEM_NEED / FW_MEM_FREE.
+_fw_mem_meter() {   # <image KB> <kept KB> [note]
+    local free need fill i bar st="" rc=0 rsv
+    free=$(_fw_mem_free_kb); rsv=$(_fw_mem_reserve_kb); need=$(( ${1:-0} + ${2:-0} + rsv ))
+    FW_MEM_FREE=$free; FW_MEM_NEED=$need
+    if [ "$free" -gt 0 ]; then fill=$(( (need * 20 + free - 1) / free )); else fill=99; fi
+    if [ "$fill" -gt 20 ]; then rc=2; st="  ${RED}(won't fit)${RESET}"
+    elif [ "$fill" -gt 14 ]; then rc=1; fi   # close, but measured to work: the bar's amber cells say so - no word
+    bar=""; i=1
+    while [ "$i" -le 20 ]; do
+        if [ "$i" -le "$fill" ]; then
+            if   [ "$i" -le 14 ]; then bar="${bar}${GREEN}█${RESET}"
+            elif [ "$i" -le 18 ]; then bar="${bar}${YELLOW}█${RESET}"
+            else                       bar="${bar}${RED}█${RESET}"; fi
+        else bar="${bar}${GREY}░${RESET}"; fi
+        i=$((i + 1))
+    done
+    printf "%b\n" " ${CYAN}Update Memory${RESET}  [${bar}]  $(_fw_mb "$need") MB needed of $(_fw_mb "$free") MB free${st}${3:-}"
+    return $rc
+}
+# Optional services holding RAM that the flash reboot starts again anyway: "init|label|KB", biggest first.
+# Tailscale is left out when this session itself comes through it (stopping it would cut us off).
+_fw_mem_hogs() {
+    local e init lbl proc pid kb
+    for e in tailscale:Tailscale:tailscaled adguardhome:AdGuardHome:AdGuardHome librespeed-go:LibreSpeed:librespeed-go zerotier:ZeroTier:zerotier-one; do
+        init=${e%%:*}; lbl=${e#*:}; proc=${lbl#*:}; lbl=${lbl%%:*}
+        [ -x "/etc/init.d/$init" ] || continue
+        [ "$init" = tailscale ] && case "${SSH_CLIENT:-}" in 100.*) continue ;; esac
+        kb=0; for pid in $(_proc_pids "$proc"); do kb=$(( kb + $(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null || echo 0) )); done
+        [ "$kb" -gt 1024 ] && printf '%s|%s|%s|%s\n' "$kb" "$init" "$lbl" "$kb"
+    done | sort -rn | cut -d'|' -f2-          # annotate-sort-strip: busybox sort -t -k is a no-op
+}
+FW_STOPPED=""
+# Runs under spin_run (a background subshell), so results go to files: $1.stopped (init names) and
+# $1.running (labels left running because the router needs them to reach GL.iNet).
+_fw_stop_hogs() {   # <hogs file> <download host>
+    local init lbl kb
+    : > "$1.stopped"; : > "$1.running"
+    while IFS='|' read -r init lbl kb; do
+        [ -n "$init" ] || continue
+        "/etc/init.d/$init" stop >/dev/null 2>&1 || continue
+        # AdGuardHome can be the router's own DNS - the download still has to find GL.iNet's server
+        if [ -n "${2:-}" ] && ! nslookup "$2" >/dev/null 2>&1; then
+            "/etc/init.d/$init" start >/dev/null 2>&1; echo "$lbl" >> "$1.running"
+        else echo "$init" >> "$1.stopped"; fi
+    done < "$1"
+    sleep 2; return 0
+}
+_fw_restart_stopped() { local i; for i in ${FW_STOPPED:-}; do "/etc/init.d/$i" start >/dev/null 2>&1; done; FW_STOPPED=""; }
+_fw_end() {   # <status> [note] - close the record for an attempt that didn't flash
+    _fw_record_commit                       # an attempt that ends early still lands in the history
+    rm -f /tmp/firmware.sig /tmp/sysupgrade.meta 2>/dev/null   # the checks' working files (the image is removed by the caller)
+    [ -n "${FW_STOPPED:-}" ] && { _fw_log "  started again: $FW_STOPPED"; _fw_restart_stopped; }
+    [ -n "${FW_STATE:-}" ] || return 0
+    _fw_st_set "$FW_STATE" status "$1"; [ -n "${2:-}" ] && _fw_log "  $2"
+    _fw_log "Result: $(printf '%s' "$1" | tr 'a-z' 'A-Z') - $(_fw_now)"
+}
+
+# The health check: compare the router now with the snapshot taken before the flash. Each line is one
+# measured fact: [OK], [ISSUE] (something that should have come back didn't), [PENDING] (still coming
+# back - packages re-installing, a service starting), [REMOVED] (expected: it wasn't set to persist).
+# Writes an "After the update" section to the log, sets the status, and prints a short summary when
+# $2 = show. Re-runnable: a PENDING result is checked again on the next start / Firmware Update visit.
+_fw_health() {   # <state-file> [show]
+    local st="$1" show="${2:-}" log="${1%.state}.log" want chan mode age up iss=0 pen=0 okn=0 p n now t
+    local out="$FW_TMP/health.$$" busy=0 rpt=/dev/null
+    mkdir -p "$FW_TMP"; : > "$out"
+    # glinet_persist's report counts only when it was written for THIS firmware (its ver line ends with it) -
+    # a leftover from an earlier update would report that update's results
+    grep -q "^ver|.*|$(glpersist_curver 2>/dev/null)\$" "${GLPERSIST_REPORT:-/nonexistent}" 2>/dev/null && rpt="$GLPERSIST_REPORT"
+    want=$(_fw_st "$st" to); chan=$(_fw_st "$st" to_chan); mode=$(_fw_st "$st" mode)
+    up=$(_fw_uptime)
+    # is a package re-install still running (the post-update hook, or opkg/apk right now)?
+    { [ -f /tmp/.glpersist_pkgs.running ] || [ "${GLPERSIST_KICKED:-0}" = 1 ] || ps 2>/dev/null | grep -v grep | grep -qE 'opkg (update|install)|apk (update|add)'; } && busy=1
+    # past FW_PENDING_MAX after the flash nothing is "still coming back" - judge everything as final
+    age=$(( $(date +%s) - $(_fw_st "$st" flashed_at | tr -dc '0-9' | sed 's/^$/0/') ))
+    [ -n "$(_fw_st "$st" flashed_at)" ] || age=0
+    [ "$age" -gt "$FW_PENDING_MAX" ] && { busy=0; up=99999; }
+    _r() { printf '%s|%s\n' "$1" "$2" >> "$out"; case "$1" in OK) okn=$((okn+1)) ;; ISSUE) iss=$((iss+1)) ;; PENDING) pen=$((pen+1)) ;; esac; }
+    _fw_cur
+    if [ "$FW_CUR_LABEL" = "$want" ]; then _r OK "Firmware: $want on the $chan channel"
+    else _r ISSUE "Firmware is still $FW_CUR_LABEL - the update to $want didn't complete"; fi
+    if [ "$mode" = keep ]; then
+        n=$(grep -c . /etc/dropbear/authorized_keys 2>/dev/null); : "${n:=0}"; p=$(_fw_st "$st" keys); : "${p:=0}"
+        if [ "$p" -gt 0 ]; then
+            [ "$n" -ge "$p" ] && _r OK "SSH keys: $n" || _r ISSUE "SSH keys: $n of $p came back - add them again in Network and VPN Tools → SSH Key Management"
+        fi
+        [ "$(_fw_st "$st" toolkit_kept)" = 1 ] && { toolkit_persistence_enabled && _r OK "Toolkit: still set to persist" || _r ISSUE "Toolkit: no longer set to persist - turn it on in Toolkit Management"; }
+        # the persistence service marks each firmware it has handled; still the old one = it never ran
+        if { [ -n "$(_fw_st "$st" lazarus)" ] || [ -n "$(_fw_st "$st" tweaks)" ] || [ -n "$(_fw_st "$st" fan_static)" ]; } \
+           && [ -f "${GLPERSIST_VERFILE:-/etc/glinet_utils/persist/glversion}" ] \
+           && [ "$(cat "${GLPERSIST_VERFILE:-/etc/glinet_utils/persist/glversion}" 2>/dev/null)" != "$(glpersist_curver 2>/dev/null)" ]; then
+            if [ "${GLPERSIST_KICKED:-0}" = 1 ]; then _r PENDING "Persistence service: didn't run at boot - running it now"
+            elif [ -f /tmp/.glpersist_pkgs.running ]; then :                       # running right now
+            elif [ "$up" -lt 300 ]; then _r PENDING "Persistence service: hasn't run yet"
+            else _r ISSUE "Persistence service didn't run after the update - relaunch the toolkit to run it"; fi
+        fi
+        if [ "$(_fw_st "$st" agh)" = running ]; then
+            if is_agh_running; then _r OK "AdGuardHome: running"
+            elif [ "$up" -lt 300 ]; then _r PENDING "AdGuardHome: still starting"
+            else _r ISSUE "AdGuardHome isn't running - the AdGuardHome Control Center (item 1) offers the fix"; fi
+        fi
+        for p in $(_fw_st "$st" limits); do
+            # a limit on a switched-off network can't shape anything - it's kept, and applies when it's on
+            t=$(uci -q show network 2>/dev/null | sed -n "s/^network\.\([^.]*\)\.device='$p'\$/\1/p" | head -1)
+            if [ -n "$t" ] && [ "$(uci -q get "network.$t.disabled" 2>/dev/null)" = 1 ] && grep -q "^$p|" "$NETLIMIT_CONF" 2>/dev/null; then
+                _r OK "Bandwidth limit: $p kept (its network is switched off)"
+            elif tc qdisc show dev "$p" 2>/dev/null | grep -q htb; then _r OK "Bandwidth limit: $p shaped"
+            elif [ "$up" -lt 180 ]; then _r PENDING "Bandwidth limit: $p not shaped yet"
+            else _r ISSUE "Bandwidth limit on $p isn't active - open Network and VPN Tools → Network Bandwidth Limiter"; fi
+        done
+        for p in $(_fw_st "$st" lazarus); do
+            if _pm_present "$p"; then _r OK "Re-installed: $p$( [ "$p" = stress ] && [ "$(_stress_backend)" = stress-ng ] && echo ' (as stress-ng)')"
+            elif grep -qx "pkg|$p|fail|nofeed" "$rpt" 2>/dev/null; then _r ISSUE "Didn't re-install: $p - this firmware's package feed doesn't offer it"
+            elif grep -q "^pkg|$p|fail" "$rpt" 2>/dev/null; then _r ISSUE "Didn't re-install: $p - install it again in System Tweaks → Package and Persistence Manager"
+            elif [ "$busy" = 1 ]; then _r PENDING "Re-installing: $p"
+            else _r ISSUE "Didn't re-install: $p - install it again in System Tweaks → Package and Persistence Manager"; fi
+        done
+        # OpenSpeedTest (kept whole): present, and serving again if it was on
+        case "$(_fw_st "$st" ost)" in
+            on)  if _ost_installed && _ost_running; then _r OK "OpenSpeedTest: serving"
+                 elif [ "$busy" = 1 ] || [ "$up" -lt 300 ]; then _r PENDING "OpenSpeedTest: not serving yet"
+                 elif ! command -v nginx >/dev/null 2>&1; then _r ISSUE "OpenSpeedTest isn't serving - nginx is missing and couldn't be re-installed"
+                 else _r ISSUE "OpenSpeedTest isn't serving - start it in System Benchmarks → OpenSpeedTest Server"; fi ;;
+            off) if _ost_installed; then _r OK "OpenSpeedTest: kept (off, as it was)"
+                 else _r ISSUE "OpenSpeedTest's files didn't come back - install it again"; fi ;;
+        esac
+        # kept as files: present AND able to start (a library it needs may not have come back)
+        local kb_ok="" 
+        for p in $(_fw_st "$st" kept_bins); do
+            n=${p%%:*}; t=${p#*:}
+            if [ ! -f "$t" ]; then _r ISSUE "Kept file missing: $n ($t) - install it again in System Tweaks → Package and Persistence Manager"
+            elif _fw_bin_runs "$t"; then kb_ok="${kb_ok:+$kb_ok, }$n"
+            else _r ISSUE "Kept but won't run on this firmware: $n (a library it needs is missing) - install it again in System Tweaks → Package and Persistence Manager"; fi
+        done
+        [ -n "$kb_ok" ] && _r OK "Kept and runs: $kb_ok"
+        if [ "$(_fw_st "$st" zram)" = on ]; then
+            if grep -q zram /proc/swaps 2>/dev/null; then _r OK "zram swap: on"
+            elif [ "$busy" = 1 ] || [ "$up" -lt 180 ]; then _r PENDING "zram swap: not on yet"
+            elif pkg_is_installed zram-swap && [ ! -e /dev/zram0 ] && ! grep -q '^zram ' /proc/modules 2>/dev/null; then
+                _r ISSUE "zram swap is off - the zram kernel module doesn't load on this firmware (a GL.iNet firmware issue)"
+            elif pkg_is_installed zram-swap; then _r ISSUE "zram swap is off - turn it on in System Tweaks → Manage Zram Swap"
+            else :; fi                          # not persisted -> listed under REMOVED below
+        fi
+        p=$(_fw_st "$st" fan_static)
+        if [ -n "$p" ]; then
+            n=$(( (p * 255 + 50) / 100 ))
+            if [ "$(cat "${FAN_PWM:-/sys/class/thermal/cooling_device0/cur_state}" 2>/dev/null)" = "$n" ] && ! _proc_running gl_fan; then
+                _r OK "Fan: held at $p%"
+            elif [ "$up" -lt 180 ] || [ "$busy" = 1 ]; then _r PENDING "Fan: not at $p% yet"
+            else _r ISSUE "Fan isn't held at $p% - set it again in System Tweaks → Device Fan Settings"; fi
+        fi
+        for t in $(_fw_st "$st" tweaks); do
+            if grep -qx "$t|ok" "$rpt" 2>/dev/null; then _r OK "Web-UI tweak restored: $(_glpersist_label "$t")"
+            elif [ "$busy" = 1 ]; then _r PENDING "Web-UI tweak: $(_glpersist_label "$t") not restored yet"
+            elif grep -qx "$t|fail" "$rpt" 2>/dev/null; then _r ISSUE "Web-UI tweak not restored: $(_glpersist_label "$t") - re-enable it in System Tweaks"
+            elif [ "$up" -lt 300 ]; then _r PENDING "Web-UI tweak: $(_glpersist_label "$t") not restored yet"
+            else _r ISSUE "Web-UI tweak not restored: $(_glpersist_label "$t") - re-enable it in System Tweaks"; fi
+        done
+    fi
+    sed -n 's/^lost=//p' "$st" | while IFS= read -r p; do printf 'REMOVED|%s\n' "$p"; done >> "$out"
+    # packages that might not survive: measured now - back (GL restores some of its own) or really gone
+    local back="" gone=""
+    for p in $(_fw_st "$st" lost_pkgs); do if _pm_present "$p" || command -v "$p" >/dev/null 2>&1; then back="$back $p"; else gone="$gone $p"; fi; done
+    [ -n "$back" ] && _r OK "Came back after the update:$(printf '%s' "$back" | sed 's/^ //; s/ /, /g; s/^/ /')"
+    [ -n "$gone" ] && printf 'REMOVED|Packages (%s): %s\n' "$(printf '%s' "$gone" | wc -w | tr -d ' ')" "$(printf '%s' "$gone" | sed 's/^ //; s/ /, /g')" >> "$out"
+    if [ "$iss" -gt 0 ]; then now=issues; elif [ "$pen" -gt 0 ]; then now=pending; else now=ok; fi
+    if [ "$FW_CUR_LABEL" != "$want" ]; then
+        now=failed
+        # the flash never happened - free what the attempt left in RAM (image + keep archive, 100+ MB)
+        [ -f /tmp/firmware.img ] && { rm -f /tmp/firmware.img /tmp/sysupgrade.tgz; _r ISSUE "The flash never started - removed its unused image and keep archive from memory"; }
+    fi
+    _fw_st_set "$st" status "$now"
+    { printf 'After the update - checked %s (router up %s min)\n' "$(_fw_now)" "$(( $(_fw_uptime) / 60 ))"
+      while IFS='|' read -r k v; do printf '  [%s] %s\n' "$k" "$v"; done < "$out" | _fw_wrap 88 4
+      printf 'Result: %s\n' "$(printf '%s' "$now" | tr 'a-z' 'A-Z')"; } >> "$log"
+    if [ "$show" = show ]; then
+        case "$now" in
+            failed) print_error "Firmware is still $FW_CUR_LABEL - the update to $want didn't complete" ;;
+            ok)     print_success "Firmware updated to $want on the $chan channel - everything came back ($okn checks)" ;;
+            *)      print_success "Firmware updated to $want on the $chan channel" ;;
+        esac
+        [ "$iss" -gt 0 ] && print_warning "$(grep '^ISSUE|' "$out" | cut -d'|' -f2- | _fw_wrap 84 2 | awk 'NR==1{printf "%s",$0; next}{printf "\\n%s",$0}')"
+        [ "$pen" -gt 0 ] && print_info "Still coming back - checked again later:\n$(grep '^PENDING|' "$out" | cut -d'|' -f2- | _fw_wrap 84 2 | awk 'NR==1{printf "%s",$0; next}{printf "\\n%s",$0}')"
+        grep -q '^REMOVED|' "$out" && print_info "Removed by the update (weren't set to persist):\n$(grep '^REMOVED|' "$out" | cut -d'|' -f2- | _fw_wrap 84 2 | awk 'NR==1{printf "%s",$0; next}{printf "\\n%s",$0}')"
+        [ "$now" != ok ] && print_info "Full report: System Tweaks → Firmware Update → View Update History"
+    fi
+    rm -f "$out"
+    FW_HEALTH="$now"
+}
+# Startup: re-check the latest update if it's waiting on a result (flashed, or still coming back).
+# Word-wrap stdin at <width>; a wrapped line's continuation gets its leading indent plus <extra> spaces.
+_fw_wrap() {   # <width> <extra>
+    awk -v w="$1" -v x="$2" '{ match($0, /^ */); lead = substr($0, 1, RLENGTH); ind = lead; for (j = 0; j < x; j++) ind = ind " "
+        n = split($0, a, " "); line = lead
+        for (i = 1; i <= n; i++) { if (line != lead && line != ind && length(line) + 1 + length(a[i]) > w) { print line; line = ind a[i] }
+                                   else line = (line == lead || line == ind) ? line a[i] : line " " a[i] }
+        print line }'
+}
+# Does a kept binary still START on this firmware? A missing library fails at load, before any option is
+# read (musl: "Error loading shared library" / "Error relocating", exit 127). Bounded - never hangs.
+_fw_bin_runs() {   # <binary>
+    local out rc
+    if command -v timeout >/dev/null 2>&1; then out=$(timeout 5 "$1" --version </dev/null 2>&1); rc=$?
+    else out=$("$1" --version </dev/null 2>&1); rc=$?; fi
+    { [ "$rc" = 126 ] || [ "$rc" = 127 ]; } && return 1
+    printf '%s' "$out" | grep -qiE 'error loading shared librar|error relocating|symbol not found' && return 1
+    return 0
+}
+_fw_post_check() {
+    local st; st=$(_fw_hist_latest); [ -n "$st" ] || return 0
+    case "$(_fw_st "$st" status)" in flashing|pending) _fw_health "$st" show; FW_HEALTH_SHOWN=1 ;; esac
+}
+_fw_status_disp() {   # <status> -> coloured word for the Last Update row
+    case "$1" in
+        ok)        printf '%bOK%b' "$GREEN" "$RESET" ;;
+        issues)    printf '%bISSUES%b' "$YELLOW" "$RESET" ;;
+        pending)   printf '%bPENDING%b' "$YELLOW" "$RESET" ;;
+        failed)    printf '%bFAILED%b' "$RED" "$RESET" ;;
+        flashing)  printf '%bNOT CHECKED%b' "$YELLOW" "$RESET" ;;
+        cancelled) printf '%bCANCELLED%b' "$GREY" "$RESET" ;;
+        *)         printf '%b%s%b' "$GREY" "$(printf '%s' "$1" | tr 'a-z' 'A-Z')" "$RESET" ;;
+    esac
+}
+_fw_history_view() {   # every recorded attempt, newest first, in the standard reader
+    # newest first, one blank line between attempts, none trailing
+    awk 'FNR == 1 && NR > 1 { print "" } { print }' $(ls -1 "$FW_HIST"/*.log 2>/dev/null | sort -r) \
+        | show_paged "Firmware Update History"
+}
+# In the Web-UI Terminal? (ttyd is an ancestor of this shell) - it drops during the flash like SSH.
+_fw_in_ttyd() {
+    local pid=$$ n=0 comm
+    while [ "$pid" -gt 1 ] 2>/dev/null && [ "$n" -lt 20 ]; do
+        comm=$(cat "${FW_PROC:-/proc}/$pid/comm" 2>/dev/null)
+        [ "$comm" = ttyd ] && return 0
+        pid=$(awk '{print $4}' "${FW_PROC:-/proc}/$pid/stat" 2>/dev/null); n=$((n + 1))
+    done
+    return 1
+}
+# Install a running-from-anywhere copy of the toolkit to $INSTALL_PATH and keep it across updates -
+# without the installer's restart (we're mid-flow). 0 only when the keep list really carries it.
+# Open the Package & Persistence Manager from Firmware Update: what the update would remove comes staged as
+# "Enable Persistence"; with an image size the manager also shows the Update Memory meter.
+_fw_open_persistence() {   # [image KB]
+    PM_FW_STAGE=1; PM_FW_IMAGE_KB="${1:-}"
+    manage_packages
+    unset PM_FW_STAGE PM_FW_IMAGE_KB
+    _fw_arch_bg_start        # what persists may have changed - measure it again while you head back
+}
+_fw_keep_toolkit() {
+    if [ ! -f "$INSTALL_PATH" ]; then
+        _is_toolkit_file "$SCRIPT_PATH" || return 1
+        cp "$SCRIPT_PATH" "$INSTALL_PATH" 2>/dev/null && chmod +x "$INSTALL_PATH" || return 1
+    fi
+    grep -qFx "$INSTALL_PATH" "$FW_KEEPCONF" 2>/dev/null || printf '%s\n' "$INSTALL_PATH" >> "$FW_KEEPCONF"
+    sysupgrade -l 2>/dev/null | grep -qxF "$INSTALL_PATH"
+}
+
+_fw_notes() {   # <row> - the build's release notes as plain text
+    local v s src j
+    v=$(_fw_field "$1" 10); s=$(_fw_field "$1" 11); src=$(_fw_field "$1" 12); j="$FW_TMP/$src.json"
+    jsonfilter -i "$j" -e "@.info[@.version=\"$v\" && @.stage=\"$s\"].release_note" 2>/dev/null | head -c 20000 \
+      | sed 's/<h[12][^>]*>/\n/g; s/<\/h[12]>/\n/g; s/<li[^>]*>/\n  • /g; s/<br[^>]*>/\n/g; s/<\/p>/\n/g; s/<[^>]*>//g' \
+      | sed "s/&amp;/\&/g; s/&lt;/</g; s/&gt;/>/g; s/&quot;/\"/g; s/&#39;/'/g; s/&nbsp;/ /g" \
+      | sed 's/[[:space:]]*$//' \
+      | awk '# squeeze blank runs + word-wrap at 76 (busybox cat cannot squeeze and has no fold applet);
+             # a wrapped line continues under its own text - past a bullet ("  • ") or leading indent
+             /^$/ { if (!blank) print ""; blank = 1; next }
+             { blank = 0; line = $0; pad = ""
+               match(line, /^ */); n = RLENGTH                     # leading spaces (no %*s in busybox awk)
+               if (substr(line, n + 1, 1) != " " && index(substr(line, n + 1), "• ") == 1) n += 2   # past "• "
+               for (k = 0; k < n; k++) pad = pad " "
+               w = 76
+               while (length(line) > w) { i = w; while (i > 1 && substr(line, i, 1) != " ") i--
+                                          if (i <= length(pad) + 1) i = w
+                                          print substr(line, 1, i - 1); line = pad substr(line, i + 1) }
+               print line }'
+}
+
+# The whole install flow for one catalogue build: summary -> (Web-UI Terminal warning) -> notes -> keep or
+# wipe -> what won't survive (+ keep the toolkit) -> record -> space -> download -> checksum -> signature ->
+# image test -> what happens next -> confirm -> countdown -> flash. Every step's result goes in the record.
+# The installed build's release date: its catalogue row (same version + build), else GL's own version.date.
+_fw_cur_date() {
+    local d; d=$(awk -F'|' -v v="${FW_CUR_VER%%-op*}" -v b="${FW_CUR_BUILD:-x}" '$10==v && $8==b {print $9; exit}' "$FW_TMP/cat" 2>/dev/null)
+    [ -n "$d" ] || d=$(cut -c1-10 "$FW_ETC/version.date" 2>/dev/null | grep -E '^[0-9]{4}-[0-9]{2}-[0-9]{2}$')
+    printf '%s' "$d"
+}
+_fw_from_line() { local d; d=$(_fw_cur_date); printf '%s v%s%s' "$FW_CUR_CHAN" "$FW_CUR_LABEL" "${d:+ - released $d}"; }
+_fw_to_line() {   # <row>
+    printf '%s v%s - released %s - %s MB' "$(_fw_field "$1" 1)" "$(_fw_field "$1" 2)" "$(_fw_field "$1" 9)" \
+        $(( ($(_fw_field "$1" 6) + 524288) / 1048576 ))
+}
+_fw_summary() {   # <row> - the From / To lines under the Firmware Update title: channel, version, then date
+    printf " %bFrom:%b  %s\n" "$CYAN" "$RESET" "$(_fw_from_line)"
+    printf " %bTo:%b    %s\n\n" "$CYAN" "$RESET" "$(_fw_to_line "$1")"
+}
+_fw_countdown() {   # 10 s to read what's on screen; Enter starts now, any other key cancels. 1 = cancelled.
+    local i=10 k rc tty=""
+    # no echo while counting: an echoed Enter moved the cursor down and left the countdown line behind
+    [ -t 0 ] && tty=$(stty -g 2>/dev/null) && stty -echo 2>/dev/null
+    while [ "$i" -gt 0 ]; do
+        printf "\r${BOLD}${CYAN}${_S_ACT}${RESET}${CYAN}Flashing in %2s s${RESET} - press Enter to start now, any other key to cancel " "$i"
+        k=""; rc=1
+        if [ -t 0 ]; then read -r -t 1 -n 1 k 2>/dev/null; rc=$?; else sleep 1; fi   # no terminal: just wait
+        # a stray key is fail-safe: only Enter (an empty read that didn't time out) skips ahead
+        [ -n "$k" ] && { printf "\r\033[K"; [ -n "$tty" ] && stty "$tty" 2>/dev/null; return 1; }
+        [ "$rc" = 0 ] && break
+        i=$((i - 1))
+    done
+    # without stty the Enter was echoed as a new line - step back up so the countdown line is cleared, not left
+    [ -z "$tty" ] && [ "$rc" = 0 ] && [ -t 0 ] && printf "\033[1A"
+    printf "\r\033[K"; [ -n "$tty" ] && stty "$tty" 2>/dev/null; return 0
+}
+_fw_install() {   # <row> [reinstall]
+    local row="$1" mode="${2:-}" chan lbl size dir keep=keep ans sig_rc parts log lan tl
+    chan=$(_fw_field "$row" 1); lbl=$(_fw_field "$row" 2); size=$(_fw_field "$row" 6); dir=$(_fw_direction "$row")
+    FW_STATE=""; FW_LOG=""
+    clear; print_centered_header "Firmware Update"; _fw_summary "$row"
+    case "$dir" in
+        SAME)      if [ "$mode" = reinstall ]; then print_info "This reinstalls $lbl, the build already on the router"
+                   else print_info "$lbl is already installed"; press_any_key; return; fi ;;
+        DOWNGRADE) print_warning "This is a downgrade - settings made on newer firmware may not carry back" ;;
+    esac
+    [ "$chan" != "$FW_CUR_CHAN" ] && print_info "This moves the router to the $chan channel"
+    # the Web-UI Terminal is killed by the flash like any shell, and only returns if ttyd persists
+    if _fw_in_ttyd; then
+        # it comes back when ttyd survives: in the firmware image, on the re-install list, or with the Web
+        # Terminal's own persistence (glinet_persist re-installs it after the update)
+        if [ -f /rom/usr/lib/opkg/info/ttyd.control ] || grep -qx 'P:ttyd' /rom/lib/apk/db/installed 2>/dev/null; then
+            print_warning "This Web-UI Terminal disconnects when the flash starts and returns after updating\n(ttyd is part of the firmware)"
+        elif glpersist_is_on ttyd || grep -qxF ttyd "$(_lazlist)" 2>/dev/null; then
+            print_warning "This Web-UI Terminal disconnects when the flash starts and returns after updating\n(Web Terminal persistence is on)"
+        else
+            print_warning "This Web-UI Terminal disconnects when the flash starts and won't return after updating\n(Web Terminal persistence is off - use SSH, or turn it on first)"
+        fi
+        printf "Continue in the Web-UI Terminal? [y/N]: "; read -r ans; printf "\n"
+        case "$ans" in y|Y) ;; *) return ;; esac
+    fi
+    # Keep settings is the default; wiping takes a second, explicit confirmation.
+    printf "Keep settings? [Y/n]: "; read -r ans; printf "\n"
+    case "$ans" in
+        n|N) keep=wipe
+             _fw_at_risk wipe > "$FW_TMP/risk"
+             print_warning "Wiping returns the router to GL.iNet's first-time setup and erases:"
+             _fw_risk_rows "$FW_TMP/risk"; printf "\n"
+             print_info "To get the toolkit back afterwards, run on the router:\nwget -O glinet_utils.sh https://raw.githubusercontent.com/phantasm22/GL-iNet_utils/main/glinet_utils.sh && sh glinet_utils.sh"
+             printf "Wipe all settings? This can't be undone [y/N]: "; read -r ans; printf "\n"
+             case "$ans" in y|Y) ;; *) return ;; esac ;;
+        *)   spin_run "Checking what persists" _fw_risk_scan keep; cp "$FW_TMP/risk.keep" "$FW_TMP/risk"
+             if [ -s "$FW_TMP/risk" ]; then
+                 print_warning "These aren't set to persist and may not survive the update:"
+                 _fw_risk_rows "$FW_TMP/risk"; printf "\n"
+                 # the fix, not just the warning: the Package & Persistence Manager with these staged
+                 printf "Persist them across the update? [Y/n]: "; read -r ans; printf "\n"
+                 case "$ans" in
+                     n|N) : ;;
+                     *) _fw_open_persistence "$(( (size + 1023) / 1024 ))"
+                        clear; print_centered_header "Firmware Update"; _fw_summary "$row"
+                        spin_run "Checking what persists" _fw_risk_scan keep; cp "$FW_TMP/risk.keep" "$FW_TMP/risk"
+                        if [ -s "$FW_TMP/risk" ]; then
+                            print_warning "Still not set to persist - may not survive the update:"
+                            _fw_risk_rows "$FW_TMP/risk"; printf "\n"
+                        else
+                            print_success "Everything the toolkit manages is set to persist"
+                        fi ;;
+                 esac
+             else
+                 print_success "Everything the toolkit manages is set to persist"
+             fi ;;
+    esac
+
+    # from here on every step is recorded (View Update History, and the check after the update)
+    _fw_begin "$row" "$keep" "$FW_TMP/risk"
+    # memory: the image AND the keep archive sit in RAM, and running services count against it
+    local img_kb=$(( (size + 1023) / 1024 )) kept_kb=0 mrc host
+    [ "$keep" = keep ] && { spin_run "Measuring what persists" _fw_arch_kb; kept_kb=$(tr -dc '0-9' < "$SPIN_LOG"); }
+    _fw_record_commit                       # measured - now the attempt's record can join the (kept) history
+    printf "\n"; _fw_mem_meter "$img_kb" "${kept_kb:-0}"; mrc=$?; printf "\n"
+    # tight is PROVEN to work (see the table above _fw_mem_reserve_kb) - only "won't fit" offers to stop services
+    if [ "$mrc" = 2 ]; then
+        _fw_mem_hogs > "$FW_TMP/hogs"
+        if [ -s "$FW_TMP/hogs" ]; then
+            print_info "These free memory for the update and start again when the router restarts:\n$(awk -F'|' '{printf "%s%s (%d MB)", (NR>1 ? "\\n" : ""), $2, ($3 + 1023) / 1024}' "$FW_TMP/hogs")"
+            printf "Stop them for the update? [Y/n]: "; read -r ans; printf "\n"
+            case "$ans" in n|N) : ;;
+                *) host=$(_fw_field "$row" 4 | sed 's|^[a-z]*://||; s|/.*||')
+                   spin_run "Stopping them for the update" _fw_stop_hogs "$FW_TMP/hogs" "$host"
+                   FW_STOPPED=$(tr '\n' ' ' < "$FW_TMP/hogs.stopped" 2>/dev/null)
+                   [ -s "$FW_TMP/hogs.running" ] && print_info "Left running (the router needs it to reach GL.iNet): $(awk '{printf "%s%s", (NR>1 ? ", " : ""), $0}' "$FW_TMP/hogs.running")"
+                   _fw_log "  stopped for the update:$FW_STOPPED"
+                   printf "\n"; _fw_mem_meter "$img_kb" "${kept_kb:-0}"; mrc=$?; printf "\n" ;;
+            esac
+        fi
+    fi
+    _fw_log "  memory: $(_fw_mb "$FW_MEM_NEED") MB needed of $(_fw_mb "$FW_MEM_FREE") MB free (image $(_fw_mb "$img_kb") + kept $(_fw_mb "${kept_kb:-0}"))"
+    if [ "$mrc" = 2 ]; then
+        _fw_end failed "[FAILED] not enough free memory: $(_fw_mb "$FW_MEM_NEED") MB needed, $(_fw_mb "$FW_MEM_FREE") MB free"
+        fail_report "Not enough free memory to flash safely, so nothing was changed" "" \
+            "Restart the router and update before starting other services, or set large items\n(backups, AdGuardHome) not to persist in the Package & Persistence Manager"
+        press_any_key; return
+    fi
+    _fw_log "  [OK] free memory for the update"
+    if ! _fw_download "$(_fw_field "$row" 4)" "$size"; then
+        rm -f "$FW_IMG"; _fw_end failed "[FAILED] download incomplete (curl rc ${FW_DL_RC:-?}) from $(_fw_field "$row" 4)"
+        fail_report "The firmware didn't download completely, so nothing was changed" "" "Check the router's internet connection, then retry"
+        press_any_key; return
+    fi
+    _fw_log "  [OK] downloaded $(_fw_field "$row" 3) ($size bytes)"
+    if ! spin_run "Verifying the checksum" _fw_verify_sha "$(_fw_field "$row" 5)"; then
+        rm -f "$FW_IMG"; _fw_end failed "[FAILED] checksum doesn't match GL.iNet's ($(_fw_field "$row" 5))"
+        fail_report "The download doesn't match GL.iNet's checksum, so nothing was changed" "" "Retry - the file was damaged in transit"
+        press_any_key; return
+    fi
+    _fw_log "  [OK] sha256 matches GL.iNet's"
+    spin_run "Verifying GL.iNet's signature" _fw_verify_sig; sig_rc=$?
+    case "$sig_rc" in
+        0) _fw_log "  [OK] signed by GL.iNet (usign, /etc/key-build.pub)" ;;
+        1) rm -f "$FW_IMG"; _fw_end failed "[FAILED] not signed by GL.iNet"
+           fail_report "The image isn't signed by GL.iNet, so nothing was changed"; press_any_key; return ;;
+        2) _fw_log "  [SKIPPED] signature - this router has no GL.iNet signing key"
+           print_warning "This router has no GL.iNet signing key, so the signature can't be checked" ;;
+    esac
+    if ! spin_run "Checking the image against this router" _fw_image_test "$keep"; then
+        log=$(tail -3 "$SPIN_LOG" 2>/dev/null); rm -f "$FW_IMG"
+        _fw_end failed "[FAILED] sysupgrade -T rejected the image: $(printf '%s' "$log" | tr '\n' ' ')"
+        if [ "$keep" = keep ] && printf '%s' "$log" | grep -qi 'config'; then
+            fail_report "This build can't keep the current settings, so nothing was changed" "$log" "Pick another build, or update again and choose not to keep settings"
+        else
+            fail_report "sysupgrade rejected this image for this router, so nothing was changed" "$log"
+        fi
+        press_any_key; return
+    fi
+    _fw_log "  [OK] sysupgrade -T accepted the image$( [ "$keep" = keep ] && echo ' with settings kept')"
+    print_success "Firmware verified: complete download, checksum, signature and compatibility"
+    parts=$(_fw_reset_parts)
+    if [ "$keep" = keep ] && [ -n "$parts" ]; then
+        print_info "GL.iNet resets these with this build: $(printf '%s' "$parts" | tr '\n' ' ')"
+        _fw_log "  GL.iNet resets with this build: $(printf '%s' "$parts" | tr '\n' ' ')"
+    fi
+
+    # what happens next - on screen BEFORE the prompt, so nothing depends on the session surviving
+    printf "\n"
+    lan=$(uci -q get network.lan.ipaddr 2>/dev/null)
+    if [ "$keep" = keep ]; then
+        print_info "What happens next:\n1. The router flashes $lbl and reboots - about 5 minutes, keep the power on\n2. This session closes; reconnect to ${lan:-the router} when it's back\n3. Start the toolkit again - it checks the update and reports anything that didn't come back"
+    else
+        print_info "What happens next:\n1. The router flashes $lbl and reboots - about 5 minutes, keep the power on\n2. This session closes; every setting is gone - browse to GL.iNet's default address\n   (usually 192.168.8.1) and complete the first-time setup"
+    fi
+    printf "Flash the firmware now? [y/N]: "; read -r ans; printf "\n"
+    case "$ans" in y|Y) ;; *) rm -f "$FW_IMG"; _fw_end cancelled "[CANCELLED] at the final confirmation"; return ;; esac
+    if ! _fw_countdown; then rm -f "$FW_IMG"; _fw_end cancelled "[CANCELLED] during the countdown"; return; fi
+    _fw_st_set "$FW_STATE" status flashing; _fw_st_set "$FW_STATE" flashed "$(_fw_now)"; _fw_st_set "$FW_STATE" flashed_at "$(date +%s)"
+    _fw_log "  flash started $(_fw_now)"
+    [ "$keep" = keep ] && [ -n "$parts" ] && printf '%s\n' "$parts" | while read -r p; do [ -n "$p" ] && rm -f "$p"; done
+    uci -q set upgrade.general.prompt='1'; uci -q commit upgrade
+    print_action "Flashing $lbl - the connection closes when the router reboots"
+    stty sane 2>/dev/null
+    local slog=/tmp/.fw_sysupgrade.log spid n=0 m
+    sync
+    # A dropped session must not abort the hand-off: sysupgrade prints "Commencing upgrade" and only THEN
+    # hands the flash to procd (OpenWrt 25.12). A closed SSH session killed it on .3.1 (2026-09-29): nothing
+    # flashed, the image and a 53 MB keep archive left in RAM. Dropbear ends a session with TERM (ignoring
+    # HUP alone wasn't enough - measured), so sysupgrade runs in its own session (setsid) with HUP/INT/PIPE/
+    # TERM ignored, writing to its log, and the screen follows the log - the flash carries on if we drop.
+    local ss=""; command -v setsid >/dev/null 2>&1 && ss=setsid
+    local vmark="" vfile="${GLPERSIST_VERFILE:-/etc/glinet_utils/persist/glversion}"
+    if [ "$dir" = SAME ] && [ -f "$vfile" ]; then vmark=$(cat "$vfile" 2>/dev/null); printf 'reinstall' > "$vfile"; sync; fi
+    : > "$slog"
+    if [ "$keep" = wipe ]; then ( trap '' HUP INT PIPE TERM; exec $ss sysupgrade -n "$FW_IMG" ) </dev/null >"$slog" 2>&1 &
+    else ( trap '' HUP INT PIPE TERM; exec $ss sysupgrade "$FW_IMG" ) </dev/null >"$slog" 2>&1 & fi
+    spid=$!
+    while kill -0 "$spid" 2>/dev/null; do
+        m=$(grep -c '' "$slog" 2>/dev/null); [ "${m:-0}" -gt "$n" ] && { sed -n "$((n + 1)),${m}p" "$slog"; n=$m; }
+        sleep 1
+    done
+    sed -n "$((n + 1)),\$p" "$slog"
+    # "Commencing upgrade" is the real signal. Older OpenWrt never returns from sysupgrade (the reboot
+    # ends the session); OpenWrt 25.12+ hands the flash to procd and RETURNS - often with a ubus
+    # "Connection failed" as the system shuts down - while the flash carries on. Measured on a
+    # BE14000 going 4.11.0 -> 4.9.1 (2026-09-27): treating that return as a refusal was a false failure.
+    if grep -q 'Commencing upgrade' "$slog" 2>/dev/null; then
+        print_info "The router is flashing $lbl - reconnect in about 5 minutes"
+        sleep 600; exit 0                  # the reboot closes this session
+    fi
+    # it never started - record why and say so
+    [ -n "$vmark" ] && printf '%s' "$vmark" > "$vfile"
+    _fw_log "  sysupgrade output: $(tr '\n' ' ' < "$slog" 2>/dev/null)"
+    _fw_end failed "[FAILED] sysupgrade didn't start the flash"; rm -f "$slog" "$FW_IMG"
+    fail_report "sysupgrade didn't start the flash, so the firmware is unchanged" "" "Check the router's log (logread), then retry"
+    press_any_key
+}
+
+# Choose a Build: every build GL offers this model in ONE paged list, channels as section headings (the Lists
+# Manager pattern - a channel may run across pages), newest first, up to 10 per channel. Single select: the
+# installed build starts selected as "No Change" (so [R] always has a build); pressing it again - or picking
+# it after another build - makes it "Reinstall" (re-flash the same build, e.g. a damaged firmware partition);
+# pressing a selected other build again returns to the installed one. [C] runs the flash flow (_fw_install).
+_fw_pick_head() {   # <channel> - its section heading: one word (a table L2 heading never runs under a column)
+    case "$1" in STABLE) echo Stable ;; BETA) echo Beta ;; NIGHTLY) echo Nightly ;; RC) echo RC ;;
+                 "OPENWRT 25") echo OpenWrt25 ;; "OPENWRT 24") echo OpenWrt24 ;; *) echo "$1" | tr -d ' ' ;; esac
+}
+_fw_pick() {
+    local map="$FW_TMP/pick" per=12 page=1 pages total start end sel="" inst="" reinst=0 ans row idx chan lastc
+    local lbl dir box act acol div foot hn
+    if [ ! -s "$FW_TMP/cat" ]; then   # never a dead end: no catalogue -> fetch it again, report the result
+        spin_run "Checking GL.iNet's firmware catalogue" _fw_catalog; _fw_update_state
+        [ -s "$FW_TMP/cat" ] || { fail_report "Couldn't reach GL.iNet's firmware server" "" "Check the router's internet connection, then retry"; press_any_key; return; }
+    fi
+    for chan in STABLE BETA NIGHTLY RC "OPENWRT 25" "OPENWRT 24"; do
+        awk -F'|' -v c="$chan" '$1==c' "$FW_TMP/cat" | head -10
+    done | awk '{print NR "|" $0}' > "$map"
+    total=$(grep -c . "$map"); : "${total:=0}"
+    [ "$total" -gt 0 ] || { print_info "GL.iNet publishes no builds for this model"; press_any_key; return; }
+    while IFS='|' read -r idx row; do
+        row=$(sed -n "${idx}p" "$map" | cut -d'|' -f2-)
+        [ "$(_fw_direction "$row")" = SAME ] && { inst=$idx; break; }
+    done < "$map"
+    sel=$inst
+    pages=$(( (total + per - 1) / per ))
+    [ -n "$inst" ] && page=$(( (inst - 1) / per + 1 ))
+    foot=" [P] Previous   Page 1 of 1   [N] Next   [#] Select   [R] Release Notes   [C] Confirm   [0] Back   [?] Help"
+    div=$(awk -v n="${#foot}" 'BEGIN{s=" ";for(i=1;i<n;i++)s=s"─";print s}')
+    while true; do
+        start=$(( (page - 1) * per + 1 )); end=$(( page * per )); [ "$end" -gt "$total" ] && end=$total
+        clear; print_centered_header "Choose a Build"
+        printf "       %-7s %-30s %-11s %-8s %s\n" "Select" "Version" "Released" "Size" "Planned Action"
+        printf "%s\n" "$div"
+        lastc=""
+        sed -n "${start},${end}p" "$map" | while IFS='|' read -r idx row; do
+            chan=$(printf '%s' "$row" | cut -d'|' -f1)
+            if [ "$chan" != "$lastc" ]; then
+                [ -n "$lastc" ] && printf "\n"
+                printf " %b%s%b\n" "$HDR2" "$(_fw_pick_head "$chan")" "$RESET"; lastc=$chan
+            fi
+            box="  [ ]  "; [ "$idx" = "$sel" ] && box="  [✓]  "
+            lbl=$(_fw_field "$row" 2); hn=""; [ "$idx" = "$inst" ] && hn=" (installed)"
+            act="No Change"; acol="$GREY"
+            if [ "$idx" = "$sel" ]; then
+                if [ "$idx" = "$inst" ]; then [ "$reinst" = 1 ] && { act="> Reinstall"; acol="$GREEN"; }
+                else
+                    dir=$(_fw_direction "$row")
+                    case "$dir" in DOWNGRADE) act="> Downgrade"; acol="$YELLOW" ;; *) act="> Update"; acol="$GREEN" ;; esac
+                fi
+            fi
+            printf " %-5s %s %-30s %b%-11s %-8s%b %b%s%b\n" "$idx." "$box" "$lbl$hn" "$BLUE" "$(_fw_field "$row" 9)" \
+                "$(( ($(_fw_field "$row" 6) + 524288) / 1048576 )) MB" "$RESET" "$acol" "$act" "$RESET"
+        done
+        printf "%s\n" "$div"
+        printf " [P] Previous   Page %s of %s   [N] Next   [#] Select   [R] Release Notes   [C] Confirm   [0] Back   [?] Help\n" "$page" "$pages"
+        printf "\n Choose [%s-%s/P/N/R/C/0/?]: " "$start" "$end"
+        read -r ans; printf "\n"
+        case "$ans" in
+            p|P) [ "$page" -gt 1 ] && page=$((page - 1)) ;;
+            n|N) [ "$page" -lt "$pages" ] && page=$((page + 1)) ;;
+            r|R) if [ -z "$sel" ]; then print_info "Select a build first"; sleep 1
+                 else row=$(sed -n "${sel}p" "$map" | cut -d'|' -f2-)
+                      _fw_notes "$row" | show_paged "Release Notes - $(_fw_field "$row" 2)"; fi ;;
+            c|C) if [ -z "$sel" ] || { [ "$sel" = "$inst" ] && [ "$reinst" != 1 ]; }; then
+                     print_info "No changes to apply"; sleep 1
+                 else row=$(sed -n "${sel}p" "$map" | cut -d'|' -f2-)
+                      if [ "$sel" = "$inst" ]; then _fw_install "$row" reinstall; else _fw_install "$row"; fi
+                      return; fi ;;
+            0) return ;;
+            \?|h|H|❓) show_firmware_help ;;
+            ''|*[!0-9]*) print_error "Invalid option"; sleep 1 ;;
+            *) if [ "$ans" -lt "$start" ] || [ "$ans" -gt "$end" ]; then print_error "Invalid option"; sleep 1; continue; fi
+               if [ "$ans" = "$sel" ]; then
+                   if [ "$ans" = "$inst" ]; then reinst=$((1 - reinst)); else sel=$inst; reinst=0; fi
+               else
+                   sel=$ans; reinst=0; [ "$ans" = "$inst" ] && reinst=1   # chosen deliberately -> Reinstall
+               fi ;;
+        esac
+    done
+}
+
+manage_firmware() {
+    local ans reach=0 need upd_label fw_ok=1 t
+    mkdir -p "$FW_TMP"
+    # the tools GL's own pipeline relies on - without them there is no safe way to flash (menu rule 1)
+    for t in sysupgrade sha256sum jsonfilter; do command -v "$t" >/dev/null 2>&1 || fw_ok=0; done
+    clear; print_centered_header "Firmware Update"
+    _fw_cur
+    if [ "$fw_ok" = 1 ] && [ ! -s "$FW_TMP/cat" ]; then
+        spin_run "Checking GL.iNet's firmware catalogue" _fw_catalog
+    fi
+    [ -s "$FW_TMP/products.json" ] && FW_NAME=$(jsonfilter -i "$FW_TMP/products.json" -e "@.info[@.code=\"$(_fw_model)\"].name" 2>/dev/null | head -1)
+    _fw_update_state
+    [ "$fw_ok" = 1 ] && spin_run "Checking what persists" _fw_risk_scan keep
+    # the last update is still coming back (packages re-installing, services starting) - check it again
+    local _ls; _ls=$(_fw_hist_latest)
+    if [ -n "$_ls" ] && [ "$(_fw_st "$_ls" status)" = pending ]; then
+        spin_run "Re-checking the last update" _fw_health "$_ls"
+    fi
+    while true; do
+        # the slow "what persists" measurement, (re)started whenever this menu draws: on entry, and after any
+        # action that changed what persists (a cancelled attempt adds its record to the kept history, the
+        # Package Manager changes the persisted set) - a no-op when the set is already measured or measuring
+        [ "$fw_ok" = 1 ] && _fw_arch_bg_start
+        clear; print_centered_header "Firmware Update"
+        _fwrow() { printf "   %-17s%b\n" "$1" "$2"; }   # sub-rows below share the value column
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        _fwrow "Model:" "${BLUE}${FW_NAME:-$(_fw_model | tr 'a-z' 'A-Z')}${RESET}"
+        _fwrow "Channel:" "$(printf '%b%s%b' "$(_fw_chan_color "$FW_CUR_CHAN")" "$FW_CUR_CHAN" "$RESET")"
+        printf "     %-15s%b\n" "Version:" "${BLUE}${FW_CUR_LABEL}${RESET}"
+        printf "     %-15s%b\n" "Update:" "$(_fw_upd_disp)"
+        need=$(awk -F'|' '$1=="Packages" {n += split($2, a, ", "); next} NF {n++} END {print n+0}' "$FW_TMP/risk.keep" 2>/dev/null); : "${need:=0}"   # each package counts
+        if [ "$need" -gt 0 ]; then
+            _fwrow "Not Persisted:" "$(printf '%b%s ITEM%s%b' "$YELLOW" "$need" "$([ "$need" = 1 ] || echo S)" "$RESET")"
+            _fw_risk_rows "$FW_TMP/risk.keep"
+        else
+            _fwrow "Not Persisted:" "${GREEN}NONE${RESET}"
+        fi
+        _ls=$(_fw_hist_latest)
+        [ -n "$_ls" ] && _fwrow "Last Update:" "$(_fw_status_disp "$(_fw_st "$_ls" status)") ($(_fw_st "$_ls" when | cut -c1-16), $(_fw_st "$_ls" to))"
+        printf "\n"
+        if [ "$fw_ok" != 1 ]; then
+            print_warning "This firmware lacks the tools needed to flash safely (sysupgrade, sha256sum, jsonfilter)"
+            printf "%s%sBack\n" "$N0" "$NSEP"; printf "%s Help\n" "$NQ"
+            printf "\nChoose [0/?]: "; read -r ans; printf "\n"
+            case "$ans" in \?|h|H|❓) show_firmware_help ;; *) rm -rf "$FW_TMP"; return ;; esac
+            continue
+        fi
+        # one permanent slot, labelled by context (the AGH / Toolkit update pattern)
+        if [ "$FW_UPD" = AVAILABLE ]; then upd_label="Update to $(_fw_field "$FW_UPD_ROW" 2)"; else upd_label="Check for Updates"; fi
+        printf "%s%s%s\n" "$N1" "$NSEP" "$upd_label"
+        printf "%s%sChoose a Build\n" "$N2" "$NSEP"
+        printf "%s%sManage Persistence\n" "$N3" "$NSEP"
+        # history is the LAST item, so it can be left out while there is none (menu rule 3)
+        if [ -n "$_ls" ]; then printf "%s%sView Update History\n" "$N4" "$NSEP"; fi
+        printf "%s%sBack\n" "$N0" "$NSEP"
+        printf "%s Help\n" "$NQ"
+        if [ -n "$_ls" ]; then printf "\nChoose [1-4/0/?]: "; else printf "\nChoose [1-3/0/?]: "; fi
+        read -r ans; printf "\n"
+        [ -z "$_ls" ] && [ "$ans" = 4 ] && ans=x
+        case "$ans" in
+            1) if [ "$FW_UPD" = AVAILABLE ]; then _fw_install "$FW_UPD_ROW"; spin_run "Checking what persists" _fw_risk_scan keep
+               else
+                   spin_run "Checking for firmware updates" _fw_catalog; _fw_update_state
+                   case "$FW_UPD" in
+                       UPTODATE)  print_success "The firmware is up to date ($FW_CUR_LABEL, $FW_CUR_CHAN)" ;;
+                       AVAILABLE) print_info "$(_fw_field "$FW_UPD_ROW" 2) is available - choose Update to $(_fw_field "$FW_UPD_ROW" 2)" ;;
+                       *) if [ -s "$FW_TMP/cat" ]; then print_info "GL.iNet publishes no $FW_CUR_CHAN builds for this model - use Choose a Build"
+                          else fail_report "Couldn't reach GL.iNet's firmware server" "" "Check the router's internet connection, then retry"; fi ;;
+                   esac
+                   press_any_key
+               fi ;;
+            2) _fw_pick; spin_run "Checking what persists" _fw_risk_scan keep ;;
+            # the Package & Persistence Manager, with what an update would remove staged; the meter uses the
+            # update on offer (if any) for its image size
+            3) _fw_open_persistence "$( [ -n "$FW_UPD_ROW" ] && echo $(( ($(_fw_field "$FW_UPD_ROW" 6) + 1023) / 1024 )) )"
+               spin_run "Checking what persists" _fw_risk_scan keep ;;
+            4) _fw_history_view ;;
+            \?|h|H|❓) show_firmware_help ;;
+            0) rm -rf "$FW_TMP"; return ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
+show_firmware_help() {
+    show_paged "Firmware Update - Help" << 'HELPEOF'
+Firmware Update - Quick Help
+
+What it does
+────────────
+Updates the router's firmware from GL.iNet's own download catalogue - the
+latest build in the current channel, another channel, or an older build
+(a downgrade) - with the same safety checks GL.iNet's web interface uses,
+plus a few more.
+
+The status block
+────────────────
+  • Channel - the firmware track the router is on: STABLE, BETA, NIGHTLY,
+    RC, OPENWRT 25 or OPENWRT 24. Version and Update belong to it.
+  • Update - UP TO DATE, AVAILABLE (with the build), or UNKNOWN when GL.iNet's
+    server can't be reached.
+  • Not Persisted - what an update would remove, measured from the router's
+    own keep list: the toolkit, its features and settings (Web Terminal, fan,
+    switch indicator, limits, OpenSpeedTest, AdGuardHome, SSH keys, backups)
+    and Package Manager packages that aren't set to persist - including ones
+    the current firmware came with, since the next firmware may not. GL.iNet's
+    own add-ons, and helpers the toolkit re-installs by itself, aren't listed.
+  • Last Update - the result of the most recent update attempt.
+
+Actions
+───────
+  • Update to <build> / Check for Updates - the newest build in the current
+    channel, or a fresh check when there's nothing newer.
+  • Choose a Build - every build GL.iNet offers this router in one list,
+    grouped by channel (newest first, up to 10 each). The installed build starts
+    selected; [#] picks another (an older one is a downgrade) and [R] shows the
+    selected build's release notes. Picking the installed build again makes it
+    Reinstall - a re-flash of the same build, for a damaged firmware partition.
+  • Manage Persistence - the Package & Persistence Manager, with everything
+    an update would remove staged to persist, and the Update Memory meter.
+  • View Update History - every update attempt, newest first: what was
+    true before it, each check and its result, and what came back after.
+
+How an update runs
+──────────────────
+Keep settings is the default; not keeping them wipes the router back to
+first-time setup and asks a second time. Then, each step checked before the
+next. First what the update would remove, with the choice to persist it (the
+Package & Persistence Manager, pre-staged). Then memory: the image and the
+persisted files both sit in RAM during the flash, and running services count
+against it - the Update Memory meter shows the fit. Amber cells mean it's
+close, which is still fine (measured on real flashes). When it says "won't
+fit", it offers to stop services such as Tailscale or AdGuardHome (they start
+again with the reboot, or straight away if the update doesn't happen); if it
+still won't fit, the update is stopped. Then the download, GL.iNet's checksum,
+GL.iNet's signature, and OpenWrt's own image test (right board; settings compatible).
+Only then does it say what happens next and ask to flash, followed by a
+10-second countdown (Enter starts now, any other key cancels). The router reboots and is unreachable for
+about 5 minutes - keep the power on. In the Web-UI Terminal it warns first:
+the terminal disconnects too, and only returns if ttyd persists.
+
+After the update
+────────────────
+The next time the toolkit starts it checks the update against what was true
+before it: the firmware, SSH keys, AdGuardHome, bandwidth limits, zram swap,
+the fan, packages on the re-install list (and why one didn't come back),
+programs kept as files (they must still run) and Web-UI tweaks. Last Update
+shows the result - OK, ISSUES (something didn't come back), PENDING (still
+coming back; checked again later) or FAILED. The toolkit itself must survive
+the update to do this - it's the first row offered to keep. Details are in View
+Update History.
+
+Not offered: CLEAN (a plain OpenWrt image without GL.iNet's interface) and
+LEGACY builds - use GL.iNet's Download Center for those.
+HELPEOF
+}
+
 system_tweaks() {
     while true; do
         clear
@@ -13238,9 +15076,10 @@ system_tweaks() {
         printf "%s%sPackage and Persistence Manager\n" "$N5" "$NSEP"
         printf "%s%sPackage System Repair\n" "$N6" "$NSEP"
         printf "%s%sToolkit Management\n" "$N7" "$NSEP"
+        printf "%s%sFirmware Update\n" "$N8" "$NSEP"
         printf "%s%sMain Menu\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        printf "\nChoose [1-7/0/?]: "
+        printf "\nChoose [1-8/0/?]: "
         read -r st_choice
         printf "\n"
         case $st_choice in
@@ -13251,6 +15090,7 @@ system_tweaks() {
             5) manage_packages ;;
             6) repair_package_system ;;
             7) manage_toolkit ;;
+            8) manage_firmware ;;
             \?|h|H|❓) show_system_tweaks_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -13290,9 +15130,10 @@ Benchmark Categories:
 
 Technical Details:
 ──────────────────
-• Stress Testing: The script uses 'stress' primarily. If it is missing, it falls
-  back to 'stress-ng' ONLY on kernel 6.6+; on older kernels stress-ng is withheld
-  because a memory-pressure kernel bug can hard-crash the router there.
+• Stress Testing: One 'stress' tool whose engine follows the kernel: the
+  'stress' package below kernel 6.6, stress-ng from 6.6 (stress-ng can hard-crash
+  older kernels, so it's never used there). A firmware update that crosses 6.6
+  switches the engine when the tool is re-installed.
 • Baselines: The VPN & Crypto Benchmark is a leaderboard - its "vs yours"
   column compares saved devices to the one you are on. Disk and Memory tests
   use a fixed Beryl 7 (0.0%) reference point.
@@ -13366,7 +15207,7 @@ HELPEOF
 # ---- LibreSpeed feature-lifecycle callbacks + flows (drive the shared _lc_* helpers) --
 # Accessors (not top-level vars) so they survive the e2e function-extraction and set -u.
 _ls_port()          { printf '%s' "8989"; }
-_ls_paths()         { printf '%s' "/usr/bin/librespeed-go /etc/init.d/librespeed-go /etc/config/librespeed-go"; }
+_ls_paths()         { printf '%s' "/etc/config/librespeed-go"; }   # config only - the program is re-installed
 # The service's rc.d boot-enable symlink(s). Persisted ALONGSIDE the static paths so the
 # service auto-starts after a keep-settings firmware upgrade - without it the binary/init/
 # config survive but the boot symlink does not, so the service comes back SERVICE DOWN
@@ -13377,6 +15218,7 @@ _ls_enabled()       { [ "$(uci -q get librespeed-go.config.enabled 2>/dev/null)"
 _ls_service_up()    { { netstat -ltn 2>/dev/null || ss -ltn 2>/dev/null; } | grep -q ":$(_ls_port) "; }
 _ls_persist_is_on() {
     local p c; c=$(_glpersist_keepconf)
+    grep -qxF librespeed-go "$(_lazlist)" 2>/dev/null || return 1
     for p in $(_ls_paths); do grep -qFx "$p" "$c" 2>/dev/null || return 1; done
     return 0
 }
@@ -13413,6 +15255,8 @@ _ls_uninstall() {
     pkg_remove librespeed-go >/dev/null 2>&1
     for p in $(_ls_paths); do _glpersist_keep_del "$p"; done
     for l in $rcsyms; do _glpersist_keep_del "$l"; done
+    # off the re-install list too - an uninstalled package mustn't come back after a firmware update
+    _conf_del "$(_lazlist)" librespeed-go; _glpersist_pkgs_sync >/dev/null 2>&1
     return 0
 }
 _ls_reinstall_pkg() { pkg_install librespeed-go >/dev/null 2>&1 || install_package librespeed-go >/dev/null 2>&1; return 0; }
@@ -13454,11 +15298,12 @@ _ls_toggle_persistence() {
     local p l
     if _ls_persist_is_on; then
         for p in $(_ls_paths); do _glpersist_keep_del "$p"; done
-        for l in $(_ls_rcd_syms); do _glpersist_keep_del "$l"; done
+        for l in $(_ls_rcd_syms); do _glpersist_keep_del "$l"; done   # older versions kept these too
+        _conf_del "$(_lazlist)" librespeed-go; _glpersist_pkgs_sync
         _persist_msg off "LibreSpeed"
     else
         for p in $(_ls_paths); do _glpersist_keep_add "$p"; done
-        for l in $(_ls_rcd_syms); do _glpersist_keep_add "$l"; done
+        _conf_add "$(_lazlist)" librespeed-go; create_lazarus_hook
         _persist_msg on "LibreSpeed"
     fi
 }
@@ -13782,23 +15627,16 @@ benchmark_system() {
                 clear
                 print_centered_header "CPU Thermal Stress Test"
                 
-                if ! command -v stress >/dev/null 2>&1; then
-                    install_package stress
-                    if ! command -v stress >/dev/null 2>&1; then
-                        # stress-ng can hard-crash routers on kernels < 6.6 - never fall back to it there.
+                # one stress tool - the backend follows the kernel (stress below 6.6, stress-ng from 6.6)
+                if ! _stress_installed; then
+                    if ! _stress_install; then
                         if _stressng_unsafe; then
-                            print_error "Could not install 'stress', and 'stress-ng' can crash this router's kernel (a pre-6.6 kernel bug), so it isn't used here"
-                            press_any_key
-                            continue
-                        fi
-                        install_package stress-ng
-                        if ! command -v stress-ng >/dev/null 2>&1; then
-                            print_error "Could not install a CPU stress tool"
-                            press_any_key
-                            continue
+                            print_error "Could not install 'stress' (stress-ng isn't used on this kernel - it can crash kernels before 6.6)"
                         else
-                            ln -s "$(which stress-ng)" /usr/bin/stress
+                            print_error "Could not install a CPU stress tool"
                         fi
+                        press_any_key
+                        continue
                     fi
                 fi
 
@@ -13838,7 +15676,7 @@ benchmark_system() {
                 start_fan_str=$(get_fan_speed)
                 
                 printf "\n"
-                countdown_run "Stress testing $stress_what" "$duration" stress --cpu "$cpu_logical" --timeout "${duration}s"
+                countdown_run "Stress testing $stress_what" "$duration" "$(_stress_cmd)" --cpu "$cpu_logical" --timeout "${duration}s"
 
                 raw_end=$(get_cpu_temp)
                 end_temp_str=$(get_temp)
@@ -14799,8 +16637,12 @@ start() {
     /usr/sbin/nginx -c $OST_CONFIG_PATH
 }
 stop() {
+    local pid i=0
     if [ -s $OST_PID_FILE ]; then
-        kill \$(cat $OST_PID_FILE) 2>/dev/null
+        pid=\$(cat $OST_PID_FILE)
+        kill \$pid 2>/dev/null
+        # wait for it to exit - otherwise restart's start() still sees :$OST_PORT in use and refuses
+        while kill -0 \$pid 2>/dev/null && [ \$i -lt 10 ]; do sleep 1; i=\$((i + 1)); done
         rm -f $OST_PID_FILE
     fi
 }
@@ -14980,9 +16822,12 @@ _ost_persist_set() {
     # Always clear first (idempotent): the static paths + any rc.d enable symlink we added.
     for p in "$OST_INSTALL_DIR" "$OST_STARTUP_SCRIPT" "$OST_CONFIG_PATH"; do _glpersist_keep_del "$p"; done
     for l in $(find "$rcdir/" -name "[SK]*$svc" 2>/dev/null); do _glpersist_keep_del "$l"; done
+    [ "$on" = 1 ] || { glpersist_is_on ost 2>/dev/null && glpersist_disable ost >/dev/null 2>&1; }
     if [ "$on" = 1 ]; then
         for p in "$OST_INSTALL_DIR" "$OST_STARTUP_SCRIPT" "$OST_CONFIG_PATH"; do _glpersist_keep_add "$p"; done
         for l in $(find "$rcdir/" -name "[SK]*$svc" 2>/dev/null); do _glpersist_keep_add "$l"; done
+        # glinet_persist puts nginx back after an update on a firmware without it (_glpersist_ost_restore)
+        glpersist_is_on ost 2>/dev/null || glpersist_enable ost >/dev/null 2>&1
         [ "$quiet" = quiet ] || _persist_msg on "OpenSpeedTest"
     else
         [ "$quiet" = quiet ] || _persist_msg off "OpenSpeedTest"
@@ -15191,11 +17036,67 @@ if [ -f "$AGH_INIT" ]; then
     unset _aghcfg
 fi
 
-# Safety: stress-ng can hard-crash routers on kernels < 6.6. If a previous version left it in the boot
-# re-install list (persisted via the Package Manager), drop it on a susceptible kernel so it cannot
-# crash-loop the router on the next firmware upgrade.
-if _stressng_unsafe && [ -f /etc/lazarus.list ]; then
+# Self-heal persistence set up by older versions (silent, idempotent):
+#  - packages on the re-install list move to glinet_persist (the old one-shot hook never survived an update)
+#  - a limiter service without the ifup hook / minute check is regenerated - shaping keeps running (no restart)
+if [ -s /etc/lazarus.list ] && ! { [ -x "$GLPERSIST_INIT" ] && grep -qxF /etc/lazarus.list /etc/sysupgrade.conf 2>/dev/null; }; then
+    _glpersist_pkgs_sync >/dev/null 2>&1
+fi
+if netlimit_any_limited 2>/dev/null && [ ! -x "${NETLIMIT_HOTPLUG:-/etc/hotplug.d/iface/60-netlimit}" ]; then
+    { netlimit_service_write; "$NETLIMIT_INIT" enable; netlimit_cron_sync; netlimit_persist_sync; } >/dev/null 2>&1
+fi
+#  - the limiter's minute check outlived the limiter (GL keeps crontabs across an update; the limiter
+#    wasn't set to persist) - drop the orphan line
+if [ ! -x "${NETLIMIT_INIT:-/etc/init.d/netlimit}" ] && grep -qF '/etc/init.d/netlimit verify' /etc/crontabs/root 2>/dev/null; then
+    netlimit_cron_sync >/dev/null 2>&1
+fi
+#  - the persistence service missed a firmware change (it didn't run at boot): refresh it and run it now
+if glpersist_any 2>/dev/null && [ -f "$GLPERSIST_VERFILE" ] && [ "$(cat "$GLPERSIST_VERFILE" 2>/dev/null)" != "$(glpersist_curver)" ] \
+   && [ "$(_fw_uptime)" -ge 300 ] && ! pgrep -f 'webui-persist-run' >/dev/null 2>&1; then
+    _glpersist_install_service >/dev/null 2>&1
+    ( sh "$INSTALL_PATH" --webui-persist-run >/dev/null 2>&1 & ); GLPERSIST_KICKED=1
+fi
+
+# Persistence moved to RE-INSTALL (2026-09-29): a package an older version kept as its program file becomes a
+# re-install entry with its config kept; the old program/init lines are dropped (they broke across firmware).
+_mig=0; for _b in $(_pm_utility_db | awk -F'|' '$3=="R"{print $2}'); do grep -qxF "$_b" /etc/sysupgrade.conf 2>/dev/null && _mig=1; done
+if [ "$_mig" = 1 ]; then
+    _pm_utility_db | while IFS='|' read -r _n _b _t _c; do
+        [ "$_t" = R ] && grep -qxF "$_b" /etc/sysupgrade.conf || continue
+        sed -i "\|^$_b\$|d" /etc/sysupgrade.conf
+        for _p in $_c; do grep -qxF "$_p" /etc/sysupgrade.conf || echo "$_p" >> /etc/sysupgrade.conf; done
+        grep -qxF "$_n" /etc/lazarus.list 2>/dev/null || echo "$_n" >> /etc/lazarus.list
+    done
+    sed -i '\|^/etc/init.d/librespeed-go$|d; \|^/etc/init.d/zram$|d; \|/[SK][0-9]*librespeed-go$|d' /etc/sysupgrade.conf 2>/dev/null
+    _glpersist_pkgs_sync >/dev/null 2>&1
+fi
+# OpenSpeedTest's service script from an older version: its stop() didn't wait for nginx to exit, so a restart
+# refused ("port in use") - rewrite it (only the script; boot link and running state untouched)
+if [ -f "$OST_STARTUP_SCRIPT" ] && ! grep -q 'wait for it to exit' "$OST_STARTUP_SCRIPT" 2>/dev/null; then _ost_write_init; fi
+# OpenSpeedTest persisted by an older version: register it with glinet_persist (nginx safeguard after updates)
+if _ost_persisted 2>/dev/null && ! glpersist_is_on ost 2>/dev/null; then glpersist_enable ost >/dev/null 2>&1; fi
+# the services' on/off record, refreshed once this firmware's re-install pass has finished
+if [ -s /etc/lazarus.list ] && [ ! -f /tmp/.glpersist_pkgs.running ] \
+   && [ "$(cat "$GLPERSIST_VERFILE" 2>/dev/null)" = "$(glpersist_curver 2>/dev/null)" ]; then
+    _glpersist_svc_snapshot >/dev/null 2>&1
+fi
+# stress is ONE tool now (backend by kernel, re-installed after updates). Older versions persisted stress-ng
+# on the re-install list, or kept /usr/bin/stress(-ng) as a file - both become "stress" on the list. That
+# also keeps stress-ng off kernels before 6.6 (it can crash them): "stress" re-installs the kernel's backend.
+if [ -f /etc/lazarus.list ] && grep -qx 'stress-ng' /etc/lazarus.list; then
     sed -i '/^stress-ng$/d' /etc/lazarus.list 2>/dev/null
+    grep -qx stress /etc/lazarus.list || echo stress >> /etc/lazarus.list
+fi
+# /usr/bin/stress matches the kernel (a stress-ng installed without our link gets one; a stress-ng link on a
+# pre-6.6 kernel goes) - cheap, every launch
+_stress_link >/dev/null 2>&1
+# package-size caches left by sessions that ended without their exit trap (a dropped SSH session)
+for _f in /tmp/.glinet_pkgsizes.* /tmp/.glinet_fwarch.*; do [ -e "$_f" ] || continue; [ -d "/proc/${_f##*.}" ] || rm -f "$_f"; done
+for _f in /tmp/.fw_keeplist.*.* /tmp/.fw_keepsize.*; do [ -e "$_f" ] || continue; _p=${_f#/tmp/.fw_keep*.}; [ -d "/proc/${_p%%.*}" ] || rm -f "$_f"; done
+if grep -qxE '/usr/bin/stress(-ng)?' /etc/sysupgrade.conf 2>/dev/null; then
+    sed -i '\|^/usr/bin/stress$|d; \|^/usr/bin/stress-ng$|d' /etc/sysupgrade.conf 2>/dev/null
+    grep -qx stress /etc/lazarus.list 2>/dev/null || echo stress >> /etc/lazarus.list
+    _glpersist_pkgs_sync >/dev/null 2>&1
 fi
 
 
@@ -15258,6 +17159,7 @@ show_menu() {
 # -----------------------------
 # Start
 # -----------------------------
+_fw_post_check                # one-time: confirm a firmware update from Firmware Update really took
 _glpersist_show_report        # one-time report if a firmware update re-applied Web-UI tweaks
 keycap_first_run_prompt       # one-time macOS Terminal keycap-gap calibration (mac profile only)
 # ALWAYS the last startup step: the menu clears the screen, so hold 2 s when any startup item printed a

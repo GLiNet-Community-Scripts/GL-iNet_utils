@@ -4,6 +4,112 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-10-03
+- **New: Firmware Update (System Tweaks ▸ 8).** Update the router's firmware from GL.iNet's own
+  download catalogue, with the same safety checks as GL.iNet's web interface plus several more.
+  - **STATUS** shows the model, the firmware **Channel** (STABLE, BETA, NIGHTLY, RC, OPENWRT 25,
+    OPENWRT 24) with its **Version** and **Update** state, **Not Persisted** (what an update would NOT
+    keep, measured from the router's own keep list) and the **Last Update** result.
+  - **Update to <build> / Check for Updates**, **Choose a Build**, **Manage Persistence** and **View
+    Update History**. Choose a Build lists every build GL.iNet offers the router on one paged screen,
+    grouped by channel: the installed build starts selected, [#] picks another (an older one is a
+    downgrade), [R] shows its release notes, and picking the installed build again re-flashes it
+    (Reinstall - for a damaged firmware partition; persisted packages are re-installed afterwards too).
+  - **Keep settings is the default**; wiping lists everything that goes and asks a second time.
+  - Before flashing it lists what may not survive the update: the toolkit itself, its features and settings
+    (Web Terminal, fan, switch indicator, limits, OpenSpeedTest, an updated AdGuardHome, SSH keys,
+    backups) and Package Manager packages not set to persist (including ones the current firmware came
+    with - the next one may not) - then offers to persist them, opening the
+    Package & Persistence Manager with exactly those staged. GL.iNet's own add-ons, and helpers the toolkit
+    re-installs by itself, aren't listed.
+  - **Update Memory meter.** The image and the kept files both sit in RAM during a flash, and running
+    services count against it. The meter shows the fit (amber cells when it's close, "won't fit" in red)
+    against a red line measured on real flashes (a Mango 2 with Tailscale running flashes fine close to
+    the limit). What persists is measured for real (the same archive the flash packs), started in the
+    background when Firmware Update opens and remembered until what persists changes - so it's usually
+    ready before you need it. When it won't fit it
+    offers to stop services such as Tailscale or AdGuardHome, which start again with the reboot - or
+    straight away if the update doesn't happen; if it still won't fit, the update stops before downloading.
+  - A dropped SSH or Web-UI Terminal session can no longer abort the flash at the hand-off, and an
+    attempt that never flashed frees its image from memory.
+  - Every step is checked before the next (memory, download, checksum, signature, image test). Then it
+    shows what happens next, asks to flash and counts down 10 seconds (Enter starts now, any other key
+    cancels). In the Web-UI Terminal it warns first and says whether the terminal comes back. It offers
+    to keep the toolkit itself across the update.
+  - **After the update**, the next start checks the router against what was true before: SSH keys,
+    AdGuardHome, bandwidth limits, zram, the fan's static speed, re-installed packages, and each package
+    that wasn't persisted (did it come back or not), and Web-UI tweaks. Each one reads OK, ISSUE (with
+    where to fix it), PENDING (still coming back, checked again later) or REMOVED. If the persistence
+    service missed the update, the next start runs it and says so. Every attempt, cancelled or failed
+    ones too, is kept in View Update History.
+- **Fixed: persisted packages now really come back after a firmware update.** Packages set to persist
+  in the Package and Persistence Manager (zram, LibreSpeed, Tailscale…) relied on a one-shot hook that
+  ran at the next reboot of any kind and then deleted itself. It was never kept by an update, and it ran
+  before the network was up. Re-installing now belongs to the toolkit's persistence service: it's kept
+  from the moment you persist a package, waits for the network after an update, re-installs what's
+  missing, and reports each package on the next launch.
+- **Persisting a package now means re-installing it, with its settings kept.** Keeping a program's file
+  across a firmware update broke when the new firmware changed libraries (four of nine tools stopped
+  running in testing), so every package the firmware's feed offers is re-installed after an update,
+  built for that firmware, while its settings files are kept (e.g. Tailscale's login). Only the Ookla
+  speedtest and speedtest-go, which no feed offers, are still kept as files. A service you had switched
+  off stays off after the re-install. Existing setups are moved over automatically.
+- **OpenSpeedTest is kept whole across firmware updates**, and if a new firmware doesn't include nginx
+  (which serves it) nginx is re-installed afterwards and OpenSpeedTest started again. Restarting
+  OpenSpeedTest no longer fails with "port 8888 already in use".
+- **Fixed: bandwidth limits survive reboots.** On newer firmware the network comes up after the limiter
+  started, and some firmware services clear interface queues later in boot, so limits could silently
+  disappear. Limits are now re-applied whenever their interface comes up, and checked every minute (only
+  missing ones are re-applied, and each repair is logged). Persisted limits also come back after a
+  firmware update. Thanks again to mikeyjmatthews.
+- **Fixed: a static fan speed survives reboots.** Setting a static speed used to last only until the
+  next boot. It's now stored and held at boot ("kept across reboots"), and Enable Dynamic Fan Control
+  undoes it. GL's fan controller is now fully stopped before the speed is set (it used to overwrite the
+  speed while shutting down), and with fan persistence on the speed also survives firmware updates. Fan persistence (for firmware updates) now accepts a static speed instead of asking you to
+  set a value you already had. The screen spells out what persistence means: reboot-safe either way; this
+  is about firmware upgrades.
+- **Package & Persistence Manager: one place for what survives an update.** A new Features page
+  lists the toolkit itself, the Web Terminal, fan settings, the switch indicator, bandwidth limits,
+  OpenSpeedTest, an updated AdGuardHome, SSH keys and backups - each toggling the same setting as its own
+  screen. A Persist line shows how much an update carries, and Storage shows the free space - both as they
+  will be once you Confirm, the way the AdGuardHome meter shows a change live. A package persisted by
+  re-installing says "(via reinstall)": only its settings are carried, so it barely moves Persist. The
+  help now explains persistence correctly (it's about firmware updates, not reboots).
+- **The Package & Persistence Manager is two pages** (Packages, then Features) so it fits a
+  normal terminal: [N] Next / [P] Previous, and only the numbers on screen are accepted. [A] All and
+  [Z] None (it was [N], which is now Next) act on the current page - All on Packages marks everything to
+  install and persist in one key. [S] Sort works on both pages. Package sizes are measured once per
+  session, so opening it again takes about 2 seconds instead of 7-8. The page line sits just above the
+  prompt, with the actions above it, the same order as every other paged screen.
+- **Section headings are lilac** (they were a yellow-green that looked like the warning colour on some
+  terminals), and headings inside a table are one word so they never read as a column label: the
+  Lists Manager's "Your Other Lists" is now "Other". Display Settings says [P] Previous like every
+  other pager.
+- **AdGuardHome Lists Manager works while AdGuardHome is off.** A warning at the top says what happens:
+  if it's SERVICE DOWN, Confirm applies the lists and starts it (and if it won't start with a heavy
+  selection, points at memory as the likely cause); if it's DISABLED, Confirm asks whether to enable it,
+  or just saves the lists for later. The Memory Impact meter stays; the "lists downloading" line no
+  longer shows while nothing can download.
+- **Fixed: adding lists to a factory-fresh AdGuardHome config broke it.** GL.iNet's factory config.yaml
+  lays out its lists differently from AdGuardHome's own files, and adding a list produced a file
+  AdGuardHome refused to start with (the previous config was put back, so nothing was lost). The lists
+  section is now brought to one layout before any change.
+- After a firmware update, a package that couldn't be re-installed says why (the new firmware's feed
+  doesn't offer it, or it failed to install), and programs kept as files are checked to still run.
+- "Press any key" now takes any key on terminals without stty (it needed Enter).
+- **stress is one tool** in the Package Manager: its engine follows the kernel (the stress package below
+  6.6, stress-ng from 6.6 - stress-ng can crash older kernels), shown as "stress (stress-ng)" when that's
+  the engine. It's persisted by re-installing, so a firmware update that crosses 6.6 switches the engine.
+- Removing a package from the re-install list now removes that exact name only.
+- **A package's Size includes what it pulls in.** A not-installed package now counts the dependencies
+  it would install (Tailscale was shown as 3.4M on an MT1300; with tailscaled it's 9.6M), so the Storage
+  line and the install's free-space check are honest about the space it needs.
+- Long messages break between words onto an indented second line instead of wrapping mid-word, lists
+  inside a message (the services an update would stop) line up under the first item, and release
+  notes indent a wrapped bullet under its text.
+- The persistence service no longer depends on the toolkit file being executable, and reports a fan
+  held at its static speed separately from the fan's Web-UI tweak.
+
 ## 2026-09-26_21:20
 - **AdGuardHome Control Center: status reads like every other screen.** The status area is now one
   STATUS list — one fact per row, in the same coloured words the rest of the toolkit uses

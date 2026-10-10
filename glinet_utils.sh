@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-10-03
+# Version: 2026-10-05
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -376,7 +376,7 @@ SPLASH="
 # Global Variables
 # -----------------------------
 AGH_INIT="/etc/init.d/adguardhome"
-AGH_DISABLED=0  # 0 = Available, 1 = Missing/Uninstalled
+AGH_DISABLED=0  # 0 = available, 1 = not in this firmware (NOT SUPPORTED), 2 = in /rom but its startup script is missing
 SPIN_LOG="/tmp/.glnet-op.$$"   # scratch log captured from spin_run output
 opkg_updated=0
 SCRIPT_URL="https://raw.githubusercontent.com/phantasm22/GL-iNet_utils/refs/heads/main/glinet_utils.sh"
@@ -1230,6 +1230,11 @@ _session_cleanup() {
     # result file again
     [ -n "${FW_ARCH_PID:-}" ] && _fw_kill_tree "$FW_ARCH_PID" 2>/dev/null
     rm -f "$PKG_SIZE_CACHE" "$FW_ARCH_CACHE" /tmp/.fw_keeplist."$$".* 2>/dev/null
+    # every other per-session scratch file (most are removed after use; this catches an interrupted one).
+    # Not /tmp/.agh_prerestore.$$ - that's the undo copy while a restore runs
+    rm -f "$SPIN_LOG" /tmp/.agh_cfgreads."$$" /tmp/.agh_update_check."$$" /tmp/.nl_ifset_verify."$$" /tmp/.probe."$$" \
+          /tmp/.glpage."$$" /tmp/.dsw."$$".* /tmp/.rlm."$$".* /tmp/.rlam."$$".* 2>/dev/null
+    rm -rf /tmp/.glfw."$$" 2>/dev/null
 }
 
 terminal_restore() {
@@ -1476,20 +1481,44 @@ show_changelog() {
     # Render newest-first (drop the intro before the first header). When behind,
     # emit a grey boundary rule just before the first entry that is <= your
     # version, so everything above the rule is new to you.
-    awk -v local="$local_ver" -v behind="$behind" -v g="$GREY" -v r="$RESET" '
+    # Each entry: "## <version>" -> L1 cyan, "### <section>" (What's New / Bug Fixes) -> L2 lilac,
+    # "#### <feature>" -> indented plain text with its items indented under it (the layout picked from a
+    # side-by-side mock, 2026-10-04: the indent separates features better than a third colour could).
+    # Markdown bold markers are dropped. Each line is tagged for the pager: H = heading (a page never ends
+    # on one), S = a unit starts here (a page may start on it), C = continuation of the unit above.
+    # Lines are wrapped between words to fit the window (an item's wrapped lines sit under its text), so a
+    # long changelog line never breaks mid-word.
+    awk -v local="$local_ver" -v behind="$behind" -v g="$GREY" -v c="$CYAN" -v h="$HDR2" -v r="$RESET" '
+        function cp(s,   t) { t = s; return length(s) - gsub(/[\200-\277]/, "", t) }
+        function emit(kind, prefix, text, pad,   n, w, i, line) {   # prefix + text, wrapped at 106 columns
+            n = split(text, w, " "); line = ""
+            for (i = 1; i <= n; i++) {
+                if (line == "") line = w[i]
+                else if (cp(prefix line " " w[i]) <= 106) line = line " " w[i]
+                else { print kind "|" prefix line; kind = "C"; prefix = pad; line = w[i] }
+            }
+            print kind "|" prefix line
+        }
         /^## / {
             seen = 1
             if (behind && !marked && ($2 "") <= (local "")) {
-                printf " %s─────────────────────  your version: %s  ─────────────────────%s\n\n", g, local, r
+                print "H| " g "─────────────────────  your version: " local "  ─────────────────────" r
+                print "H|"
                 marked = 1
             }
-            print; next
+            print "H| " c $2 r; next
         }
-        seen { print }
+        !seen { next }
+        /^### /  { print "H| " h substr($0, 5) r; next }
+        /^#### / { print "H|   " substr($0, 6); next }
+        { gsub(/\*\*/, "") }
+        /^- /    { emit("S", "   - ", substr($0, 3), "     "); next }
+        /^$/     { print "C|"; next }
+        { match($0, /^ */); ind = "   " substr($0, 1, RLENGTH); emit("C", ind, substr($0, RLENGTH + 1), ind) }
     ' "$cl_file" > "$cl_rn"
     rm -f "$cl_file"
 
-    total=$(wc -l < "$cl_rn" 2>/dev/null)
+    total=$(wc -l < "$cl_rn" 2>/dev/null | tr -d ' \t')   # BSD wc pads the count
     case "$total" in ''|*[!0-9]*) total=0 ;; esac
     if [ "$total" -eq 0 ]; then
         rm -f "$cl_rn"
@@ -1504,16 +1533,18 @@ show_changelog() {
     esac
 
     # Page-start line numbers, snapped so a page never breaks mid-bullet: fill up
-    # to plines lines, then back the cut up to the nearest header/bullet/rule so a
-    # wrapped bullet's continuation lines stay with it. Hard-cuts only if a single
-    # unit is taller than one page.
-    starts=$(awk -v plines="$plines" '
-        { safe[NR] = ($0 ~ /^## / || $0 ~ /^- / || index($0, "your version:")) ? 1 : 0 }
+    # to plines lines, back the cut up to the nearest unit start so a wrapped
+    # bullet's continuation lines stay with it, then back past any headings just
+    # above it so a heading always starts the next page with its first item.
+    # Hard-cuts only if a single unit is taller than one page.
+    starts=$(awk -F'|' -v plines="$plines" '
+        { k[NR] = $1 }
         END {
             total = NR; s = 1; printf "%d", s
             while (s + plines <= total) {
                 cut = s + plines
-                while (cut > s + 1 && !safe[cut]) cut--
+                while (cut > s + 1 && k[cut] == "C") cut--
+                while (cut > s + 1 && k[cut - 1] == "H") cut--
                 if (cut <= s + 1) cut = s + plines
                 printf " %d", cut
                 s = cut
@@ -1525,13 +1556,14 @@ show_changelog() {
 
     page=1
     while :; do
-        start=$(echo "$starts" | cut -d' ' -f"$page")
-        nstart=$(echo "$starts" | cut -d' ' -f"$((page + 1))")
+        # awk, not cut: `cut -f2` of a one-field line prints the whole line, so a one-page change log
+        # ended at line 0 and showed only its first line
+        start=$(echo "$starts" | awk -v f="$page" '{print $f}')
+        nstart=$(echo "$starts" | awk -v f="$((page + 1))" '{print $f}')
         if [ -n "$nstart" ]; then end=$((nstart - 1)); else end=$total; fi
         clear
         print_centered_header "Change Log"
-        printf "\n"
-        sed -n "${start},${end}p" "$cl_rn"
+        sed -n "${start},${end}p" "$cl_rn" | cut -d'|' -f2-
         printf " ──────────────────────────────────────────────────────────────────────────────\n"
 
         # House pager footer: [P] Previous  <chips|Page X/Y>  [N] Next  [U]?  [0] label.
@@ -1669,8 +1701,11 @@ show_paged() {
         # which matches every other screen - so no extra printf '\n' here (that was a second gap).
         # `sed '/./,$!d'` drops any leading blank lines of THIS page's slice (some help bodies, e.g.
         # the Hardware pages, open with a blank line) so the body starts right under that one gap.
+        # The awk drops its trailing blank lines too (a body ending on a blank line, or a section break
+        # falling at the page end): the footer adds the one blank line, the divider needs none.
         clear; print_centered_header "$title"
-        sed -n "${start},${end}p" "$body" | sed '/./,$!d' | sed 's/^/ /'    # indent body 1 col to align with the divider/footer
+        sed -n "${start},${end}p" "$body" | sed '/./,$!d' | awk '/^[ \t]*$/ { nb++; next } { while (nb > 0) { print ""; nb-- } print }' \
+            | sed 's/^/ /'    # indent body 1 col to align with the divider/footer
         if [ "$pages" -le 1 ]; then
             printf '\n %b[0] %s   (or any key)%b ' "$GREY" "$exitlbl" "$RESET"; _pg_key >/dev/null; printf '\n'; break
         fi
@@ -3314,9 +3349,10 @@ _agh_install_build() {   # <new-binary> <config-backup-ts> <config> <start: 1|0>
 # and re-checked whenever either file changes.)
 _agh_reads_cfg() {   # <binary> <config>
     local f="/tmp/.agh_cfgreads.$$" key r
-    # identity: the binary's listing (size + date) and the config's CONTENT (cksum - catches two edits
-    # within one second); both portable (busybox and the test host)
-    key="$(ls -ln "$1" 2>/dev/null | awk '{print $5"."$6$7$8}'):$1:$(cksum < "$2" 2>/dev/null | awk '{print $1"."$2}'):$2"
+    # identity: the binary's listing (size + date) and the config's CONTENT (md5sum - catches two edits
+    # within one second). Not cksum: GL's busybox has none, so the content dropped out of the key and a
+    # changed config.yaml reused the old answer
+    key="$(ls -ln "$1" 2>/dev/null | awk '{print $5"."$6$7$8}'):$1:$(md5sum < "$2" 2>/dev/null | cut -c1-32):$2"
     r=$(grep -F "$key " "$f" 2>/dev/null | tail -1 | awk '{print $NF}')
     if [ -z "$r" ]; then _agh_cfg_ok_for "$1" "$2" && r=1 || r=0; echo "$key $r" >> "$f"; fi
     [ "$r" = 1 ]
@@ -3593,7 +3629,7 @@ Risks if you remove it without mitigation
 
 Strong recommendation
 ─────────────────────
-Enable **zram swap** first (Advanced Settings → Zram Swap → Install & Enable).
+Enable zram swap first (Advanced Settings → Zram Swap → Install and Enable).
 Zram gives fast compressed swap in RAM, greatly reduces memory pressure,
 and is safe for most GL.iNet 512MB devices. The Lists Manager also offers to
 enable zram automatically when a selection would run memory high.
@@ -4909,6 +4945,9 @@ STATUS: AdGuardHome reads ENABLED (running), DISABLED (you turned it off) or
    SERVICE DOWN (switched on but not running). Config reads MISSING when
    config.yaml is gone. Direct UI Access shows whether the dashboard has its own
    address - when it does, the address is listed on the next row.
+   On a router whose firmware has no AdGuardHome it reads NOT SUPPORTED and only
+   offers the Main Menu; if its startup script is missing it reads MISSING, and
+   Reset to Factory Settings restores it.
 
 SERVICE: Item 1 follows the state - Enable or Disable the daemon, Restart it
    when it is switched on but not running, or Recover Configuration when
@@ -5685,6 +5724,41 @@ get_agh_stats() {
     agh_chan=$(agh_channel "$v_num")
 }
 
+# The Control Center when AdGuardHome can't run (menu rule 1 - never a dead end): STATUS says why, one
+# warning, and the one thing that can help. Not in this firmware at all -> NOT SUPPORTED, Back only.
+# In /rom but its startup script is missing (the start-up repair was cancelled or failed) -> MISSING, and
+# Reset to Factory Settings restores it from /rom.
+_agh_unavailable_screen() {
+    local ch
+    while true; do
+        clear; print_centered_header "AdGuardHome Control Center"
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        if [ "$AGH_DISABLED" = 2 ]; then
+            printf "   AdGuardHome:  %bMISSING%b (startup script)\n\n" "$RED" "$RESET"
+            print_warning "AdGuardHome's startup script is missing - Reset to Factory Settings restores it"
+            printf "%s%sReset to Factory Settings\n" "$N1" "$NSEP"
+            printf "%s%sMain Menu\n" "$N0" "$NSEP"
+            printf "%s Help\n" "$NQ"
+            printf "\nChoose [1/0/?]: "
+        else
+            printf "   AdGuardHome:  %bNOT SUPPORTED%b\n\n" "$GREY" "$RESET"
+            print_warning "This router's firmware doesn't include AdGuardHome"
+            printf "%s%sMain Menu\n" "$N0" "$NSEP"
+            printf "%s Help\n" "$NQ"
+            printf "\nChoose [0/?]: "
+        fi
+        read -r ch; printf "\n"
+        case "$ch" in
+            1) [ "$AGH_DISABLED" = 2 ] || { print_error "Invalid option"; sleep 1; continue; }
+               sub_confirm_factory_reset
+               if [ -f "$AGH_INIT" ]; then AGH_DISABLED=0; agh_control_center; return; fi ;;
+            0) return ;;
+            \?|h|H|❓) show_agh_help ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+}
+
 agh_control_center() {
     if _agh_upd_unchecked; then
         clear; print_centered_header "AdGuardHome Control Center"
@@ -6317,7 +6391,7 @@ manage_fan_settings() {
         printf "\033[K\n"
 
         if [ "$has_fan" = "false" ]; then
-            print_warning "Fan settings are disabled on fanless hardware.\033[K"
+            print_warning "Fan settings are disabled on fanless hardware\033[K"
             printf "%s%sBack\033[K\n" "$N0" "$NSEP"
             printf "\nChoose [0/?]: \033[K"
         else
@@ -7281,10 +7355,10 @@ Per-network options
     network reads UP while any band is up, DOWN once all are off; single-interface networks (a
     wired VLAN) toggle as a whole. A guest / IoT network that's also fed by a wired or tagged VLAN
     port (e.g. to a VLAN-aware access point) stays UP with every band off - the ports are listed
-    under If-State as Wired/VLAN, and switching its bands off never takes those ports down. A switched-off network offers only "Bring interface(s) UP",
-    since limits and router access don't apply until it's up. The LAN and VPN tunnels are never
-    toggled here. Turning bands on/off briefly re-applies Wi-Fi, so other wireless may drop for
-    a moment.
+    under If-State as Wired/VLAN, and switching its bands off never takes those ports down. A
+    switched-off network offers only "Bring interface(s) UP", since limits and router access don't
+    apply until it's up. The LAN and VPN tunnels are never toggled here. Turning bands on/off
+    briefly re-applies Wi-Fi, so other wireless may drop for a moment.
 HELPEOF
 }
 
@@ -7565,7 +7639,7 @@ _netlimit_build_map() {
 }
 
 manage_netlimit() {
-    local _div; _div=$(awk 'BEGIN{s="";for(i=0;i<89;i++)s=s"─";print s}')
+    local _div; _div=$(awk 'BEGIN{s="";for(i=0;i<90;i++)s=s"─";print s}')   # = the widest row (dot = 2 cells)
     clear; print_centered_header "Network Bandwidth Limiter"
     # Self-heal on open: clear any shaping orphaned on a network with no configured limit (leftover
     # from a version change / diverged config), so the screen reflects the config, not stale kernel state.
@@ -8040,7 +8114,7 @@ Status + actions (the menu is context-aware - it shows only what applies)
 • Reinstall: the fix for SERVICE DOWN - re-writes the backend, restarts it, and
   re-injects the overlay. Also handy after a firmware upgrade resets the panel.
   (Shown only when SERVICE DOWN.)
-• Set toggle button function: assign what the switch does (No Function, Repeater,
+• Set Toggle Button Function: assign what the switch does (No Function, Repeater,
   Wi-Fi, a VPN tunnel, LED, ...). The choices come from GL's own handlers + tunnel
   list - the same set as GL's Toggle Button Settings dropdown. It takes effect on
   the next flip / reboot (GL's behavior), so nothing toggles the moment you set it.
@@ -8117,7 +8191,7 @@ manage_switch_indicator() {
             printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$(_lc_label "$a")"
         done
         n=$((n + 1)); SW_FUNC_N=$n
-        printf "%s%sSet toggle button function\n" "$(_lc_num "$n")" "$NSEP"
+        printf "%s%sSet Toggle Button Function\n" "$(_lc_num "$n")" "$NSEP"
         n=$((n + 1)); SW_PERSIST_N=$n
         if glpersist_is_on switch; then a="Disable Persistence"; else a="Enable Persistence"; fi
         printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
@@ -9437,7 +9511,8 @@ manage_packages() {
     local page=1 pages=1 pg_first pg_last
     # Footer (input-line rule): the actions on this page's rows, then the page line closest to the input.
     local _pkg_acts="[A] All   [Z] None   [S] Sort   [#] Toggle   [C] Confirm   [0] Cancel   [?] Help"
-    local _pkg_div; _pkg_div=$(awk -v n="${#_pkg_acts}" 'BEGIN{s="";for(i=0;i<n;i++)s=s"─";print s}')
+    # divider = the widest row: a staged "> Enable Persistence (via reinstall)" row is 86 (the footer is 80)
+    local _pkg_div; _pkg_div=$(awk 'BEGIN{s="";for(i=0;i<86;i++)s=s"─";print s}')
     # _pkg_page_rows <page> - the map rows on that page (1 = packages, 2 = Features)
     _pkg_page_rows() { if [ "$1" = 2 ]; then awk -F'|' '$6=="F"' "$map_file"; else awk -F'|' '$6!="F"' "$map_file"; fi; }
     # Overlay filesystem: ubifs/jffs2 compress transparently (uncompressed sizes overstate real
@@ -10112,7 +10187,6 @@ manage_ssh_keys() {
                     while true; do
                         clear
                         print_centered_header "SSH Authorized Keys Manager"
-                        printf "\n"
                         printf " %-5s %-4s %-12s %-40s\n" "Sel" "Idx" "Key Type" "Identity / Comment"
                         printf " ────────────────────────────────────────────────────────────────\n"
                         while IFS='|' read -r idx type id sel; do
@@ -10309,7 +10383,7 @@ Keycap spacing (macOS Terminal only)
 ────────────────────────────────────
 macOS Terminal is the one terminal whose number-keycap spacing can't be
 detected, so the choice made at startup is shown here. Change it in
-Display Settings.
+Display Settings. Saving Auto there clears it, so the next start asks again.
 
 Uninstall
 ─────────
@@ -10399,7 +10473,7 @@ _keycap_options() {
     printf "     %s Show Hardware Information\n" "$N1"
     printf "     %s AdGuardHome Control Center\n" "$N2"
     printf "     %s Help\n\n" "$NQ"
-    printf "   %bOption 2 - Default%b\n" "$CYAN" "$RESET"
+    printf "   %bOption 2%b\n" "$CYAN" "$RESET"
     printf "     %s  Show Hardware Information\n" "$N1"
     printf "     %s  AdGuardHome Control Center\n" "$N2"
     printf "     %s Help\n" "$NQ"
@@ -10413,26 +10487,29 @@ keycap_apply_pref() {
 }
 
 keycap_pick() {
-    # Spacing picker. [1] picks Option 1, [0] exits (leaves the setting untouched), and ANY OTHER
-    # key defaults to Option 2 (the safe default). Then it asks whether to save (persist) or apply
-    # for this session only. Reused by the first-run gate and by Display Settings' Auto page.
+    # Spacing picker - a Choose prompt, so typed: 1 or 2 then Enter picks; 0 exits and leaves the
+    # spacing this session already uses (nothing saved); anything else is invalid and asks again (no
+    # silent default - a stray Enter used to pick Option 2). Then it asks whether to save (persist)
+    # or apply for this session only. Reused by the first-run gate and by Display Settings' Auto page.
     local kc_pick kc_choice sv
-    clear
-    print_centered_header "Keycap Spacing"
-    printf " ──────────────────────────────────────────────────────────────────────────────\n\n"
-    printf "   macOS Terminal renders the number keys differently across versions. Pick the\n"
-    printf "   list whose numbers match the spacing of the %b?%b Help line (can change later\n" "$RED" "$RESET"
-    printf "   in Toolkit Management):\n\n"
-    _keycap_options
-    printf "\n ──────────────────────────────────────────────────────────────────────────────\n"
-    printf "Choose spacing [1-2/0]: "
-    kc_pick=$(read_single_char); printf "\n"
-    case "$kc_pick" in
-        0) return 1 ;;         # universal exit - leave the setting as-is
-        1) kc_choice=1 ;;
-        *) kc_choice=2 ;;      # [2] or any other key = Option 2 (the default)
-    esac
-    printf "\nSave Option %s as Mac Terminal default? [Y/n]: " "$kc_choice"
+    while true; do
+        clear
+        print_centered_header "Keycap Spacing"
+        printf " ──────────────────────────────────────────────────────────────────────────────\n\n"
+        printf "   macOS Terminal renders the number keys differently across versions. Pick the\n"
+        printf "   list whose numbers match the spacing of the %b?%b Help line (can change later\n" "$RED" "$RESET"
+        printf "   in Toolkit Management):\n\n"
+        _keycap_options
+        printf "\n ──────────────────────────────────────────────────────────────────────────────\n\n"
+        printf "Choose spacing [1-2/0]: "
+        read -r kc_pick; printf "\n"
+        case "$kc_pick" in
+            0) return 1 ;;         # universal exit - leave the setting as-is
+            1|2) kc_choice=$kc_pick; break ;;
+            *) print_error "Invalid option"; sleep 1 ;;
+        esac
+    done
+    printf "Save Option %s as Mac Terminal default? [Y/n]: " "$kc_choice"   # one blank after the answer above
     read -r sv; printf "\n"
     case "$sv" in
         n|N) keycap_apply_pref "$kc_choice";         print_info "Applied for this session only (not saved)" ;;
@@ -10516,7 +10593,7 @@ manage_display_settings() {
                 # menus use two spaces after it), so it needs two there; one elsewhere.
                 local _p3k=" "
                 [ "$_pProf" = wt ] && _p3k="  "
-                printf " %bPage 3 of %s — WT / circled digits%b (❶%skeycaps, no spacing to set)\n\n" "${BOLD}${CYAN}" "$total" "$_R" "$_p3k"
+                printf " %bPage 3 of %s — Windows Terminal / circled digits%b (❶%skeycaps, no spacing to set)\n\n" "${BOLD}${CYAN}" "$total" "$_R" "$_p3k"
                 printf "   %bMessages%b\n" "$_C" "$_R"
                 printf "     %b%s%b%bOperation completed successfully%s%b\n" "$_G" "$_pOK" "$_R" "$_G" "$_pPAD" "$_R"
                 printf "     %b%s%b%bOperation failed%s%b\n" "$_RD" "$_pERR" "$_R" "$_RD" "$_pPADR" "$_R"
@@ -10572,7 +10649,7 @@ manage_display_settings() {
                         *) _kcs="not set — choose at startup" ;;
                     esac
                     printf "     %bKeycap spacing → %s%b\n" "$_G" "$_kcs" "$_R"
-                    printf "\n   %bConfirming Auto opens the keycap picker.%b\n" "$_C" "$_R"
+                    printf "\n   %bConfirming Auto clears the saved keycap spacing and opens the picker.%b\n" "$_C" "$_R"
                 fi
                 ;;
         esac
@@ -10606,7 +10683,7 @@ DS_EOF
     while true; do
         clear
         print_centered_header "Display Settings"
-        printf " ──────────────────────────────────────────────────────────────────────────────\n"
+        printf " ────────────────────────────────────────────────────────────────────────────────\n"
 
         local pref_display
         case "$OUTPUT_PREF" in
@@ -10616,7 +10693,7 @@ DS_EOF
                     2) pref_display="${BLUE}Full - 2 spaces${RESET}" ;;
                     *) pref_display="${BLUE}Full${RESET}"            ;;
                 esac ;;
-            wt)     pref_display="${BLUE}WT (circled digits)${RESET}"    ;;
+            wt)     pref_display="${BLUE}Windows Terminal (circled digits)${RESET}"    ;;
             compat) pref_display="${BLUE}Compatible${RESET}"             ;;
             *)      pref_display="${BLUE}Auto (detect each run)${RESET}" ;;   # a setting (fact) -> blue
         esac
@@ -10643,7 +10720,7 @@ DS_EOF
         _display_settings_screen "$page_num" "$detected_desc" "$total"
 
         # Footer / navigation (mirrors the Hardware Info pager)
-        printf "\n ──────────────────────────────────────────────────────────────────────────────\n"
+        printf "\n ────────────────────────────────────────────────────────────────────────────────\n"
         printf " [P] Previous   "
         local i=1
         while [ "$i" -le "$total" ]; do
@@ -10672,7 +10749,7 @@ DS_EOF
                 case "$page_num" in
                     1) new_pref="full";   new_kc="1"; pref_label="Full mode - 1 space"  ;;
                     2) new_pref="full";   new_kc="2"; pref_label="Full mode - 2 spaces" ;;
-                    3) new_pref="wt";     new_kc="";  pref_label="WT (circled digits)"  ;;
+                    3) new_pref="wt";     new_kc="";  pref_label="Windows Terminal (circled digits)"  ;;
                     4) new_pref="compat"; new_kc="";  pref_label="Compatible"           ;;
                     5) new_pref="auto";   new_kc="";  pref_label="Auto"                 ;;
                 esac
@@ -10691,6 +10768,10 @@ DS_EOF
                     *)
                         sed -i "s/^OUTPUT_PREF=\"[^\"]*\"/OUTPUT_PREF=\"$new_pref\"/" "$SCRIPT_PATH"
                         OUTPUT_PREF="$new_pref"
+                        # Auto saved as the default = detect each run, the keycap spacing too: clear the
+                        # saved spacing so a macOS Terminal start asks again (the picker below can save a
+                        # new one). This session keeps the spacing it uses now.
+                        [ "$new_pref" = auto ] && sed -i "s/^KEYCAP_NSEP=\"[^\"]*\"/KEYCAP_NSEP=\"auto\"/" "$SCRIPT_PATH"
                         if [ -n "$new_kc" ]; then
                             sed -i "s/^KEYCAP_NSEP=\"[^\"]*\"/KEYCAP_NSEP=\"$new_kc\"/" "$SCRIPT_PATH"
                             KEYCAP_NSEP="$new_kc"
@@ -11359,7 +11440,7 @@ manage_mtu() {
     while true; do
         mtu_detect > "$tf"
         if [ ! -s "$tf" ]; then
-            clear; print_centered_header "VPN MTU Optimizer"; printf "\n"
+            clear; print_centered_header "VPN MTU Optimizer"
             print_warning "No active WireGuard or OpenVPN tunnels found"
             printf "\n"; rm -f "$tf"; press_any_key; return
         fi
@@ -11419,7 +11500,6 @@ manage_mtu() {
 
         clear
         print_centered_header "VPN MTU Optimizer"
-        printf "\n"
         printf " %b%s %s:%b %s     Status: %b%s%b\n" "$CYAN" "$type" "$role" "$RESET" "$iface" "$stcol" "$_st" "$RESET"
         printf "   Current MTU:  %b%s%b%s\n" "$BLUE" "${cur:-N/A}" "$RESET" "$source_label"
         printf "   Underlay:     %b%s (MTU %s)%b\n" "$BLUE" "${underlay:-N/A}" "${underlay_mtu:-N/A}" "$RESET"
@@ -13306,7 +13386,8 @@ silently losing throughput.
 The status block
 ────────────────
 One tunnel per page; [P]/[N] move between tunnels. For the tunnel on screen:
-  • Status       - Active (carrying traffic) or Inactive (down)
+  • Status       - CONNECTED / DISCONNECTED for a client, UP / DOWN for a server,
+                   with the last WireGuard handshake ("58s ago"), or "no peer"
   • Current MTU  - what is set now
   • Underlay     - the link the tunnel rides on, and its MTU
   • Overhead     - the protocol's per-packet cost
@@ -14557,8 +14638,20 @@ _fw_status_disp() {   # <status> -> coloured word for the Last Update row
     esac
 }
 _fw_history_view() {   # every recorded attempt, newest first, in the standard reader
-    # newest first, one blank line between attempts, none trailing
-    awk 'FNR == 1 && NR > 1 { print "" } { print }' $(ls -1 "$FW_HIST"/*.log 2>/dev/null | sort -r) \
+    # newest first, one blank line between attempts, none trailing. A long line (a package list) wraps
+    # between words at 104 columns and continues under its value - past the indent, a "[TAG] " and a
+    # short "Label: " - so it never breaks mid-word in the window.
+    awk 'FNR == 1 && NR > 1 { print "" }
+         { line = $0; match(line, /^ */); off = RLENGTH; rest = substr(line, off + 1)
+           if (match(rest, /^\[[A-Z]+\] /)) { off += RLENGTH; rest = substr(line, off + 1) }
+           c = index(rest, ": "); if (c > 0 && c <= 28) off += c + 1
+           pad = ""; for (k = 0; k < off; k++) pad = pad " "
+           while (length(line) > 104) {
+               i = 104; while (i > off + 1 && substr(line, i, 1) != " ") i--
+               if (i <= off + 1) break                       # one unbreakable word: leave it whole
+               print substr(line, 1, i - 1); line = pad substr(line, i + 1)
+           }
+           print line }' $(ls -1 "$FW_HIST"/*.log 2>/dev/null | sort -r) \
         | show_paged "Firmware Update History"
 }
 # In the Web-UI Terminal? (ttyd is an ancestor of this shell) - it drops during the flash like SSH.
@@ -14827,16 +14920,17 @@ _fw_install() {   # <row> [reinstall]
 
 # Choose a Build: every build GL offers this model in ONE paged list, channels as section headings (the Lists
 # Manager pattern - a channel may run across pages), newest first, up to 10 per channel. Single select: the
-# installed build starts selected as "No Change" (so [R] always has a build); pressing it again - or picking
-# it after another build - makes it "Reinstall" (re-flash the same build, e.g. a damaged firmware partition);
-# pressing a selected other build again returns to the installed one. [C] runs the flash flow (_fw_install).
+# installed build starts selected (so [R] always has a build); its Planned Action reads "Installed" - a state
+# kept out of the Version column so the versions line up. Pressing it again - or picking it after another
+# build - makes it "Reinstall" (re-flash the same build, e.g. a damaged firmware partition); pressing a
+# selected other build again returns to the installed one. [C] runs the flash flow (_fw_install).
 _fw_pick_head() {   # <channel> - its section heading: one word (a table L2 heading never runs under a column)
     case "$1" in STABLE) echo Stable ;; BETA) echo Beta ;; NIGHTLY) echo Nightly ;; RC) echo RC ;;
                  "OPENWRT 25") echo OpenWrt25 ;; "OPENWRT 24") echo OpenWrt24 ;; *) echo "$1" | tr -d ' ' ;; esac
 }
 _fw_pick() {
     local map="$FW_TMP/pick" per=12 page=1 pages total start end sel="" inst="" reinst=0 ans row idx chan lastc
-    local lbl dir box act acol div foot hn
+    local lbl dir box act acol div foot vw
     if [ ! -s "$FW_TMP/cat" ]; then   # never a dead end: no catalogue -> fetch it again, report the result
         spin_run "Checking GL.iNet's firmware catalogue" _fw_catalog; _fw_update_state
         [ -s "$FW_TMP/cat" ] || { fail_report "Couldn't reach GL.iNet's firmware server" "" "Check the router's internet connection, then retry"; press_any_key; return; }
@@ -14851,6 +14945,7 @@ _fw_pick() {
         [ "$(_fw_direction "$row")" = SAME ] && { inst=$idx; break; }
     done < "$map"
     sel=$inst
+    vw=$(awk -F'|' '{ if (length($3) > w) w = length($3) } END { print (w < 7 ? 7 : w) + 1 }' "$map")   # Version fits its longest build
     pages=$(( (total + per - 1) / per ))
     [ -n "$inst" ] && page=$(( (inst - 1) / per + 1 ))
     foot=" [P] Previous   Page 1 of 1   [N] Next   [#] Select   [R] Release Notes   [C] Confirm   [0] Back   [?] Help"
@@ -14858,7 +14953,7 @@ _fw_pick() {
     while true; do
         start=$(( (page - 1) * per + 1 )); end=$(( page * per )); [ "$end" -gt "$total" ] && end=$total
         clear; print_centered_header "Choose a Build"
-        printf "       %-7s %-30s %-11s %-8s %s\n" "Select" "Version" "Released" "Size" "Planned Action"
+        printf "       %-7s %-${vw}s %-11s %-8s %s\n" "Select" "Version" "Released" "Size" "Planned Action"
         printf "%s\n" "$div"
         lastc=""
         sed -n "${start},${end}p" "$map" | while IFS='|' read -r idx row; do
@@ -14868,8 +14963,8 @@ _fw_pick() {
                 printf " %b%s%b\n" "$HDR2" "$(_fw_pick_head "$chan")" "$RESET"; lastc=$chan
             fi
             box="  [ ]  "; [ "$idx" = "$sel" ] && box="  [✓]  "
-            lbl=$(_fw_field "$row" 2); hn=""; [ "$idx" = "$inst" ] && hn=" (installed)"
-            act="No Change"; acol="$GREY"
+            lbl=$(_fw_field "$row" 2)
+            act="No Change"; acol="$GREY"; [ "$idx" = "$inst" ] && act="Installed"
             if [ "$idx" = "$sel" ]; then
                 if [ "$idx" = "$inst" ]; then [ "$reinst" = 1 ] && { act="> Reinstall"; acol="$GREEN"; }
                 else
@@ -14877,7 +14972,7 @@ _fw_pick() {
                     case "$dir" in DOWNGRADE) act="> Downgrade"; acol="$YELLOW" ;; *) act="> Update"; acol="$GREEN" ;; esac
                 fi
             fi
-            printf " %-5s %s %-30s %b%-11s %-8s%b %b%s%b\n" "$idx." "$box" "$lbl$hn" "$BLUE" "$(_fw_field "$row" 9)" \
+            printf " %-5s %s %-${vw}s %b%-11s %-8s%b %b%s%b\n" "$idx." "$box" "$lbl$hn" "$BLUE" "$(_fw_field "$row" 9)" \
                 "$(( ($(_fw_field "$row" 6) + 524288) / 1048576 )) MB" "$RESET" "$acol" "$act" "$RESET"
         done
         printf "%s\n" "$div"
@@ -15023,9 +15118,10 @@ Actions
     channel, or a fresh check when there's nothing newer.
   • Choose a Build - every build GL.iNet offers this router in one list,
     grouped by channel (newest first, up to 10 each). The installed build starts
-    selected; [#] picks another (an older one is a downgrade) and [R] shows the
-    selected build's release notes. Picking the installed build again makes it
-    Reinstall - a re-flash of the same build, for a damaged firmware partition.
+    selected and its Planned Action says Installed; [#] picks another (an older
+    one is a downgrade) and [R] shows the selected build's release notes. Picking
+    the installed build again makes it Reinstall - a re-flash of the same build,
+    for a damaged firmware partition.
   • Manage Persistence - the Package & Persistence Manager, with everything
     an update would remove staged to persist, and the Update Memory meter.
   • View Update History - every update attempt, newest first: what was
@@ -15775,7 +15871,8 @@ mt6000|Flint 2|MT7986a|35969|403625|784938|128188|285938|336125|186.4|6906.5
 mt3000|Beryl AX|MT7981|174738|403199|465470|84051|166484|209360|118.7|4446.3
 mt5000|Brume 3|MT7987a|268078|621323|723411|126278|257233|323477|181.8|6816.4
 be9300|Flint 3|IPQ5332|186703|533571|639020|84930|216067|250916|139.7|5180.6
-mt1300|Beryl|MT7621|5522|5944|5759|21915|27148|27613|10.4|397.6'
+mt1300|Beryl|MT7621|5522|5944|5759|21915|27148|27613|10.4|397.6
+mg1300|Mango 2|MT7621|5754|5947|5969|22320|27500|28326|10.5|411.1'
 
                 my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
                 [ -z "$my_id" ] && my_id="thisdevice"
@@ -15891,7 +15988,8 @@ mt6000|Flint 2|MT7986a|52.72|154.00
 mt3000|Beryl AX|MT7981|82.78|16.21
 mt5000|Brume 3|MT7987a|38.93|42.32
 be9300|Flint 3|IPQ5332|13.72|81.70
-mt1300|Beryl|MT7621|0.24|12.54'
+mt1300|Beryl|MT7621|0.24|12.54
+mg1300|Mango 2|MT7621|22.07|4.80'
 
                 my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
                 [ -z "$my_id" ] && my_id="thisdevice"
@@ -15956,7 +16054,8 @@ mt6000|Flint 2|MT7986a|5401.50
 mt3000|Beryl AX|MT7981|2983.29
 mt5000|Brume 3|MT7987a|4492.36
 be9300|Flint 3|IPQ5332|4277.16
-mt1300|Beryl|MT7621|179.39'
+mt1300|Beryl|MT7621|179.39
+mg1300|Mango 2|MT7621|465.66'
 
                 my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
                 [ -z "$my_id" ] && my_id="thisdevice"
@@ -16370,7 +16469,8 @@ _uci_view_vpn() {
         printf "%b\n" "${CYAN}Tailscale:${RESET}"
         ts_state=$(uci get tailscale.settings.enabled 2>/dev/null || uci get tailscale.@tailscale[0].enabled 2>/dev/null)
         printf "    Status: %b\n" "$([ "$ts_state" = 1 ] && _lc_value ENABLED || _lc_value DISABLED)"
-        ts_ip=$(command -v tailscale >/dev/null 2>&1 && tailscale ip -4 2>/dev/null | head -1)
+        # only ask a running tailscaled: with the service down, `tailscale ip` waits out a ~2 s timeout
+        ts_ip=""; _proc_running tailscaled && command -v tailscale >/dev/null 2>&1 && ts_ip=$(tailscale ip -4 2>/dev/null </dev/null | head -1)
         [ -n "$ts_ip" ] && printf "    Node IP: %b%s%b\n" "$BLUE" "$ts_ip" "$RESET"
         printf "\n"; found=1
     fi
@@ -16496,7 +16596,9 @@ view_uci_config() {
             1) _uci_view_wireless | _uci_page "Wireless Networks" ;;
             2) _uci_view_network  | _uci_page "Network Configuration" ;;
             3) _uci_view_firewall | _uci_page "Firewall" ;;
-            4) _uci_view_vpn      | _uci_page "VPN Configuration" ;;
+            4) # gathering can take a moment (Tailscale) - header, spinner, then the page (setup-screen flow)
+               clear; print_centered_header "VPN Configuration"
+               spin_run "Reading the VPN configuration" _uci_view_vpn; _uci_page "VPN Configuration" < "$SPIN_LOG" ;;
             5) _uci_view_system   | _uci_page "System Settings" ;;
             6) _uci_view_cloud    | _uci_page "Cloud Services" ;;
             0) return ;;
@@ -17007,22 +17109,20 @@ check_self_update "$@"
 # Service Verification
 # -----------------------------
 
-if [ ! -f "$AGH_INIT" ]; then
+# Not in this firmware at all: nothing to say at startup - the AdGuardHome Control Center explains it
+# (NOT SUPPORTED) when it's opened. Startup stops only for what it can fix: a missing startup script.
+if [ ! -f "$AGH_INIT" ] && [ ! -f "/rom$AGH_INIT" ]; then
+    AGH_DISABLED=1
+elif [ ! -f "$AGH_INIT" ]; then
     clear
     printf "%b\n" "$SPLASH"
-    if [ ! -f "/rom$AGH_INIT" ]; then
-        print_warning "AdGuardHome not found/supported. AdGuardHome features will be disabled." 
-        AGH_DISABLED=1
+    print_error "AdGuardHome startup script missing! Will attempt AGH factory reset to restore it."
+    sub_confirm_factory_reset
+    if [ ! -f "$AGH_INIT" ]; then
+        AGH_DISABLED=2
+        printf "\n"
+        print_warning "Recovery failed or cancelled. AdGuardHome features will be disabled."
         press_any_key
-    else
-        print_error "AdGuardHome startup script missing! Will attempt AGH factory reset to restore it."
-        sub_confirm_factory_reset
-        if [ ! -f "$AGH_INIT" ]; then
-            AGH_DISABLED=1
-            printf "\n"
-            print_warning "Recovery failed or cancelled. AdGuardHome features will be disabled."
-            press_any_key
-        fi
     fi
 fi
 
@@ -17091,7 +17191,9 @@ fi
 # pre-6.6 kernel goes) - cheap, every launch
 _stress_link >/dev/null 2>&1
 # package-size caches left by sessions that ended without their exit trap (a dropped SSH session)
-for _f in /tmp/.glinet_pkgsizes.* /tmp/.glinet_fwarch.*; do [ -e "$_f" ] || continue; [ -d "/proc/${_f##*.}" ] || rm -f "$_f"; done
+for _f in /tmp/.glinet_pkgsizes.* /tmp/.glinet_fwarch.* /tmp/.agh_cfgreads.* /tmp/.agh_update_check.* /tmp/.glfw.* /tmp/.glnet-op.*; do
+    [ -e "$_f" ] || continue; [ -d "/proc/${_f##*.}" ] || rm -rf "$_f"   # left by a session that's gone
+done
 for _f in /tmp/.fw_keeplist.*.* /tmp/.fw_keepsize.*; do [ -e "$_f" ] || continue; _p=${_f#/tmp/.fw_keep*.}; [ -d "/proc/${_p%%.*}" ] || rm -f "$_f"; done
 if grep -qxE '/usr/bin/stress(-ng)?' /etc/sysupgrade.conf 2>/dev/null; then
     sed -i '\|^/usr/bin/stress$|d; \|^/usr/bin/stress-ng$|d' /etc/sysupgrade.conf 2>/dev/null
@@ -17145,7 +17247,7 @@ show_menu() {
         case $opt in
             \?|h|H|❓) show_main_help ;;
             1) show_hardware_info ;;
-            2) [ $AGH_DISABLED != 1 ] && agh_control_center || { print_error "AGH not found. Feature disabled."; sleep 2; } ;;
+            2) if [ "$AGH_DISABLED" = 0 ]; then agh_control_center; else _agh_unavailable_screen; fi ;;
             3) system_tweaks ;;
             4) benchmark_system ;;
             5) manage_vpn_tools ;;

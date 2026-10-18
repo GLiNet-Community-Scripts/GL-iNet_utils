@@ -3348,6 +3348,8 @@ Status
   Version  → the AdGuardHome build installed now
   Update   → UP TO DATE, AVAILABLE (with the newer version), or UNKNOWN when the
              router can't reach AdGuard's update server. Checked once per session.
+• Persistence → ENABLED, or DISABLED - yellow when a firmware update would stop
+                AdGuardHome (see Channel below)
 
 Updates via UI
 ───────────────────────────────
@@ -3832,6 +3834,15 @@ enable zram automatically when a selection would run memory high.
 
 Only remove the limit after zram is active.
 
+The status block
+────────────────
+  • Working Directory - where AdGuardHome keeps its data.
+  • Data Directory / Filters Directory - what the directory itself uses, then
+    its disk's free and total space: "4.4M used (56.5G free, 57.9G total)".
+    With the Filter Space Limit on, the filters directory is the limited space,
+    so its free and total are the limit's.
+  • Filter Space Limit - ACTIVE (with its size), INACTIVE, or NOT SUPPORTED.
+
 The menu
 ────────
 Item 1 is one toggle labelled with what it will do: Disable Filter Space Limit
@@ -4128,6 +4139,9 @@ The screen
   • Sections: Recommended (a curated, safe default set), General, Security,
     Allowlist, and Other (lists already in your config that aren't in this
     catalog).
+  • On the Admin Panel page, the Allow/Blocklists tab stages lists the same
+    way and its Apply runs this Confirm. The zram and storage-cap offers are
+    skipped there - turn those on in Advanced Settings.
 
 Staying safe on small boxes
 ────────────────────────────────────────────────────────────────────────
@@ -5674,6 +5688,8 @@ back.
 
 Notes
 ─────
+  • The Backups row is the count, with the space backups use and the free space
+    where they're kept: "2 (0.01M used, 56.5G free)".
   • Backups are timestamped, so you can keep several and roll back to any one
     if a change goes wrong.
   • With no backups yet, item 2 is Check for Backups - it re-scans the store.
@@ -5737,7 +5753,9 @@ When to use
 ───────────
   • Live logs - to see what AdGuardHome is doing (queries, blocks, errors),
     e.g. after changing filter lists.
-  • Clear cache - to force it to re-fetch filter data if a list looks stale.
+  • Clear cache - deletes the downloaded list files and restarts AdGuardHome
+    if it was running, so every list is fetched fresh. Use it when a list
+    looks stale.
   • Restart - to reload config.yaml or clear a wedge without a full disable/
     enable. Works while running; if disabled, it points you to item 1 to enable.
 
@@ -6270,6 +6288,9 @@ The Zram Swap line shows one of:
 • DISABLED      - installed, but zram swap is off (the package is kept).
 • ENABLED       - on, with a zram device active in the swap table.
 • SERVICE DOWN  - it's enabled but no zram device is swapping (it didn't come up).
+Swap Capacity (while ENABLED) is how much can be swapped into it, counted before
+compression - it lives compressed in RAM, so it isn't disk space. Persistence
+shows whether it's re-installed after a firmware update.
 
 Actions by state:
 • Install and enable - installs the zram-swap package, then enables and starts it.
@@ -6474,7 +6495,8 @@ To prevent logic loops, the following rules are enforced:
   Warning must be between Minimum and Max.
 
 Dynamic vs. Manual Mode:
-• Dynamic: The system automatically adjusts RPM based on heat.
+• Dynamic: The system automatically adjusts RPM based on heat. Enable Dynamic
+  Fan Control starts GL's fan service again and checks that it's running.
 • Static: Holds the fan at a set percentage (0-100%) and turns off GL's own
   fan service while it does. The speed is kept across reboots until you
   choose Enable Dynamic Fan Control.
@@ -16269,12 +16291,14 @@ The status block
 One tunnel per page; [P]/[N] move between tunnels. For the tunnel on screen:
   • Status       - CONNECTED / DISCONNECTED for a client, UP / DOWN for a server,
                    with the last WireGuard handshake ("58s ago"), or "no peer"
-  • Current MTU  - what is set now
+  • Current MTU  - what is set now: (override) when you've set it, (default)
+                   when it's the protocol's own
   • Underlay     - the link the tunnel rides on, and its MTU
   • Overhead     - the protocol's per-packet cost
   • Recommended  - the best MTU (Underlay minus Overhead)
   • Basis        - whether Recommended is Calculated from the link, or Verified
-                   by an active probe (with the date and target)
+                   by an active probe (with the date and target); STALE when
+                   the link changed since that probe
 
 The actions
 ───────────
@@ -16418,6 +16442,9 @@ nothing staged, what it carries now. Opened from Firmware Update, everything the
 update would remove comes pre-staged as Enable Persistence, and the Update
 Memory meter shows whether the image plus what persists fits in the router's
 RAM (the kept files are packed, so they need less than the Persist line).
+On routers with zram swap it keeps 6 MB spare: (tight) under 6 MB, (won't fit)
+under 4 MB. Either way, Firmware Update stops services such as Tailscale
+before downloading.
 
 Notes
 ─────
@@ -18189,6 +18216,8 @@ Benchmark Categories:
 • CPU & Thermal: Options 1 and 2 test the processor. The Stress Test pushes
   all cores/threads to 100% to test heat soak, while the VPN & Crypto Benchmark ranks
   this device against saved routers for WireGuard, OpenVPN and RSA throughput.
+  The Stress Test asks how long to run (60 s by default) and shows the
+  temperature and fan speed at the start, at the end and 3 seconds after.
 • Storage & Memory: Options 3 and 4 measure I/O speeds. Use these to test 
   the performance of the internal NAND vs. attached USB 3.0 drives or to 
   check if RAM bandwidth is saturated.

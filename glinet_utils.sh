@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-10-05
+# Version: 2026-10-18
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -389,6 +389,7 @@ case "$0" in
 esac
 [ -z "$SCRIPT_PATH" ] && SCRIPT_PATH="$(pwd)/$0"
 INSTALL_PROMPTED=0    # Set to 1 after user responds to install prompt; reset by each new version
+WEBUI_PROMPTED=0      # Set to 1 after "n" to the Admin Panel page offer; reset by each new version
 STARTUP_NOTICE=0      # Set by the install-skip so the update-check spinner runs 2s longer (readable)
 _STARTUP_MSG=0        # Set by print_*; the final "Loading the main menu" step holds 2s when set
 INSTALL_PATH="/usr/sbin/glinet_utils"
@@ -728,6 +729,7 @@ detect_output_mode() {
     # we fall back to Compatible mode (one consistent set), not a mixed profile.
     _TERM_PROFILE="mac"
     _TERM_IS_MACOS=""            # set only for genuine macOS Terminal (DA2 1;95); keys the keycap picker
+    _TERM_KC_EMOJI=""            # set for a wt-measuring terminal that draws emoji keycaps cleanly (Termius 2026)
     if [ "$OUTPUT_MODE" = "full" ]; then
         if ensure_stty; then
             wide=$(probe_advance '✅')
@@ -751,6 +753,12 @@ detect_output_mode() {
                 ambig=$(probe_advance '⚠️')
                 if [ "$ambig" = "2" ]; then
                     _TERM_PROFILE="wt"
+                    # Termius changed (2026): ✅ and ⚠️ now both advance 2 like Windows Terminal, but it answers
+                    # DA2 1;0 (WT: 0;10) and draws the emoji keycaps cleanly - 1️⃣ advances 2 and paints 2, where
+                    # WT boxes them (measured on an iPad 2026-10-15). Same symbol spacing as wt; keycaps below
+                    case "$(probe_da2 2>/dev/null)" in
+                        1\;0) _TERM_KC_EMOJI=1 ;;
+                    esac
                 else
                     # advance-2 and not Windows Terminal: macOS Terminal OR a generic Linux
                     # terminal (both render under the "mac" profile). DA2 "1;95" is the genuine
@@ -881,6 +889,13 @@ detect_output_mode() {
                 fi
                 ;;
         esac
+
+        # Termius 2026 (wt-measuring, see _TERM_KC_EMOJI): the emoji keycaps, which it draws cleanly - 1️⃣ advances 2, so
+        # one space leaves one clean gap and the label lands in the mac profile's column. NA stays Ⓐ (🅰️ not measured)
+        if [ "$_TERM_PROFILE" = wt ] && [ "${_TERM_KC_EMOJI:-}" = 1 ]; then
+            N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"; N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
+            NSEP=" "
+        fi
 
         # WT display mode: swap the number keycaps to circled digits (❶) and use the WT-style
         # 2-space gap. Everything else (the ⚠️/ℹ️/⚙️ symbols and their per-terminal spacing) is left
@@ -1225,7 +1240,20 @@ terminal_size_advisory() {
 # router (parsing the opkg index / one `apk info -s` per package). A file, because the measuring runs in
 # spin_run's subshell (the toolkit's usual way of handing results back); removed when the toolkit exits.
 PKG_SIZE_CACHE="/tmp/.glinet_pkgsizes.$$"
+# Scratch files left by sessions that ended without their exit trap (a dropped SSH session, a killed process):
+# each name ends in its session's pid, so a file whose process is gone is removed. Never the AdGuardHome undo
+# copy (.agh_prerestore) - after a crash mid-restore that is the only original. Startup and the fleet guard.
+_stale_session_sweep() {
+    local _f _p
+    for _f in /tmp/.glinet_pkgsizes.* /tmp/.glinet_fwarch.* /tmp/.agh_cfgreads.* /tmp/.agh_update_check.* /tmp/.glfw.* /tmp/.glnet-op.*; do
+        [ -e "$_f" ] || continue; [ -d "/proc/${_f##*.}" ] || rm -rf "$_f"
+    done
+    for _f in /tmp/.fw_keeplist.*.* /tmp/.fw_keepsize.*; do [ -e "$_f" ] || continue; _p=${_f#/tmp/.fw_keep*.}; [ -d "/proc/${_p%%.*}" ] || rm -f "$_f"; done
+    return 0
+}
 _session_cleanup() {
+    # services stopped for a firmware update that never reached the flash start again (Ctrl-C, the page's Stop)
+    [ -n "${FW_STOPPED:-}" ] && [ "${FW_FLASHING:-}" != 1 ] && _fw_restart_stopped
     # stop the background measurement FIRST - one finishing between a delete and the stop would write its
     # result file again
     [ -n "${FW_ARCH_PID:-}" ] && _fw_kill_tree "$FW_ARCH_PID" 2>/dev/null
@@ -1233,7 +1261,7 @@ _session_cleanup() {
     # every other per-session scratch file (most are removed after use; this catches an interrupted one).
     # Not /tmp/.agh_prerestore.$$ - that's the undo copy while a restore runs
     rm -f "$SPIN_LOG" /tmp/.agh_cfgreads."$$" /tmp/.agh_update_check."$$" /tmp/.nl_ifset_verify."$$" /tmp/.probe."$$" \
-          /tmp/.glpage."$$" /tmp/.dsw."$$".* /tmp/.rlm."$$".* /tmp/.rlam."$$".* 2>/dev/null
+          /tmp/.glpage."$$" /tmp/.dsw."$$".* /tmp/.rlm."$$".* /tmp/.rlam."$$".* /tmp/.apkkb."$$" /tmp/.apkfp."$$".* 2>/dev/null
     rm -rf /tmp/.glfw."$$" 2>/dev/null
 }
 
@@ -1257,7 +1285,7 @@ terminal_restore() {
 # SKIP the interactive terminal setup, self-installer, self-update and menu - run the
 # requested task from the dispatch block at the very bottom instead.
 case "${1:-}" in
-    --webui-persist-run) __GL_HEADLESS=1 ;;
+    --webui-persist-run|--api|--webui-refresh) __GL_HEADLESS=1 ;;
 esac
 
 if [ -z "${__GL_HEADLESS:-}" ]; then
@@ -1917,6 +1945,44 @@ _opkg_footprint_bytes() {   # <pkg> <table> - bytes; dependencies followed throu
                       if (x in size) { tot += size[x]; q[++t] = x } } }
               print tot + 0 }' "$2" 2>/dev/null
 }
+# The same footprints as _apk_footprint_kb, for many packages, with ONE `apk info -s` for all their sizes - apk loads its
+# whole database on every call (~0.4 s each on an MT3000: 14 calls were 6 of the Package Manager's 12 s). Installed or
+# not, and what a not-installed one pulls in, are still asked per package (simulating them together would count a
+# shared dependency once). A name with no block of its own in the combined answer (provided under another name:
+# stress -> stress-ng, or not in apk at all) gets its own call, exactly as before.  <pkg>... -> "pkg|KB" lines
+_apk_footprint_batch() {
+    local p what w all="" t="/tmp/.apkfp.$$"
+    : > "$t.want"
+    for p in "$@"; do
+        what=$p
+        if ! apk info -e "$p" >/dev/null 2>&1; then
+            what=$(apk add --simulate "$p" 2>/dev/null </dev/null | sed -n 's/^([0-9]*\/[0-9]*) Installing \([^ ]*\) .*/\1/p' | tr '\n' ' ')
+            [ -n "$what" ] || what="$p"
+        fi
+        printf '%s|%s\n' "$p" "$what" >> "$t.want"; all="$all $what"
+    done
+    all=$(printf '%s\n' $all | sort -u | tr '\n' ' ')
+    # each name's own block ("<name>-<version> installed size:" then "<n> <unit>"), in KB, unrounded
+    apk info -s $all 2>/dev/null </dev/null | awk -v names="$all" '
+        BEGIN { n = split(names, N, " ") }
+        / installed size:$/ { h = $1; cur = ""; best = 0
+            for (i = 1; i <= n; i++) { k = N[i]
+                if (substr(h, 1, length(k) + 1) == k "-" && substr(h, length(k) + 2, 1) ~ /[0-9]/ && length(k) > best) { cur = k; best = length(k) } }
+            next }
+        cur != "" && NF == 2 { v = ""
+            if ($2 == "B") v = ($1 + 1023) / 1024; else if ($2 == "KiB") v = $1; else if ($2 == "MiB") v = $1 * 1024; else if ($2 == "GiB") v = $1 * 1048576
+            if (v != "") print cur "|" v
+            cur = "" }' > "$t.kb"
+    for w in $all; do   # no block of its own: its own call, summed exactly as _apk_footprint_kb sums it
+        grep -q "^$w|" "$t.kb" && continue
+        printf '%s|%s\n' "$w" "$(apk info -s "$w" 2>/dev/null </dev/null | awk '$2=="B" {s += ($1+1023)/1024} $2=="KiB" {s += $1}
+                                                       $2=="MiB" {s += $1*1024} $2=="GiB" {s += $1*1048576} END { print s + 0 }')" >> "$t.kb"
+    done
+    while IFS='|' read -r p what; do
+        printf '%s|%s\n' "$p" "$(awk -F'|' -v w=" $what " 'index(w, " " $1 " ") && !seen[$1]++ { s += $2 } END { printf "%d", s + 0 }' "$t.kb")"
+    done < "$t.want"
+    rm -f "$t.want" "$t.kb"
+}
 _apk_footprint_kb() {   # <pkg> - KB of everything a simulated install adds (just the package when installed)
     local what="$1"
     if ! apk info -e "$1" >/dev/null 2>&1; then
@@ -2307,32 +2373,21 @@ _agh_apply_and_restart_core() {
 # state, so this just acts. Restart is NOT here - it is an operational action and lives
 # in Logs & Maintenance (only offered while running). See agh_service_restart.
 agh_service_control() {
-    if is_agh_running; then
-        # Disabling AGH stops DNS filtering for the LAN (and resolution, if AGH is the
-        # resolver) - a non-obvious side effect, so confirm per ui-confirmation-standard.
-        printf "\n"
-        print_warning "Disabling AdGuardHome stops DNS filtering for the LAN"
-        printf "Disable AdGuardHome? [y/N]: "; read -r confirm
+    # the words come from agh_action_text (shared with the Web UI). Disabling stops DNS filtering for
+    # the LAN - a non-obvious side effect, so it asks (ui-confirmation-standard); Enable doesn't.
+    local act=enable confirm; is_agh_running && act=disable
+    agh_action_text "$act"
+    printf "\n"
+    if [ -n "$A_ASK" ]; then
+        print_warning "$A_WARN"
+        printf "%s [y/N]: " "$A_ASK"; read -r confirm
         [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] || return   # cancel is quiet
-        uci set adguardhome.config.enabled='0' && uci set adguardhome.config.dns_enabled='0' && uci commit adguardhome
         printf "\n"
-        if spin_run "Disabling AdGuardHome" _agh_svc_stop "$AGH_INIT"; then
-            print_success "AdGuardHome disabled"
-        else
-            fail_report "AdGuardHome did not stop" "$(logread 2>/dev/null | grep -i adguard | tail -3)"
-        fi
+    fi
+    if spin_run "$A_PROG" agh_do "$act"; then
+        print_success "$A_DONE"
     else
-        # Enabling is not destructive - the named action is the decision, no confirm.
-        uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
-        $AGH_INIT enable >/dev/null 2>&1
-        printf "\n"
-        if spin_run "Enabling AdGuardHome" _agh_svc_verify "$AGH_INIT" start; then
-            print_success "AdGuardHome enabled"
-        else
-            fail_report "AdGuardHome did not start" \
-                "$(logread 2>/dev/null | grep -i adguard | tail -3)" \
-                "A bad config.yaml is the usual cause - check it, then retry"
-        fi
+        fail_report "$A_FAIL" "$(logread 2>/dev/null | grep -i adguard | tail -3)" ${A_FIX:+"$A_FIX"}
     fi
     press_any_key
 }
@@ -2353,13 +2408,12 @@ agh_recover_config() {
 # Control Center item 1 in SERVICE DOWN (switched on, daemon not running): restart it and say
 # honestly whether it came back.
 agh_service_recover_start() {
+    agh_action_text restart
     printf "\n"
-    if spin_run "Restarting AdGuardHome" _agh_svc_verify "$AGH_INIT" restart; then
-        print_success "AdGuardHome restarted"
+    if spin_run "$A_PROG" agh_do restart; then
+        print_success "$A_DONE"
     else
-        fail_report "AdGuardHome did not start" \
-            "$(logread 2>/dev/null | grep -i adguard | tail -3)" \
-            "A bad config.yaml is the usual cause - check it, then retry"
+        fail_report "$A_FAIL" "$(logread 2>/dev/null | grep -i adguard | tail -3)" "$A_FIX"
     fi
     press_any_key
 }
@@ -2368,6 +2422,15 @@ agh_service_recover_start() {
 # bounces the daemon (reload config.yaml / clear a wedge) and reports honestly if it does
 # not come back up. While stopped, restart is meaningless - it does NOT silently become an
 # Enable; it points the user to the Control Center toggle (Enable lives in exactly one place).
+# Clear Filter Cache (the menu and the Admin Panel page): AdGuardHome re-downloads its lists on the next start
+agh_clear_filter_cache() {
+    local wd; wd=$(get_agh_workdir)
+    agh_was_running=0; is_agh_running && agh_was_running=1
+    rm -rf "${wd:-/etc/AdGuardHome}/data/filters/"* 2>/dev/null
+    agh_apply_and_restart "$agh_was_running" "" "" "Filters purged" "-"
+    cached_rules=""
+}
+
 agh_service_restart() {
     printf "\n"
     if ! is_agh_running; then
@@ -2586,23 +2649,35 @@ hwnet_render() {
 }
 
 # Per-page quick help for the Hardware Information viewer. $1 = the page on screen.
-show_hardware_help() {
-    # Per-page help for the Hardware Information screen (current page in $1); each page's help
-    # is short and shown through the shared paged viewer.
+# The Hardware Information help, one text per tab (1 System Overview, 2 Crypto, 3 Network, 4 Wireless), shared
+# by the menus' [?] and the Admin Panel page's Help - translated per interface by _help_for
+_hw_help_text() {   # <page 1-4>
     case "${1:-1}" in
-        2) show_paged "Hardware Information - Help" <<'HELPEOF'
+        2) cat <<'HELPEOF'
 
+{cli}
  Page 2 - Hardware Crypto Acceleration
+{/cli}
+{web}
+ Hardware Crypto Acceleration
+{/web}
    Whether the CPU accelerates the ciphers your VPNs use. AES-GCM
    (OpenVPN / IPsec) needs PMULL; ChaCha20 (WireGuard) needs NEON/SIMD.
    Green means the hardware fast path is available.
+{cli}
 
  On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
+{/cli}
 HELPEOF
         ;;
-        3) show_paged "Hardware Information - Help" <<'HELPEOF'
+        3) cat <<'HELPEOF'
 
+{cli}
  Page 3 - Network Interfaces
+{/cli}
+{web}
+ Network Interfaces
+{/web}
    Every physical port, grouped by the chip it hangs off.
 
      Role     WAN or LAN - a WAN/LAN port shows its current job.
@@ -2613,45 +2688,62 @@ HELPEOF
      uplink   the switch-to-SoC link and its speed - the pipe OUT of
               the switch, not a per-port limit. Ports on the same chip
               switch among themselves at full speed.
+{cli}
 
  On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
+{/cli}
 HELPEOF
         ;;
-        4) show_paged "Hardware Information - Help" <<'HELPEOF'
+        4) cat <<'HELPEOF'
 
+{cli}
  Page 4 - Wireless Interfaces
+{/cli}
+{web}
+ Wireless Interfaces
+{/web}
    Each Wi-Fi radio: band, protocol (Wi-Fi 4/5/6/7), channel width,
    MIMO streams and the current channel.
+{cli}
 
  On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
+{/cli}
 HELPEOF
         ;;
-        *) show_paged "Hardware Information - Help" <<'HELPEOF'
+        *) cat <<'HELPEOF'
 
+{cli}
  Page 1 - System Overview
+{/cli}
+{web}
+ System Overview
+{/web}
    Device model, CPU, memory, storage and uptime. This page refreshes
-   live once a second. Press * to reveal or hide the serial and MAC.
+   live once a second.
+{cli}
+   Press * to reveal or hide the serial and MAC.
 
  On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
+{/cli}
+{web}
+   Reveal shows the full MAC, serial and device ID; Hide masks them again.
+{/web}
 HELPEOF
         ;;
     esac
 }
+show_hardware_help() { _hw_help_text "${1:-1}" | _help_for cli | show_paged "Hardware Information - Help"; }
 
-show_hardware_info() {
-    page=1
-    reveal_ids=0
-    total_pages=4
-    nav_choice=""
-    
-    clear
-    hash -r
-    if ! command -v lscpu >/dev/null 2>&1; then
-        print_centered_header "Hardware Information"
-        install_package lscpu "lscpu (enhanced CPU info)"
-        clear
-    fi
+# =============================================================================
+# Hardware Information - the data, shared by the menu screen and the Admin Panel page
+# =============================================================================
+# The screen and the page show the same facts from these functions; only the drawing differs. Static facts
+# are read once per visit; the live ones (hw_live_json) are what the page refreshes every second, from a small
+# sampler file the Admin Panel page writes out of these same functions (see _webui_write_sampler).
 
+# Static facts: hostname mac sn ddns cpu_vendor_model cpu_cores cpu_freq, and the storage line
+# (storage_info for the menus; storage_label / storage_value / storage_tone for the page)
+hw_collect_static() {
     if command -v uci >/dev/null 2>&1; then
         hostname=$(uci get system.@system[0].hostname 2>/dev/null)
     fi
@@ -2739,6 +2831,190 @@ show_hardware_info() {
     else
         storage_info=$(printf "   Physical Storage: %bUNKNOWN%b\n" "${YELLOW}" "${RESET}")
     fi
+    local _plain; _plain=$(printf '%b' "$storage_info" | sed "s/$(printf '\033')\[[0-9;]*m//g")
+    storage_label=$(printf '%s' "$_plain" | sed -n 's/^ *\([^:]*\):.*/\1/p'); storage_value=${_plain#*: }
+    storage_tone=fact; [ "$storage_value" = UNKNOWN ] && storage_tone=yellow
+}
+hw_uptime_text() {   # "N Day(s), HH:MM:SS", or nothing when the kernel won't say
+    local up rest d h m sec
+    [ -f /proc/uptime ] || return 0
+    read -r up rest < /proc/uptime; up=${up%.*}
+    d=$((up / 86400)); h=$(( (up % 86400) / 3600 )); m=$(( (up % 3600) / 60 )); sec=$((up % 60))
+    printf '%s Day(s), %02d:%02d:%02d' "$d" "$h" "$m" "$sec"
+}
+hw_cpu_counters() {   # "total idle" from /proc/stat - CPU usage is the change between two readings
+    local l u n sy i io irq sirq rest
+    read -r l u n sy i io irq sirq rest < /proc/stat
+    echo "$((u + n + sy + i + io + irq + sirq)) $i"
+}
+hw_load_text() { local a b c rest; read -r a b c rest < /proc/loadavg; printf '%s, %s, %s' "$a" "$b" "$c"; }
+hw_temp_text() { local t; t=$(get_cpu_temp); [ "$t" = unknown ] && echo UNKNOWN || echo "$t°C"; }
+hw_fan_text() { local f; f=$(get_fan_speed); [ "$f" = N/A ] && echo "" || echo "$f RPM"; }   # nothing when there's no fan
+hw_fs_rows() { df -Ph | head -1; df -Ph | grep -E "^/dev/" | grep -v "tmpfs" | head -3; }   # header + up to 3 devices
+# Hardware crypto acceleration: "section|label|value|tone" rows, and cpu_features (the flags the CPU reports).
+# Capabilities come from the CPU's HWCAP feature flags, NOT /proc/crypto: OpenSSL/OpenVPN (userspace) and
+# kernel/Go WireGuard both pick their accelerated paths from these flags; /proc/crypto is the wrong layer.
+# AES-GCM's authentication (GHASH) needs PMULL; ChaCha20-Poly1305 needs SIMD/NEON.
+hw_crypto_rows() {
+    local feat aes=0 pmull=0 sha1=0 sha2=0 sha512=0 simd=0 yn
+    feat=$(grep -m1 -iE '^(features|flags)[[:space:]]*:' /proc/cpuinfo 2>/dev/null)
+    case " $feat " in *" aes "*)    aes=1    ;; esac
+    case " $feat " in *" pmull "*)  pmull=1  ;; esac
+    case " $feat " in *" sha1 "*)   sha1=1   ;; esac
+    case " $feat " in *" sha2 "*)   sha2=1   ;; esac
+    case " $feat " in *" sha512 "*) sha512=1 ;; esac
+    case " $feat " in *" asimd "*|*" neon "*) simd=1 ;; esac
+    cpu_features=$(printf '%s\n' "$feat" | grep -oE 'aes|pmull|sha1|sha2|sha512|sha3|asimd|neon' | tr '\n' ' ')
+    _hw_yn() { [ "$1" = 1 ] && echo "YES|green" || echo "NO|grey"; }
+    printf 'Hardware-Accelerated Algorithms|%s|%s\n' \
+        "AES (OpenVPN, IPsec, TLS)" "$(_hw_yn $aes)" \
+        "AES-GCM / GHASH (OpenVPN AEAD)" "$(_hw_yn $pmull)" \
+        "ChaCha20-Poly1305 (WireGuard, Tailscale)" "$(_hw_yn $simd)" \
+        "SHA-1 (HMAC, legacy TLS)" "$(_hw_yn $sha1)" \
+        "SHA-256 (TLS, HMAC, firmware integrity)" "$(_hw_yn $sha2)" \
+        "SHA-512 (TLS/HMAC)" "$(_hw_yn $sha512)"
+    # the VPN verdict: FULL / LIMITED / NONE
+    if [ "$simd" = 1 ]; then echo "VPN Performance Assessment|WireGuard / Tailscale|FULL|green"
+    else echo "VPN Performance Assessment|WireGuard / Tailscale|NONE|grey"; fi
+    if [ "$aes" = 1 ] && [ "$pmull" = 1 ]; then echo "VPN Performance Assessment|OpenVPN|FULL|green"
+    elif [ "$aes" = 1 ]; then echo "VPN Performance Assessment|OpenVPN|LIMITED|yellow"
+    else echo "VPN Performance Assessment|OpenVPN|NONE|grey"; fi
+}
+
+# Wi-Fi radios, one "radio|iface|band|wgen|proto|htmode|mimo|channel" line each (UCI is the source of truth
+# for the radio list; the channel is the live one from iwinfo when it answers)
+hw_wireless_rows() {
+    local radio iface iface_sec htmode band current_chan mimo phy ant tx rx txn rxn proto wgen wphy wp
+    for radio in $(uci show wireless | grep "=wifi-device" | cut -d. -f2 | cut -d= -f1); do
+        
+        # 1. Configuration from UCI
+        htmode=$(uci -q get wireless.${radio}.htmode)
+        band=$(uci -q get wireless.${radio}.band)
+        
+        # 2. Map Radio to Interface (ra0, rai0, etc.)
+        iface=""
+        for iface_sec in $(uci show wireless | grep "=wifi-iface" | cut -d. -f2 | cut -d= -f1); do
+            if [ "$(uci -q get wireless.${iface_sec}.device)" = "$radio" ]; then
+                iface=$(uci -q get wireless.${iface_sec}.ifname)
+                break
+            fi
+        done
+
+        # 3. Real-time Channel Extraction (The Fix)
+        current_chan="N/A"
+        if [ -n "$iface" ] && command -v iwinfo >/dev/null 2>&1; then
+            # This sed regex finds the word 'Channel' and grabs the number following it
+            current_chan=$(iwinfo "$iface" info 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')
+        fi
+        
+        # Fallback to UCI config if live data is missing
+        if [ -z "$current_chan" ]; then
+            current_chan=$(uci -q get wireless.${radio}.channel)
+        fi
+
+        # 4. MIMO from the driver's *configured* antenna chainmask
+        #    (popcount of TX/RX): 0x3=2x2, 0x7=3x3, 0xf=4x4. This is
+        #    the operating config, not the chip's max ("Available").
+        #    N/A when the driver can't report it.
+        mimo="N/A"
+        if [ -n "$iface" ] && command -v iw >/dev/null 2>&1; then
+            phy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null)
+            if [ -n "$phy" ]; then
+                ant=$(iw phy "$phy" info 2>/dev/null | grep -i 'Configured Antennas')
+                tx=$(printf '%s' "$ant" | sed -n 's/.*TX \(0x[0-9a-fA-F]*\).*/\1/p')
+                rx=$(printf '%s' "$ant" | sed -n 's/.*RX \(0x[0-9a-fA-F]*\).*/\1/p')
+                txn=$(popcount_hex "$tx"); rxn=$(popcount_hex "$rx")
+                [ "$txn" -gt 0 ] && [ "$rxn" -gt 0 ] && mimo="${txn}x${rxn}"
+            fi
+        fi
+
+        # 5. Band Display
+        case "$band" in
+            2g) band="2.4GHz" ;;
+            5g) band="5GHz" ;;
+            6g) band="6GHz" ;;
+        esac
+
+        # 6. Supported standards + Wi-Fi generation (band-aware chip
+        #    capability). The generation rides the Band line in parens;
+        #    the 802.11 letters get their own Protocol line below it.
+        proto="N/A"; wgen=""
+        if [ -n "$iface" ] && command -v iw >/dev/null 2>&1; then
+            wphy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null)
+            if [ -n "$wphy" ]; then
+                wp=$(wifi_protocol "$wphy" "$band")
+                proto=${wp%|*}; wgen=${wp#*|}
+            fi
+        fi
+
+        printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$radio" "${iface:-N/A}" "$band" "$wgen" "$proto" "${htmode:-N/A}" "$mimo" "${current_chan:-Auto}"
+    done
+}
+
+# The physical ports as JSON for the page - collected by hwnet_collect and judged by hwnet_state / hwnet_spd,
+# exactly as hwnet_render draws them for the menus: groups (a switch or the SoC) with their ports, then the
+# WAN address and the LAN bridge.
+hwnet_json() {
+    local grp glabel uplink uspeed g silk role rs mapsto st state mb link first gfirst _wandev _wanip _br _ip _mem
+    hwnet_collect </dev/null
+    printf '{"groups":['; gfirst=1
+    while IFS="$TAB" read -r grp glabel uplink uspeed; do
+        [ "$gfirst" = 1 ] || printf ','; gfirst=0
+        printf '{"label":%s,"uplink":%s,"ports":[' "$(_json_str "$glabel")" "$(_json_str "${uplink:+$uplink${uspeed:+ ($uspeed to SoC)}}")"
+        first=1
+        grep "^$grp$TAB" "$NT" 2>/dev/null > "$NT.p"
+        while IFS="$TAB" read -r g silk role rs mapsto; do
+            st=$(hwnet_state "$rs" </dev/null); state=${st%%|*}; mb=${st#*|}; link=$(hwnet_spd "$mb")
+            [ "$state" = up ] || link="-"
+            [ "$first" = 1 ] || printf ','; first=0
+            printf '{"port":%s,"role":%s,"status":"%s","tone":"%s","link":%s,"maps_to":%s}' "$(_json_str "$silk")" "$(_json_str "$role")" \
+                "$([ "$state" = up ] && echo UP || echo DOWN)" "$([ "$state" = up ] && echo green || echo grey)" "$(_json_str "$link")" "$(_json_str "$mapsto")"
+        done < "$NT.p"
+        printf ']}'
+    done < "$NG"
+    _wandev=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
+    _wanip=$(ip -4 -o addr show "$_wandev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+    _br=$(hwnet_bridge </dev/null)
+    [ -n "$_br" ] && { _ip=$(ip -4 -o addr show "$_br" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+                      _mem=$(ls "/sys/class/net/$_br/brif/" 2>/dev/null | grep -E '^(eth|lan|wan)' | tr '\n' ' ' | sed 's/ *$//'); }
+    printf '],"wan":%s,"lan":%s}' "$(_json_str "${_wanip:+$_wanip${_wandev:+ ($_wandev)}}")" "$(_json_str "${_br:+$_br${_ip:+ ($_ip)}${_mem:+ = $_mem}}")"
+    rm -f "$NT" "$NG" "$NT.p"
+}
+
+# The live values as one JSON object (the page's 1-second refresh; also its first paint)
+hw_live_json() {   # [fs] - add filesystem usage (asked every 10 s, like the menu screen)
+    get_mem_stats
+    printf '{"uptime":"%s","temp":"%s","fan":"%s","cpu":"%s","load":"%s","mem":{"soldered":"%s MB","total":"%s MB","free":"%s MB","used":"%s MB (%s.%s%%)","available":"%s MB","buffcache":"%s MB"}' \
+        "$(hw_uptime_text)" "$(hw_temp_text)" "$(hw_fan_text)" "$(hw_cpu_counters)" "$(hw_load_text)" \
+        "$mem_rounded" "$mem_total" "$mem_free" "$mem_used" "$mem_p_whole" "$mem_p_decimal" "$mem_avail" "$mem_buffcache"
+    if [ "$1" = fs ]; then
+        printf ',"fs":['
+        # (df's header says "Mounted on" - two words for one column)
+        hw_fs_rows | awk '{ gsub(/"/, ""); n = NF; last = ""
+                            if (NR == 1 && $NF == "on") { n = NF - 1; last = $(NF - 1) " on" }
+                            printf "%s[", (NR > 1 ? "," : "")
+                            for (i = 1; i <= n; i++) { v = $i; if (i == n && last != "") v = last; printf "%s\"%s\"", (i > 1 ? "," : ""), v }
+                            printf "]" }'
+        printf ']'
+    fi
+    printf '}\n'
+}
+
+show_hardware_info() {
+    page=1
+    reveal_ids=0
+    total_pages=4
+    nav_choice=""
+    
+    clear
+    hash -r
+    if ! command -v lscpu >/dev/null 2>&1; then
+        print_centered_header "Hardware Information"
+        install_package lscpu "lscpu (enhanced CPU info)"
+        clear
+    fi
+
+    hw_collect_static
 
     refresh_counter=0
 
@@ -2747,8 +3023,7 @@ show_hardware_info() {
             printf '\033[H\033[J'
             printf '\033[?25l'
             if [ $((refresh_counter % 10)) -eq 0 ]; then
-                fsdata=$(df -Ph | head -1 | sed 's/^/   /')
-                fstmp=$(df -Ph | grep -E "^/dev/" | grep -v "tmpfs" | head -3 | sed 's/^/   /')
+                fsall=$(hw_fs_rows | sed 's/^/   /')   # every 10th refresh, like the page
             fi
             else 
                 clear
@@ -2779,16 +3054,9 @@ show_hardware_info() {
                 printf "\n"
 
                 if [ -f /proc/uptime ]; then
-                    read -r uptime_seconds rest < /proc/uptime
-                    uptime_raw=${uptime_seconds%.*}
-                    up_d=$((uptime_raw / 86400))
-                    up_h=$(( (uptime_raw % 86400) / 3600 ))
-                    up_m=$(( (uptime_raw % 3600) / 60 ))
-                    up_s=$(( uptime_raw % 60 ))
-                    time_string=$(printf "%02d:%02d:%02d" "$up_h" "$up_m" "$up_s")  
                     # Pad the WHOLE value to the left column's width (like Model/Firmware): padding
                     # only the time let a 2-digit day count push Device ID one column right.
-                    printf "   Uptime:   %b%-26s%b" "${BLUE}" "$up_d Day(s), $time_string" "${RESET}"
+                    printf "   Uptime:   %b%-26s%b" "${BLUE}" "$(hw_uptime_text)" "${RESET}"
                 else
                     printf "   Uptime:   %b%-26s%b" "${YELLOW}" "UNKNOWN" "${RESET}"
                 fi
@@ -2803,19 +3071,19 @@ show_hardware_info() {
                 [ -n "$cpu_freq" ] && printf "   Frequency:  %b%.0f MHz%b" "${BLUE}" "$cpu_freq" "${RESET}"
                 printf "\n"
                 
-                cpu_temp=$(get_cpu_temp)
-                if [ "$cpu_temp" = "unknown" ]; then
+                cpu_temp=$(hw_temp_text)
+                if [ "$cpu_temp" = UNKNOWN ]; then
                     printf "   CPU Temperature: %b%-17s%b\033[K" "${YELLOW}" "UNKNOWN" "${RESET}"
                 else
-                    printf "   CPU Temperature: %b%-17s%b\033[K" "${BLUE}" "$cpu_temp°C" "${RESET}"
+                    printf "   CPU Temperature: %b%-17s%b\033[K" "${BLUE}" "$cpu_temp" "${RESET}"
                 fi
                 
-                fan_speed=$(get_fan_speed)
-                [ -n "$fan_speed" ] && printf "   Fan Speed:  %b%s RPM%b\033[K" "${BLUE}" "$fan_speed" "${RESET}"
+                fan_speed=$(hw_fan_text)
+                [ -n "$fan_speed" ] && printf "   Fan Speed:  %b%s%b\033[K" "${BLUE}" "$fan_speed" "${RESET}"
                 printf "\n"
 
-                read -r cpu_label user nice system idle iowait irq softirq rest < /proc/stat
-                total=$((user + nice + system + idle + iowait + irq + softirq))
+                # CPU usage = the change between two readings (the page computes it the same way)
+                set -- $(hw_cpu_counters); total=$1; idle=$2
                 diff_total=$((total - prev_total))
                 diff_idle=$((idle - prev_idle))
                 if [ "$diff_total" -gt 0 ]; then
@@ -2825,8 +3093,7 @@ show_hardware_info() {
                 prev_idle=$idle
                 [ -n "$cpu_percentage" ] && printf "   CPU Usage:       %b%-5s%b %-10s" "${BLUE}" "$cpu_percentage%" "${RESET}" ""
                 
-                read -r load_1 load_5 load_15 rest < /proc/loadavg
-                cpu_load="${load_1}, ${load_5}, ${load_15}"
+                cpu_load=$(hw_load_text)
                 [ -n "$cpu_load" ] && printf "   Load Avg:   %b%s%b\033[K" "${BLUE}" "$cpu_load" "${RESET}"
                 printf "\n\n"
 
@@ -2847,54 +3114,24 @@ show_hardware_info() {
                 printf "$storage_info\n"
                 
                 printf "\n %b\n" "${CYAN}Filesystem Usage:${RESET}"
-                printf "%b\n%b\n" "$fsdata" "$fstmp"
+                printf "%b\n" "$fsall"
                 ;;
                 
             2)
                 printf " %b%bPage 2 of $total_pages: Hardware Crypto Acceleration%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
-                # Capabilities come from CPU HWCAP feature flags, NOT /proc/crypto.
-                # OpenSSL/OpenVPN (userspace) and kernel/Go WireGuard both pick their
-                # accelerated paths from these flags; /proc/crypto is the wrong layer.
-                feat_line=$(grep -m1 -iE '^(features|flags)[[:space:]]*:' /proc/cpuinfo 2>/dev/null)
-                has_aes=0; has_pmull=0; has_sha1=0; has_sha2=0; has_sha512=0; has_simd=0
-                case " $feat_line " in *" aes "*)    has_aes=1    ;; esac
-                case " $feat_line " in *" pmull "*)  has_pmull=1  ;; esac
-                case " $feat_line " in *" sha1 "*)   has_sha1=1   ;; esac
-                case " $feat_line " in *" sha2 "*)   has_sha2=1   ;; esac
-                case " $feat_line " in *" sha512 "*) has_sha512=1 ;; esac
-                case " $feat_line " in *" asimd "*|*" neon "*) has_simd=1 ;; esac
-
-                cpu_features=$(printf '%s\n' "$feat_line" | grep -oE 'aes|pmull|sha1|sha2|sha512|sha3|asimd|neon' | tr '\n' ' ')
+                # the rows come from hw_crypto_rows - the Admin Panel page shows the same ones
+                hw_crypto_rows > "/tmp/.glhw.$$"
                 [ -n "$cpu_features" ] && printf " %bCPU Features:%b %s\n\n" "${CYAN}" "${RESET}" "${cpu_features% }"
-
-                # Per-algorithm value color/text (AES-GCM auth = GHASH needs PMULL;
-                # ChaCha20-Poly1305 needs SIMD/NEON).
-                aes_c=$GREY; aes_t=NO; [ "$has_aes" -eq 1 ]    && { aes_c=$GREEN; aes_t=YES; }
-                gcm_c=$GREY; gcm_t=NO; [ "$has_pmull" -eq 1 ]  && { gcm_c=$GREEN; gcm_t=YES; }
-                cha_c=$GREY; cha_t=NO; [ "$has_simd" -eq 1 ]   && { cha_c=$GREEN; cha_t=YES; }
-                s1_c=$GREY;  s1_t=NO;  [ "$has_sha1" -eq 1 ]   && { s1_c=$GREEN;  s1_t=YES; }
-                s2_c=$GREY;  s2_t=NO;  [ "$has_sha2" -eq 1 ]   && { s2_c=$GREEN;  s2_t=YES; }
-                s5_c=$GREY;  s5_t=NO;  [ "$has_sha512" -eq 1 ] && { s5_c=$GREEN;  s5_t=YES; }
-
-                printf " %b\n" "${CYAN}Hardware-Accelerated Algorithms:${RESET}"
-                printf "   %-43s%b%s%b\n" "AES (OpenVPN, IPsec, TLS):"                "$aes_c" "$aes_t" "${RESET}"
-                printf "   %-43s%b%s%b\n" "AES-GCM / GHASH (OpenVPN AEAD):"           "$gcm_c" "$gcm_t" "${RESET}"
-                printf "   %-43s%b%s%b\n" "ChaCha20-Poly1305 (WireGuard, Tailscale):" "$cha_c" "$cha_t" "${RESET}"
-                printf "   %-43s%b%s%b\n" "SHA-1 (HMAC, legacy TLS):"                 "$s1_c"  "$s1_t"  "${RESET}"
-                printf "   %-43s%b%s%b\n" "SHA-256 (TLS, HMAC, firmware integrity):"  "$s2_c"  "$s2_t"  "${RESET}"
-                printf "   %-43s%b%s%b\n" "SHA-512 (TLS/HMAC):"                       "$s5_c"  "$s5_t"  "${RESET}"
-
-                # VPN verdict: FULL / LIMITED / NONE.
-                if [ "$has_simd" -eq 1 ]; then wg_v="${GREEN}FULL${RESET}"; else wg_v="${GREY}NONE${RESET}"; fi
-                if   [ "$has_aes" -eq 1 ] && [ "$has_pmull" -eq 1 ]; then ovpn_v="${GREEN}FULL${RESET}"
-                elif [ "$has_aes" -eq 1 ];                          then ovpn_v="${YELLOW}LIMITED${RESET}"
-                else                                                     ovpn_v="${GREY}NONE${RESET}"
-                fi
-
-                printf "\n %b\n" "${CYAN}VPN Performance Assessment:${RESET}"
-                printf "   %-43s%b\n" "WireGuard / Tailscale:" "$wg_v"
-                printf "   %-43s%b\n" "OpenVPN:"               "$ovpn_v"
+                _hsec=""
+                while IFS='|' read -r _sec _lbl _val _tone; do
+                    if [ "$_sec" != "$_hsec" ]; then
+                        [ -n "$_hsec" ] && printf "\n"
+                        printf " %b\n" "${CYAN}${_sec}:${RESET}"; _hsec=$_sec
+                    fi
+                    printf "   %-43s%b%s%b\n" "$_lbl:" "$(_tone_color "$_tone")" "$_val" "${RESET}"
+                done < "/tmp/.glhw.$$"
+                rm -f "/tmp/.glhw.$$"
                 ;;
                 
             3)
@@ -2906,83 +3143,23 @@ show_hardware_info() {
                 printf " %b%bPage 4 of $total_pages: Wireless Interfaces%b\n\n" "${BOLD}" "${CYAN}" "${RESET}"
                 
                 radio_count=0
-                # Use UCI as the source of truth for the Radio list
-                for radio in $(uci show wireless | grep "=wifi-device" | cut -d. -f2 | cut -d= -f1); do
+                hw_wireless_rows > "/tmp/.glhw.$$"
+                while IFS='|' read -r radio iface band wgen proto htmode mimo current_chan; do
                     radio_count=$((radio_count + 1))
-                    
-                    # 1. Configuration from UCI
-                    htmode=$(uci -q get wireless.${radio}.htmode)
-                    band=$(uci -q get wireless.${radio}.band)
-                    
-                    # 2. Map Radio to Interface (ra0, rai0, etc.)
-                    iface=""
-                    for iface_sec in $(uci show wireless | grep "=wifi-iface" | cut -d. -f2 | cut -d= -f1); do
-                        if [ "$(uci -q get wireless.${iface_sec}.device)" = "$radio" ]; then
-                            iface=$(uci -q get wireless.${iface_sec}.ifname)
-                            break
-                        fi
-                    done
-
-                    # 3. Real-time Channel Extraction (The Fix)
-                    current_chan="N/A"
-                    if [ -n "$iface" ] && command -v iwinfo >/dev/null 2>&1; then
-                        # This sed regex finds the word 'Channel' and grabs the number following it
-                        current_chan=$(iwinfo "$iface" info 2>/dev/null | sed -n 's/.*Channel: \([0-9]*\).*/\1/p')
-                    fi
-                    
-                    # Fallback to UCI config if live data is missing
-                    if [ -z "$current_chan" ]; then
-                        current_chan=$(uci -q get wireless.${radio}.channel)
-                    fi
-
-                    # 4. MIMO from the driver's *configured* antenna chainmask
-                    #    (popcount of TX/RX): 0x3=2x2, 0x7=3x3, 0xf=4x4. This is
-                    #    the operating config, not the chip's max ("Available").
-                    #    N/A when the driver can't report it.
-                    mimo="N/A"
-                    if [ -n "$iface" ] && command -v iw >/dev/null 2>&1; then
-                        phy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null)
-                        if [ -n "$phy" ]; then
-                            ant=$(iw phy "$phy" info 2>/dev/null | grep -i 'Configured Antennas')
-                            tx=$(printf '%s' "$ant" | sed -n 's/.*TX \(0x[0-9a-fA-F]*\).*/\1/p')
-                            rx=$(printf '%s' "$ant" | sed -n 's/.*RX \(0x[0-9a-fA-F]*\).*/\1/p')
-                            txn=$(popcount_hex "$tx"); rxn=$(popcount_hex "$rx")
-                            [ "$txn" -gt 0 ] && [ "$rxn" -gt 0 ] && mimo="${txn}x${rxn}"
-                        fi
-                    fi
-
-                    # 5. Band Display
-                    case "$band" in
-                        2g) band="2.4GHz" ;;
-                        5g) band="5GHz" ;;
-                        6g) band="6GHz" ;;
-                    esac
-
-                    # 6. Supported standards + Wi-Fi generation (band-aware chip
-                    #    capability). The generation rides the Band line in parens;
-                    #    the 802.11 letters get their own Protocol line below it.
-                    proto="N/A"; wgen=""
-                    if [ -n "$iface" ] && command -v iw >/dev/null 2>&1; then
-                        wphy=$(cat "/sys/class/net/$iface/phy80211/name" 2>/dev/null)
-                        if [ -n "$wphy" ]; then
-                            wp=$(wifi_protocol "$wphy" "$band")
-                            proto=${wp%|*}; wgen=${wp#*|}
-                        fi
-                    fi
-
                     printf " %bRadio %d:%b %s\n" "${CYAN}" "$radio_count" "${RESET}" "$radio"
-                    printf "   Interface: %b%s%b\n" "${BLUE}" "${iface:-N/A}" "${RESET}"
+                    printf "   Interface: %b%s%b\n" "${BLUE}" "$iface" "${RESET}"
                     if [ -n "$wgen" ]; then
                         printf "   Band:      %b%s  (%s)%b\n" "${BLUE}" "$band" "$wgen" "${RESET}"   # Wi-Fi generation is a fact -> follows its value
                     else
                         printf "   Band:      %b%s%b\n" "${BLUE}" "$band" "${RESET}"
                     fi
                     printf "   Protocol:  %b%s%b\n" "${BLUE}" "$proto" "${RESET}"
-                    printf "   HT Mode:   %b%s%b\n" "${BLUE}" "${htmode:-N/A}" "${RESET}"
+                    printf "   HT Mode:   %b%s%b\n" "${BLUE}" "$htmode" "${RESET}"
                     printf "   MIMO:      %b%s%b\n" "${BLUE}" "$mimo" "${RESET}"
-                    printf "   Channel:   %b%s%b\n" "${BLUE}" "${current_chan:-Auto}" "${RESET}"
+                    printf "   Channel:   %b%s%b\n" "${BLUE}" "$current_chan" "${RESET}"
                     printf "\n"
-                done
+                done < "/tmp/.glhw.$$"
+                rm -f "/tmp/.glhw.$$"
                 ;;
         esac
         
@@ -3369,17 +3546,27 @@ _agh_fw_risk() {
 }
 # The Persistence value, shared by the Control Center and Updates & Channel: ENABLED green, DISABLED
 # grey - or yellow with its reason when a firmware update would leave AdGuardHome unable to start.
-_agh_persist_disp() {
-    if _agh_updates_persist; then _lc_value ENABLED
-    elif _agh_fw_risk; then printf '%bDISABLED%b (firmware update would stop AdGuardHome)' "$YELLOW" "$RESET"
-    else _lc_value DISABLED; fi
+# AdGuardHome's Persistence status, once - the Control Center row (menu + page) and the Updates screen read it:
+# yellow DISABLED when a firmware update would stop AdGuardHome.  -> value|tone|note
+_agh_persist_row() {
+    if _agh_updates_persist; then echo "ENABLED|green|"
+    elif _agh_fw_risk; then echo "DISABLED|yellow|firmware update would stop AdGuardHome"
+    else echo "DISABLED|grey|"; fi
 }
+_agh_persist_disp() { _row_value "Persistence|$(_agh_persist_row)"; }
+# A named answer: the web page answers its questions up front (AGH_ANS_* in the job's environment), so a
+# flow reads the given answer - echoed like a typed one - and only asks the terminal when there is none.
+read_ans() {   # <VAR> -> REPLY
+    eval "REPLY=\${$1:-}"
+    if [ -n "$REPLY" ]; then printf '%s\n' "$REPLY"; else read -r REPLY; fi
+}
+
 _agh_fw_prompt() {   # after a build change: offer persistence only when the risk is real
     local c
     _agh_fw_risk || return 0
     printf "\n"
     print_warning "After a firmware update, AdGuardHome won't start: the firmware puts back\nGL.iNet's v$(_agh_rom_ver), which can't read this config.yaml"
-    printf "Keep this version across firmware updates? [Y/n]: "; read -r c; printf "\n"
+    printf "Keep this version across firmware updates? [Y/n]: "; read_ans AGH_ANS_KEEP; c=$REPLY; printf "\n"
     case "$c" in
         n|N) print_info "Choose Enable Persistence in Updates & Channel before any firmware update" ;;
         *)   _agh_persist_set on; _persist_msg on "AdGuardHome updates" ;;
@@ -3435,7 +3622,7 @@ _agh_channel_switch() {   # <beta|release> [recover]
         *)         print_info "This will switch to AdGuard's current stable release (v$ver).\nTo return to an earlier version, restore from backup in Backup & Recovery."
                    printf "Switch to the Stable channel? [y/N]: " ;;
     esac
-    read -r c
+    read_ans AGH_ANS_GO; c=$REPLY
     case "$c" in y|Y) ;; *) return ;; esac
     printf "\n"
 
@@ -3481,6 +3668,19 @@ _agh_channel_switch() {   # <beta|release> [recover]
 }
 agh_channel_to_beta()   { _agh_channel_switch beta; }
 agh_channel_to_stable() { _agh_channel_switch release; }
+
+# Updates via UI on/off (the menu and the Admin Panel page): the dashboard's own update check is the init
+# script's --no-check-update flag
+agh_updates_ui_set() {   # <enable|disable>
+    agh_was_running=0; is_agh_running && agh_was_running=1
+    if [ "$1" = enable ]; then
+        sed -i 's/--no-check-update[[:space:]]*//g' "$AGH_INIT"
+        agh_apply_and_restart "$agh_was_running" "" "" "Updates via UI enabled"
+    else
+        sed -i '/procd_set_param command/ s/ \(-c\|--config\)/ --no-check-update \1/' "$AGH_INIT"
+        agh_apply_and_restart "$agh_was_running" "" "" "Updates via UI disabled"
+    fi
+}
 
 manage_agh_ui_updates() {
     if _agh_upd_unchecked; then
@@ -3550,7 +3750,6 @@ manage_agh_ui_updates() {
 
         case $agh_choice in
             1)
-                agh_was_running=0; is_agh_running && agh_was_running=1
                 if [ "$ui_action" = "enable" ]; then
                     if [ "$updates_persist" -eq 0 ]; then
                         print_warning "Persistence is off, so a firmware update reinstalls GL.iNet's build and\ndrops any version installed through the dashboard. Consider enabling persistence."
@@ -3560,14 +3759,11 @@ manage_agh_ui_updates() {
                     fi
                     printf "Proceed with changes? [y/N]: "; read -r confirm
                     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
-                    sed -i 's/--no-check-update[[:space:]]*//g' "$AGH_INIT"
-                    agh_apply_and_restart "$agh_was_running" "" "" "Updates via UI enabled"
                 else
                     printf "Disable Updates via UI? [y/N]: "; read -r confirm
                     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
-                    sed -i '/procd_set_param command/ s/ \(-c\|--config\)/ --no-check-update \1/' "$AGH_INIT"
-                    agh_apply_and_restart "$agh_was_running" "" "" "Updates via UI disabled"
                 fi
+                agh_updates_ui_set "$ui_action"
                 press_any_key
                 ;;
             2)
@@ -3716,6 +3912,62 @@ agh_remove_filter_limit() {
     return 0
 }
 
+# Would the current filter lists overflow GL's cap once it's back? The cap size comes from the (commented)
+# mount_filter_img call: bs x count, ext4 ~90%. 0 = they won't fit (sets _use_kb / _usable_kb for the message).
+_agh_fl_fit() {   # <workdir>
+    local mfi sz cnt num unit mul cap_kb
+    mfi=$(grep -oE "mount_filter_img[[:space:]]+[0-9]+[A-Za-z]?[[:space:]]+[0-9]+" "$AGH_INIT" | head -1)
+    sz=$(echo "$mfi" | awk '{print $2}'); cnt=$(echo "$mfi" | awk '{print $3}')
+    num=$(echo "$sz" | grep -oE '[0-9]+'); unit=$(echo "$sz" | grep -oE '[A-Za-z]' | head -1)
+    case "$unit" in G|g) mul=1048576 ;; K|k) mul=1 ;; *) mul=1024 ;; esac
+    cap_kb=0; [ -n "$num" ] && [ -n "$cnt" ] && cap_kb=$(( num * mul * cnt ))
+    _usable_kb=$(( cap_kb * 9 / 10 ))
+    _use_kb=$(du -sk "$1/data/filters" 2>/dev/null | awk '{print $1}')
+    case "$_use_kb" in ''|*[!0-9]*) _use_kb=0 ;; esac
+    [ "$cap_kb" -gt 0 ] && [ "$_use_kb" -gt "$_usable_kb" ]
+}
+# Put GL's filter space limit back (the menu and the Admin Panel page): uncomment mount_filter_img, restart
+agh_restore_filter_limit() {
+    local agh_pid=""
+    if is_agh_running; then
+        agh_pid=$(pidof AdGuardHome)
+        _agh_svc_stop "$AGH_INIT" || { fail_report "Couldn't stop AdGuardHome, so nothing was changed" "" "Retry in a moment, or reboot the router and retry"; return 1; }
+    fi
+    sed -i "s|^\([[:space:]]*\)#[[:space:]]*\(mount_filter_img[[:space:]]\)|\1\2|" "$AGH_INIT"
+    if [ -n "$agh_pid" ]; then
+        if spin_run "Restarting AdGuardHome" _agh_svc_verify "$AGH_INIT" start; then
+            print_success "Filter space limit enabled"
+        else
+            fail_report "Filter space limit enabled, but AdGuardHome didn't restart" \
+                "$(logread 2>/dev/null | grep -i adguard | tail -3)" "Check config.yaml, then retry"
+        fi
+    else
+        print_success "Filter space limit enabled"
+        print_info "AdGuardHome is stopped - the limit applies when it next starts"
+    fi
+    cached_rules=""   # AGH re-loads filters -> Control Center must recount
+}
+
+# The Storage STATUS rows - the menu and the page both render these. One row per directory: what the directory
+# itself uses, then its disk's free and total in the note (with the Filter Space Limit on, the filters directory's
+# disk is that limited space). label|value|tone|note
+agh_storage_rows() {   # <working dir>
+    local wd="$1" d tot used free
+    echo "Working Directory|$wd|fact|"
+    for d in data filters; do
+        [ "$d" = data ] && d="$wd/data" || d="$wd/data/filters"
+        [ -d "$d" ] || continue
+        used=$(du -sh "$d" 2>/dev/null | awk '{print $1}')
+        df -Ph "$d" 2>/dev/null | tail -1 | {
+            read -r _ tot _ free _
+            echo "$([ "$d" = "$wd/data" ] && echo "Data Directory" || echo "Filters Directory")|${used:-0} used|fact|$free free, $tot total"
+        }
+    done
+    if grep -q "$wd/data/filters" /proc/mounts; then
+        echo "Filter Space Limit|ACTIVE|yellow|$(df -Pm "$wd/data/filters" | tail -1 | awk '{print $2}') MB"
+    elif [ "$(_agh_fl_state)" != none ]; then echo "Filter Space Limit|INACTIVE|grey|"
+    else echo "Filter Space Limit|NOT SUPPORTED|grey|"; fi   # no such feature for this model/firmware
+}
 manage_agh_storage() {
     while true; do
         clear
@@ -3728,34 +3980,12 @@ manage_agh_storage() {
             return
         fi
         
-        printf " %b\n" "${CYAN}STORAGE STATUS${RESET}"
-        printf "   Working Directory: %b%s%b\n" "${BLUE}" "$AGH_WORKDIR" "${RESET}"
-
-        sub_section_shown=0
-         if [ -d "$AGH_WORKDIR/data" ]; then
-            sub_section_shown=1
-            printf "\n %b\n" "${CYAN}$AGH_WORKDIR/data Directory:${RESET}"
-            df -Ph "$AGH_WORKDIR/data" 2>/dev/null | tail -1 | awk -v b="$BLUE" -v r="$RESET" '{printf "   Total: %s%s%s | Used: %s%s%s | Free: %s%s%s\n", b,$2,r, b,$3,r, b,$4,r}'
-        fi
-
-        if [ -d "$AGH_WORKDIR/data/filters" ]; then
-            sub_section_shown=1
-            printf "\n %b\n" "${CYAN}$AGH_WORKDIR/data/filters Directory:${RESET}"
-            df -Ph "$AGH_WORKDIR/data/filters" 2>/dev/null | tail -1 | awk -v b="$BLUE" -v r="$RESET" '{printf "   Total: %s%s%s | Used: %s%s%s | Free: %s%s%s\n", b,$2,r, b,$3,r, b,$4,r}'
-        fi
-
-        [ "$sub_section_shown" -eq 1 ] && printf "\n"
-        limit_active=0
-        if grep -q "$AGH_WORKDIR/data/filters" /proc/mounts; then
-            limit_active=1
-            # Calculate actual size from the mount point
-            current_limit=$(df -Pm "$AGH_WORKDIR/data/filters" | tail -1 | awk '{print $2}')
-            printf "   Filter Space Limit: %bACTIVE%b (%s MB)\n" "${YELLOW}" "${RESET}" "$current_limit"
-        elif [ "$(_agh_fl_state)" != none ]; then
-            printf "   Filter Space Limit: %bINACTIVE%b\n" "${GREY}" "${RESET}"
-        else
-            printf "   Filter Space Limit: %bNOT SUPPORTED%b\n" "${GREY}" "${RESET}"   # no such feature for this model/firmware
-        fi
+        # the rows the page shows too (agh_storage_rows); a for loop, not a pipe, so nothing reads them as stdin
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        local _sr _srs _soifs; _srs=$(agh_storage_rows "$AGH_WORKDIR"); _soifs=$IFS; IFS='
+'
+        for _sr in $_srs; do IFS=$_soifs; printf "   %-21s%b\n" "${_sr%%|*}:" "$(_row_value "$_sr")"; done
+        IFS=$_soifs
         
         # The limit is GL's mount_filter_img call in the init script: live (on), commented out (off),
         # or absent - this firmware has no such feature (rule 1: say so, offer only Back).
@@ -3809,17 +4039,8 @@ manage_agh_storage() {
             enable)
 
                 # Warn if the current filter lists won't fit once the cap is back - the ones
-                # that don't fit will silently fail to load (effectively disabled). The cap
-                # size comes from the (commented) mount_filter_img call: bs x count, ext4 ~90%.
-                _mfi=$(grep -oE "mount_filter_img[[:space:]]+[0-9]+[A-Za-z]?[[:space:]]+[0-9]+" "$AGH_INIT" | head -1)
-                _sz=$(echo "$_mfi" | awk '{print $2}'); _cnt=$(echo "$_mfi" | awk '{print $3}')
-                _num=$(echo "$_sz" | grep -oE '[0-9]+'); _unit=$(echo "$_sz" | grep -oE '[A-Za-z]' | head -1)
-                case "$_unit" in G|g) _mul=1048576 ;; K|k) _mul=1 ;; *) _mul=1024 ;; esac
-                _cap_kb=0; [ -n "$_num" ] && [ -n "$_cnt" ] && _cap_kb=$(( _num * _mul * _cnt ))
-                _usable_kb=$(( _cap_kb * 9 / 10 ))
-                _use_kb=$(du -sk "$AGH_WORKDIR/data/filters" 2>/dev/null | awk '{print $1}')
-                case "$_use_kb" in ''|*[!0-9]*) _use_kb=0 ;; esac
-                if [ "$_cap_kb" -gt 0 ] && [ "$_use_kb" -gt "$_usable_kb" ]; then
+                # that don't fit will silently fail to load (effectively disabled)
+                if _agh_fl_fit "$AGH_WORKDIR"; then
                     print_warning "Your filter lists use ~$(( _use_kb / 1024 ))MB, but this limit only holds ~$(( _usable_kb / 1024 ))MB"
                     print_info "Lists that don't fit won't load - remove some, or leave the limit off for full space"
                     printf "Re-enable the filter storage limit anyway? [y/N]: "; read -r _reyn
@@ -3829,27 +4050,7 @@ manage_agh_storage() {
                     fi
                 fi
 
-                if is_agh_running; then
-                    agh_pid=$(pidof AdGuardHome)
-                    _agh_svc_stop "$AGH_INIT" || { fail_report "Couldn't stop AdGuardHome, so nothing was changed" "" "Retry in a moment, or reboot the router and retry"; press_any_key; continue; }
-                else
-                    agh_pid=""
-                fi
-                
-                sed -i "s|^\([[:space:]]*\)#[[:space:]]*\(mount_filter_img[[:space:]]\)|\1\2|" "$AGH_INIT"
-
-                if [ -n "$agh_pid" ]; then
-                    if spin_run "Restarting AdGuardHome" _agh_svc_verify "$AGH_INIT" start; then
-                        print_success "Filter space limit enabled"
-                    else
-                        fail_report "Filter space limit enabled, but AdGuardHome didn't restart" \
-                            "$(logread 2>/dev/null | grep -i adguard | tail -3)" "Check config.yaml, then retry"
-                    fi
-                else
-                    print_success "Filter space limit enabled"
-                    print_info "AdGuardHome is stopped - the limit applies when it next starts"
-                fi
-                cached_rules=""   # AGH re-loads filters -> Control Center must recount
+                agh_restore_filter_limit
                 press_any_key
                 ;;
             \?|h|H|❓)
@@ -4142,6 +4343,25 @@ _agh_lists_write() {
     agh_clean_orphan_filters "$cfg" "$wd"
 }
 
+# Remove ONE list, headless, in the Lists Manager's own order: undo copy first, stop AdGuardHome (or refuse,
+# changing nothing), drop the list and its downloaded filter file, then restart it only if it was running.
+# 0 = removed; 1 = refused/failed (nothing changed); 2 = no list with that URL. The fleet guard uses it to free
+# memory taken by lists a test added.  <url>
+agh_list_remove_url() {
+    local cfg wd name was=0 backup
+    cfg=$(get_agh_config); wd=$(get_agh_workdir)
+    [ -f "$cfg" ] || return 1
+    name=$(awk -v u="$1" 'BEGIN { RS = "[[:space:]]*- " } index($0, "url: " u "\n") || index($0, "url: \"" u "\"") {
+            if (match($0, /name:[^\n]*/)) { n = substr($0, RSTART + 5, RLENGTH - 5); gsub(/^[ "]+|[ "]+$/, "", n); print n; exit } }' "$cfg")
+    [ -n "$name" ] || return 2
+    is_agh_running && was=1
+    backup="${cfg}.backup.$(date +%Y%m%d%H%M%S)"
+    cp "$cfg" "$backup" 2>/dev/null || { rm -f "$backup"; return 1; }
+    _agh_stop_or_refuse >/dev/null 2>&1 || { rm -f "$backup"; return 1; }
+    _agh_lists_normalize "$cfg"; agh_delete_block "$name" "$cfg"; agh_clean_orphan_filters "$cfg" "$wd"
+    agh_apply_and_restart "$was" "$backup" "$cfg" "List removed" "-" inline >/dev/null 2>&1
+}
+
 # Remove the target-active lists that have no downloaded file (they couldn't fit), then sweep
 # their leftovers.  <lists-data> <config> <workdir>
 _agh_lists_drop_empty() {
@@ -4233,7 +4453,7 @@ EOF
             print_warning "Enabling these lists (~$(agh_fmt_rules "$active") rules) puts memory in the HIGH zone on ${mt}MB RAM."
         fi
         print_info "zram swap adds compressed headroom and is strongly recommended before loading them"
-        printf "Enable zram swap now? [Y/n]: "; read -r _zr
+        printf "Enable zram swap now? [Y/n]: "; if [ -n "${AGH_LM_TARGETS:-}" ]; then _zr=n; echo n; else read -r _zr; fi
         if [ "$_zr" != "n" ] && [ "$_zr" != "N" ]; then
             printf "\n"
             zram_install_enable
@@ -4257,7 +4477,7 @@ EOF
             printf "\n"
             print_warning "The selected lists (~$((proj_kb/1024))MB) exceed the ~$((cap_kb/1024))MB filter storage limit"
             print_info "Removing the filter space limit lets them download"
-            printf "Remove the filter storage limit now? [y/N]: "; read -r _sl
+            printf "Remove the filter storage limit now? [y/N]: "; if [ -n "${AGH_LM_TARGETS:-}" ]; then _sl=n; echo n; else read -r _sl; fi
             if [ "$_sl" = "y" ] || [ "$_sl" = "Y" ]; then
                 printf "\n"
                 agh_remove_filter_limit && _agh_storage_over=0
@@ -4282,7 +4502,16 @@ agh_clean_orphan_filters() {
     done
 }
 
+_agh_lm_stage() {   # <lists data> - set the rows AGH_LM_TARGETS names to their target state (see manage_agh_lists)
+    local i sec n ty oi oe ti te rules url est want
+    while IFS='|' read -r i sec n ty oi oe ti te rules url est; do
+        want=$(printf '%s\n' "$AGH_LM_TARGETS" | awk -F= -v k="$n" '$1 == k { print $2; exit }')
+        [ -n "$want" ] && { ti=${want%%:*}; te=${want#*:}; }
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$i" "$sec" "$n" "$ty" "$oi" "$oe" "$ti" "$te" "$rules" "$url" "$est"
+    done < "$1" > "$1.st" && mv "$1.st" "$1"
+}
 manage_agh_lists() {
+    _lm_did=""
     # Curated, sectioned roster.  Fields: section|name|type|approx_rules|url
     # Recommended => ★ default Install+Enable.  AdGuard-catalog lists use AdGuard's
     # HostlistsRegistry mirror; Phantasm lists use their GitHub raw URLs.
@@ -4382,6 +4611,14 @@ EOF
         [ -z "$AGH_CONFIG" ] && { print_error "Config not found"; press_any_key; return; }
         LISTS_DATA=$(mktemp -t agh_data.XXXXXX)
         spin_run "Reading list sizes" _agh_build_lists
+        # the Admin Panel page: AGH_LM_LIST=<file> writes the rows and stops; AGH_LM_TARGETS ("<name>=<I>:<E>" lines)
+        # stages those targets and goes straight to Confirm (its questions answered from stdin; the guard rails'
+        # optional extras - zram, the storage limit - are answered no: the page asks for nothing beyond the lists)
+        if [ -n "${AGH_LM_LIST:-}" ]; then cp "$LISTS_DATA" "$AGH_LM_LIST"; rm -f "$LISTS_DATA"; return 0; fi
+        if [ -n "${AGH_LM_TARGETS:-}" ]; then
+            [ -n "$_lm_did" ] && { rm -f "$LISTS_DATA"; return 0; }
+            _agh_lm_stage "$LISTS_DATA"
+        fi
 
         page=1
         while true; do
@@ -4431,7 +4668,12 @@ EOF
             printf " %s\n" "$RULE"
             printf " [P] Previous   Page %s of %s   [N] Next   [#] Toggle   [C] Confirm   [0] Back   [?] Help\n" "$page" "$pages"
             printf "\n Choose [%s-%s/P/N/C/0/?]: " "$start" "$end"
-            read -r input
+            if [ -n "${AGH_LM_TARGETS:-}" ]; then
+                [ -n "$_lm_did" ] && { rm -f "$LISTS_DATA"; return 0; }
+                _lm_did=1; input=c; printf 'C\n'
+            else
+                read -r input
+            fi
 
             case "$input" in
                 "") ;;
@@ -4625,16 +4867,17 @@ Reach the AdGuardHome dashboard directly, bypassing the GL.iNet admin login.
   • ON:  the dashboard is served at http://${lan_ip}:${ui_port}
   • OFF: port ${ui_port} redirects to port 80 (the standard GL.iNet login)
 
-Web UI credentials
-──────────────────
+Web UI Login
+────────────
 Bypassing the GL.iNet login removes its protection, so a username and password
-are set on AdGuardHome itself (a secure bcrypt hash). Set these before leaving
-Direct Access on, or the dashboard is open to anyone on your LAN.
+are set on AdGuardHome itself (a secure bcrypt hash). Set one before leaving
+Direct Access on, or the dashboard is open to anyone on your LAN. Web UI Login
+reads SET, or NOT SET (yellow while Direct Access is on, grey while it's off).
 
-Remove password
-───────────────
-Clears the AdGuardHome credentials, leaving the dashboard fully open on the LAN.
-Use only if you want no login at all.
+Remove Web UI Login
+───────────────────
+Clears the AdGuardHome username and password, leaving the dashboard fully open
+on the LAN. Offered only while a login is set. Use only if you want no login.
 
 Notes
 ─────
@@ -4657,8 +4900,11 @@ _agh_creds_prompt() {
         install_package apache "apache utils" || { press_any_key; return 1; }
     fi
 
+    # the page's named answers (its form gathered both; a blank or mismatched one never gets this far)
+    [ -n "${AGH_ANS_USER:-}" ] && { user_name=$AGH_ANS_USER; user_pass=${AGH_ANS_PASS:-}; }
+
     # Input capture — username (suggest root; blank offers retry/cancel)
-    while true; do
+    while [ -z "${AGH_ANS_USER:-}" ]; do
         printf "Enter Username (e.g. root): "
         read -r user_name
         [ -n "$user_name" ] && break
@@ -4669,7 +4915,7 @@ _agh_creds_prompt() {
     done
 
     # Password with confirmation; blank or mismatch offers retry/cancel
-    while true; do
+    while [ -z "${AGH_ANS_USER:-}" ]; do
         user_pass=$(get_password "Enter Password: ")
         if [ -z "$user_pass" ]; then
             printf "\n"
@@ -4731,25 +4977,32 @@ _agh_creds_write() {
     fi
 }
 
-# Menu item: Add/Update Web UI Credentials (its own screen, its own confirm).
+# Menu item: Set / Change Web UI Login (its own screen, its own confirm).
 update_agh_credentials() {
     clear
-    print_centered_header "Set Web UI Credentials"
     if [ "$PASS_STATUS" = "✅" ]; then
-        print_warning "A password is already set. Proceeding will overwrite it."
-        printf "\n"
+        print_centered_header "Change Web UI Login"
+        print_warning "This replaces the current username and password"
+        printf "Replace the Web UI login? [y/N]: "
     else
-        print_warning "No password currently set. This will create a new username and password."
+        print_centered_header "Set Web UI Login"
+        print_info "This sets a username and password on the AdGuardHome dashboard"
+        printf "Set a Web UI login? [y/N]: "
     fi
-    printf "Set Web UI credentials? [y/N]: "
     read -r confirm
     printf "\n"
     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && return 1
 
     _agh_creds_prompt || return 1
     _agh_creds_validate || { press_any_key; return 1; }
+    agh_creds_apply
+    press_any_key
+}
 
-    # Commit: stop (only if running), edit, then restart-if-was-running
+# The Direct UI Access changes, shared by the menu and the Admin Panel page. Each stops AdGuardHome only if it
+# runs, edits, then restarts it - and puts the edited file back if it won't start (agh_apply_and_restart).
+# They read AGH_CONF and TIMESTAMP, as the screen sets them.
+agh_creds_apply() {   # the login in user_name / BCRYPT_HASH (from _agh_creds_prompt + _agh_creds_validate)
     agh_was_running=0; is_agh_running && agh_was_running=1
     if [ "$agh_was_running" -eq 1 ] && ! _agh_svc_stop "$AGH_INIT"; then
         fail_report "Couldn't stop AdGuardHome, so nothing was changed" "" "Retry in a moment, or reboot the router and retry"; return 1
@@ -4758,7 +5011,49 @@ update_agh_credentials() {
     if agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONF" "Credentials updated"; then
         print_success "Backup created: $(basename "$BACKUP_FILE")"
     fi
-    press_any_key
+}
+agh_direct_disable() {   # integrated mode: back behind the GL.iNet login
+    cp "$AGH_INIT" "$AGH_INIT.backup.$TIMESTAMP"
+    agh_was_running=0; is_agh_running && agh_was_running=1
+    sed -i 's/AdGuardHome /AdGuardHome --glinet /g' "$AGH_INIT"
+    agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access disabled (integrated mode)" "" inline   # the answer's blank line is already out
+}
+# Standalone mode. Nothing changes until the service is stopped: the init edit happens only after any credentials
+# are in hand, so backing out of them leaves Direct UI Access off (never an open dashboard at the next restart).
+agh_direct_enable() {   # <set_creds 0|1> <login set now ✅|❌>
+    cp "$AGH_INIT" "$AGH_INIT.backup.$TIMESTAMP"
+    agh_was_running=0; is_agh_running && agh_was_running=1
+    if [ "$agh_was_running" -eq 1 ] && ! _agh_svc_stop "$AGH_INIT"; then
+        rm -f "$AGH_INIT.backup.$TIMESTAMP"; fail_report "Couldn't stop AdGuardHome, so nothing was changed" "" "Retry in a moment, or reboot the router and retry"; return 1
+    fi
+    [ "$1" = 1 ] && _agh_creds_write
+    sed -i 's/ --glinet//g' "$AGH_INIT"
+    if [ "$1" = 1 ]; then
+        agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access enabled with a login"
+        _agh_drop_undo "$BACKUP_FILE"    # the config undo copy _agh_creds_write took
+    elif [ "$2" = "❌" ]; then
+        agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access enabled" "" inline
+        print_warning "The dashboard has no login - anyone on the LAN can open it"
+    else
+        agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access enabled" "" inline
+    fi
+}
+agh_creds_remove() {   # users: [] - the dashboard's own login goes
+    local line_num
+    BACKUP_FILE="$AGH_CONF.backup.$TIMESTAMP"
+    cp "$AGH_CONF" "$BACKUP_FILE"
+    agh_was_running=0; is_agh_running && agh_was_running=1
+    if [ "$agh_was_running" -eq 1 ] && ! _agh_svc_stop "$AGH_INIT"; then
+        rm -f "$BACKUP_FILE"; fail_report "Couldn't stop AdGuardHome, so nothing was changed" "" "Retry in a moment, or reboot the router and retry"; return 1
+    fi
+    # Find users: block and replace with users: []
+    line_num=$(grep -n "^users:" "$AGH_CONF" | cut -d: -f1)
+    # Delete the next two lines (- name and password) then change users: to users: []
+    if ! grep -q "users: \[\]" "$AGH_CONF"; then
+        sed -i "$((line_num+1)),$((line_num+2))d" "$AGH_CONF"
+    fi
+    sed -i "${line_num}s/users:.*/users: []/" "$AGH_CONF"
+    agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONF" "Web UI password removed"
 }
 
 # The Web UI credentials live in config.yaml; with it missing there is nothing to change, so point
@@ -4777,37 +5072,28 @@ manage_agh_direct_access() {
         lan_ipaddr=$(get_lan_ip)
         AGH_CONF=$(get_agh_config)
         ui_port=$(agh_ui_port "$AGH_CONF")
-        DIRECT_STATUS="❌"; direct_disp=$(_lc_value DISABLED)
-        grep -q -- "--glinet" "$AGH_INIT" || { DIRECT_STATUS="✅"; direct_disp=$(_lc_value ENABLED); }
-
-        # config.yaml missing (get_agh_config returns nothing): the credentials can't be read, so
-        # say so in the VALUE - grepping an empty path printed a stray error AND left the row at a
-        # false "set".
-        if [ -z "$AGH_CONF" ]; then
-            PASS_STATUS="?"; pass_disp="${RED}UNKNOWN${RESET} (config.yaml missing)"
-        else
-            PASS_STATUS="✅"; pass_disp="${GREEN}YES${RESET}"
-            if grep -q "users: \[\]" "$AGH_CONF"; then
-                # No login is the user's choice, never "broken" (red). With Direct UI Access off it has
-                # no effect (the GL.iNet login guards the dashboard) -> grey/inactive; with it on the
-                # dashboard is open to the LAN -> yellow, worth knowing (status-value standard).
-                PASS_STATUS="❌"; pass_disp="${GREY}NO${RESET}"
-                [ "$DIRECT_STATUS" = "✅" ] && pass_disp="${YELLOW}NO${RESET} (dashboard open to the LAN)"
-            fi
-        fi
+        # the state and the STATUS rows the page shows too (_ws_agh_direct_state, agh_direct_rows); config.yaml
+        # missing -> the login can't be read, so it says UNKNOWN rather than a false "set"
+        _ws_agh_direct_state
+        DIRECT_STATUS="❌"; [ "$_wd_on" = 1 ] && DIRECT_STATUS="✅"
+        case "$_wd_login" in unknown) PASS_STATUS="?" ;; none) PASS_STATUS="❌" ;; *) PASS_STATUS="✅" ;; esac
 
         printf " ${CYAN}STATUS${RESET}\n"
-        printf "   %-32s%b\n" "Direct UI Access:" "$direct_disp"
-        printf "   %-32s%b\n\n" "Web UI Username / Password Set:" "$pass_disp"
-        local direct_label="Enable Direct Access (Switch to Standalone)"
-        [ "$DIRECT_STATUS" = "✅" ] && direct_label="Disable Direct Access (Switch to Integrated)"
-        printf "%s%s%s\n" "$N1" "$NSEP" "$direct_label"
-        printf "%s%sAdd/Update Web UI Credentials (Username/Password)\n" "$N2" "$NSEP"
-        printf "%s%sRemove Web UI Password (Set to Open Access)\n" "$N3" "$NSEP"
+        local _dr _drs _doifs; _drs=$(agh_direct_rows); _doifs=$IFS; IFS='
+'
+        for _dr in $_drs; do IFS=$_doifs; printf "   %-19s%b\n" "${_dr%%|*}:" "$(_row_value "$_dr")"; done
+        IFS=$_doifs; printf "\n"
+        # buttons say what pressing does now; Remove is the last item, so it's left out while there's no login
+        # (menus never dead-end) - the page offers it only then too
+        if [ "$DIRECT_STATUS" = "✅" ]; then printf "%s%sDisable Direct Access\n" "$N1" "$NSEP"
+        else printf "%s%sEnable Direct Access\n" "$N1" "$NSEP"; fi
+        if [ "$PASS_STATUS" = "✅" ]; then printf "%s%sChange Web UI Login\n" "$N2" "$NSEP"
+        else printf "%s%sSet Web UI Login\n" "$N2" "$NSEP"; fi
+        [ "$PASS_STATUS" = "✅" ] && printf "%s%sRemove Web UI Login\n" "$N3" "$NSEP"
         printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
-        
-        printf "\nChoose [1-3/0/?]: "
+
+        if [ "$PASS_STATUS" = "✅" ]; then printf "\nChoose [1-3/0/?]: "; else printf "\nChoose [1-2/0/?]: "; fi
         read -r direct_choice
         TIMESTAMP=$(date +%Y%m%d%H%M%S)
 
@@ -4830,11 +5116,7 @@ manage_agh_direct_access() {
                 printf "\n"
 
                 if [ "$DIRECT_STATUS" = "✅" ]; then
-                    # Turning Direct Access OFF (Integrated Mode)
-                    cp "$AGH_INIT" "$AGH_INIT.backup.$TIMESTAMP"
-                    agh_was_running=0; is_agh_running && agh_was_running=1
-                    sed -i 's/AdGuardHome /AdGuardHome --glinet /g' "$AGH_INIT"
-                    agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access disabled (integrated mode)"
+                    agh_direct_disable
                     press_any_key
                     continue
                 fi
@@ -4860,22 +5142,7 @@ manage_agh_direct_access() {
                     esac
                 fi
 
-                cp "$AGH_INIT" "$AGH_INIT.backup.$TIMESTAMP"
-                agh_was_running=0; is_agh_running && agh_was_running=1
-                if [ "$agh_was_running" -eq 1 ] && ! _agh_svc_stop "$AGH_INIT"; then
-                    rm -f "$AGH_INIT.backup.$TIMESTAMP"; fail_report "Couldn't stop AdGuardHome, so nothing was changed" "" "Retry in a moment, or reboot the router and retry"; press_any_key; continue
-                fi
-                [ "$_set_creds" = 1 ] && _agh_creds_write
-                sed -i 's/ --glinet//g' "$AGH_INIT"
-                if [ "$_set_creds" = 1 ]; then
-                    agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access enabled with a login"
-                    _agh_drop_undo "$BACKUP_FILE"    # the config undo copy _agh_creds_write took
-                elif [ "$PASS_STATUS" = "❌" ]; then
-                    agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access enabled"
-                    print_warning "The dashboard has no login - anyone on the LAN can open it"
-                else
-                    agh_apply_and_restart "$agh_was_running" "$AGH_INIT.backup.$TIMESTAMP" "$AGH_INIT" "Direct UI Access enabled"
-                fi
+                agh_direct_enable "$_set_creds" "$PASS_STATUS"
                 press_any_key
                 ;;
 
@@ -4883,38 +5150,19 @@ manage_agh_direct_access() {
                update_agh_credentials;;
 
             3)
-                if [ -z "$AGH_CONF" ]; then _agh_creds_need_config; continue; fi
+                [ "$PASS_STATUS" = "✅" ] || { print_error "Invalid option"; sleep 1; continue; }   # not offered
                 clear
-                print_centered_header "Remove AdGuardHome Web UI Password"
-                if [ "$PASS_STATUS" = "❌" ]; then
-                    print_warning "No password currently exists"
-                    press_any_key; continue
-                fi
+                print_centered_header "Remove AdGuardHome Web UI Login"
                 if [ "$DIRECT_STATUS" = "✅" ]; then
-                    print_warning "This removes the Web UI credentials, leaving AdGuardHome OPEN (unsecured)"
+                    print_warning "This leaves the dashboard OPEN to anyone on the LAN"
                 else
                     print_warning "This removes the AdGuardHome Web UI credentials"
                 fi
-                printf "Remove credentials? [y/N]: "
+                printf "Remove the Web UI login? [y/N]: "
                 read -r confirm
                 [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
 
-                BACKUP_FILE="$AGH_CONF.backup.$TIMESTAMP"
-                cp "$AGH_CONF" "$BACKUP_FILE"
-                agh_was_running=0; is_agh_running && agh_was_running=1
-                if [ "$agh_was_running" -eq 1 ] && ! _agh_svc_stop "$AGH_INIT"; then
-                    rm -f "$BACKUP_FILE"; fail_report "Couldn't stop AdGuardHome, so nothing was changed" "" "Retry in a moment, or reboot the router and retry"; press_any_key; continue
-                fi
-
-                # Find users: block and replace with users: []
-                line_num=$(grep -n "^users:" "$AGH_CONF" | cut -d: -f1)
-                # Delete the next two lines (- name and password) then change users: to users: []
-                if ! grep -q "users: \[\]" "$AGH_CONF"; then
-                    sed -i "$((line_num+1)),$((line_num+2))d" "$AGH_CONF"
-                fi
-                sed -i "${line_num}s/users:.*/users: []/" "$AGH_CONF"
-
-                agh_apply_and_restart "$agh_was_running" "$BACKUP_FILE" "$AGH_CONF" "Web UI password removed"
+                agh_creds_remove
                 press_any_key
                 ;;
 
@@ -4930,29 +5178,52 @@ manage_agh_direct_access() {
 # AdGuardHome Control Center
 # -----------------------------
 
-show_agh_help() {
-    show_paged "AdGuardHome Hub - Help" << 'HELPEOF'
+# Help shared by the menus and the Admin Panel page, written ONCE and translated per interface:
+#   {cli} ... {/cli}  and  {web} ... {/web}   (each on its own line) - lines shown in that interface only
+#   {item1}                                     - the screen's first action: "Item 1" / "The action button"
+# Everything else reads the same in both. Keep a block's separating blank line INSIDE it, so dropping the block
+# can't leave two blank lines in a row. The e2e renders both and checks both.
+_help_for() {   # <cli|web> < help text
+    awk -v ui="$1" '
+        /^\{(cli|web)\}$/   { blk = substr($0, 2, 3); next }
+        /^\{\/(cli|web)\}$/ { blk = ""; next }
+        blk != "" && blk != ui { next }
+        { if (ui == "web") gsub(/\{item1\}/, "The action button"); else gsub(/\{item1\}/, "Item 1"); print }'
+}
+
+# The help text on its own, so the menus (show_agh_help) and the Admin Panel page (glu_api help) show the
+# same words - translated per interface by _help_for
+_agh_help_text() {
+    cat << 'HELPEOF'
 AdGuardHome Control Center - Quick Help
 
 What it does
 ────────────
 The hub for AdGuardHome (the router's DNS ad-blocker): control the service,
 manage filter lists, run backups, and reach the dashboard.
+{web}
 
-What each item does
-───────────────────
+This page shows the status and runs the service action. Filter lists, Advanced
+Settings, backups, logs and Reset to Factory Settings are in the toolkit's
+menus in a terminal (AdGuardHome Control Center).
+{/web}
+
+Status and actions
+──────────────────
 STATUS: AdGuardHome reads ENABLED (running), DISABLED (you turned it off) or
    SERVICE DOWN (switched on but not running). Config reads MISSING when
    config.yaml is gone. Direct UI Access shows whether the dashboard has its own
    address - when it does, the address is listed on the next row.
-   On a router whose firmware has no AdGuardHome it reads NOT SUPPORTED and only
-   offers the Main Menu; if its startup script is missing it reads MISSING, and
-   Reset to Factory Settings restores it.
+   On a router whose firmware has no AdGuardHome it reads NOT SUPPORTED, with no
+   actions; if its startup script is missing it reads MISSING, and Reset to
+   Factory Settings restores it.
 
-SERVICE: Item 1 follows the state - Enable or Disable the daemon, Restart it
-   when it is switched on but not running, or Recover Configuration when
-   config.yaml is missing (restore a backup, or reset to factory defaults if
-   there is none). Everyday restarts live under Logs & Maintenance.
+SERVICE: {item1} follows the state - Enable or Disable the daemon,
+   Restart it when it is switched on but not running, or Recover Configuration
+   when config.yaml is missing (restore a backup, or reset to factory defaults
+   if there is none).
+{cli}
+   Everyday restarts live under Logs & Maintenance.
 
 ALLOW/BLOCKLISTS: Add or remove filter subscriptions (block and allow lists).
 
@@ -4981,9 +5252,34 @@ NOTES:
   displays a lower 'Optimized' count after deduplication.
 - 10MB LIMIT: Crucial for routers with small flash storage. When
   active, it restricts filter space to prevent storage exhaustion.
-- LOGS: Query logs are often in /tmp (RAM). If 'Free Space' is 
+- LOGS: Query logs are often in /tmp (RAM). If 'Free Space' is
   low, the system may become unstable.
+{/cli}
 HELPEOF
+}
+show_agh_help() { _agh_help_text | _help_for cli | show_paged "AdGuardHome Control Center - Help"; }
+
+_file_kb() {   # <file> -> size in KB, rounded up, from the directory entry (busybox wc -c reads the whole file: 920 ms
+    # for the AdGuardHome binary on an MT3000); 0 when it's missing
+    local b; b=$(ls -nlL "$1" 2>/dev/null | awk '{print $5}'); echo $(( (${b:-0} + 1023) / 1024 ))   # -L: a symlink's target, as wc -c
+}
+# Save the selected components as one backup (the menu's Confirm and the page's Save a New Backup)
+agh_backup_save() {   # <ts> <cfg Y|N> <bin Y|N> <init Y|N> -> 0 saved, 1 failed, 2 not enough space
+    local ts="$1" p="" kb
+    if [ "$3" = Y ]; then
+        kb=$(_file_kb "$(_agh_bin)")
+        space_preflight "$(bk_dir agh)" 0 "$kb" "a copy of the AdGuardHome binary" || return 2
+    fi
+    [ "$2" = Y ] && p="$p $(get_agh_config)"
+    [ "$3" = Y ] && p="$p $(_agh_bin)"
+    [ "$4" = Y ] && p="$p /etc/init.d/adguardhome"
+    if spin_run "Creating the selected backups" _bk_save_selected "$ts" $p; then
+        _agh_bk_meta "$ts"
+        print_success "Backup $ts completed"
+    else
+        fail_report "The backup didn't complete" "$(cat "$SPIN_LOG" 2>/dev/null)" "Check free space on the router, then retry"
+        return 1
+    fi
 }
 
 create_agh_backup() {
@@ -4996,7 +5292,7 @@ create_agh_backup() {
     sch=$(_agh_cfg_schema "$AGH_CONFIG")
     # GL.iNet's build needs no copy - /rom holds it and a restore takes it from there
     [ -n "$v" ] && [ "$v" = "$(_agh_rom_ver)" ] && bin_rom=1
-    bin_kb=$(( ($(wc -c < "$(_agh_bin)" 2>/dev/null || echo 0) + 1023) / 1024 ))
+    bin_kb=$(_file_kb "$(_agh_bin)")
 
     while true; do
         clear
@@ -5036,19 +5332,7 @@ create_agh_backup() {
                 fi
 
                 printf "\n"
-                if [ "$b_bin" = "Y" ]; then
-                    space_preflight "$(bk_dir agh)" 0 "$bin_kb" "a copy of the AdGuardHome binary" || { press_any_key; continue; }
-                fi
-                _bk_paths=""
-                [ "$b_cfg" = "Y" ] && _bk_paths="$_bk_paths $AGH_CONFIG"
-                [ "$b_bin" = "Y" ] && _bk_paths="$_bk_paths $(_agh_bin)"
-                [ "$b_ini" = "Y" ] && _bk_paths="$_bk_paths /etc/init.d/adguardhome"
-                if spin_run "Creating the selected backups" _bk_save_selected "$ts" $_bk_paths; then
-                    _agh_bk_meta "$ts"
-                    print_success "Backup $ts completed"
-                else
-                    fail_report "The backup didn't complete" "$(cat "$SPIN_LOG" 2>/dev/null)" "Check free space on the router, then retry"
-                fi
+                agh_backup_save "$ts" "$b_cfg" "$b_bin" "$b_ini"; [ $? -eq 2 ] && { press_any_key; continue; }
                 press_any_key
                 return 0
                 ;;
@@ -5096,7 +5380,7 @@ agh_restore_backup() {   # <ts> <cfg Y|N> <bin Y|N> <init Y|N>
     if [ "$rc_cfg" = Y ]; then
         if [ "$rc_bin" = N ] && [ -n "$bv" ] && [ "$bv" = "$(_agh_rom_ver)" ] && [ "$(_agh_cur_ver)" != "$bv" ] \
            && _agh_reads_cfg "$(_agh_rom_bin)" "$bcfg"; then
-            printf "Also restore GL.iNet's build (v%s) from /rom? [Y/n]: " "$bv"; read -r c; printf "\n"
+            printf "Also restore GL.iNet's build (v%s) from /rom? [Y/n]: " "$bv"; read_ans AGH_ANS_ROM; c=$REPLY; printf "\n"
             case "$c" in n|N) ;; *) use_rom=1 ;; esac
         fi
         tbin=$(_agh_bin); [ "$rc_bin" = Y ] && tbin="$(bk_dir agh)/AdGuardHome.$ts"; [ "$use_rom" = 1 ] && tbin=$(_agh_rom_bin)
@@ -5414,9 +5698,7 @@ sub_backup_recovery() {
         else
             printf "   %-14s%b%s%b\n" "Last backup:" "$BLUE" "$bk_date" "$RESET"
         fi
-        printf "   %-14s%b%s%b\n" "Backups:" "$BLUE" "${bk_count:-0}" "$RESET"
-        printf "   %-14s%b%s%b\n" "Space used:" "$BLUE" "${bk_total_u:-0B}" "$RESET"
-        printf "   %-14s%b%s%b\n\n" "Space free:" "$BLUE" "${qlog_f:-N/A}" "$RESET"
+        printf "   %-14s%b%s%b\n\n" "Backups:" "$BLUE" "${bk_count:-0} (${bk_total_u:-0B} used, ${bk_free:-N/A} free)" "$RESET"
         local _nb; _nb=$(bk_list agh | grep -c .)
         printf "%s%sSave a New Backup\n" "$N1" "$NSEP"
         # no backups: slot 2 re-scans the store; Manage/Delete (last) is dropped until there's one
@@ -5494,13 +5776,7 @@ sub_service_health() {
                printf "\n"
                print_warning "This clears all cached filter files; AdGuardHome re-downloads them on next start"
                printf "Clear filter cache? [y/N]: "; read -r confirm
-               if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
-                   local wd=$(get_agh_workdir)
-                   agh_was_running=0; is_agh_running && agh_was_running=1
-                   rm -rf "${wd:-/etc/AdGuardHome}/data/filters/"* 2>/dev/null
-                   agh_apply_and_restart "$agh_was_running" "" "" "Filters purged" "-"
-                   cached_rules=""
-               fi
+               [ "$confirm" = "y" ] || [ "$confirm" = "Y" ] && agh_clear_filter_cache
                press_any_key ;;
             3) agh_service_restart ;;
             0) break ;;
@@ -5635,12 +5911,7 @@ get_agh_stats() {
     # 1. Status values - coloured CAPS words (ui-status-value standard): the service row is the
     #    lifecycle value (same words/colours as every lifecycle screen, via _lc_value)
     agh_state=$(agh_run_state)
-    case "$agh_state" in
-        on)      agh_life_disp=$(_lc_value ENABLED) ;;
-        partial) agh_life_disp="${YELLOW}ENABLED${RESET} (GL switch off)" ;;
-        down)    agh_life_disp=$(_lc_value SERVICE_DOWN) ;;
-        *)       agh_life_disp=$(_lc_value DISABLED) ;;
-    esac
+    agh_life "$agh_state"; agh_life_disp=$(_row_value "AdGuardHome|$AGH_WORD|$AGH_TONE|$AGH_NOTE")
     agh_direct_disp=$(_lc_value DISABLED); agh_direct_on && agh_direct_disp=$(_lc_value ENABLED)
     
     # 2. Setup Paths
@@ -5707,6 +5978,7 @@ get_agh_stats() {
         else printf \"%.2fM\", mbs;
     }")
 
+    bk_free=$(get_free_space "$_bkd")            # the backup store's own disk, not AdGuardHome's
     bk_file_count=$(find "$_bkd" -type f 2>/dev/null | wc -l)
     bk_count=$(bk_list agh | grep -c .)          # BACKUPS (one per timestamp), not component files
 
@@ -5728,21 +6000,150 @@ get_agh_stats() {
 # warning, and the one thing that can help. Not in this firmware at all -> NOT SUPPORTED, Back only.
 # In /rom but its startup script is missing (the start-up repair was cancelled or failed) -> MISSING, and
 # Reset to Factory Settings restores it from /rom.
+# -----------------------------
+# Shared feature model (the menus AND the Web UI)
+# -----------------------------
+# One description per feature, read by BOTH interfaces so their words can't drift apart: the menus draw
+# it with colour codes, the Web UI gets it as JSON from `glinet_utils --api` (see glu_api). A tone names
+# the colour - green / yellow / red / grey for status words, fact for plain facts, link for a URL.
+_tone_color() {   # <tone> -> the colour code the menus use for it
+    case "$1" in
+        green) printf '%s' "$GREEN" ;; yellow) printf '%s' "$YELLOW" ;; red) printf '%s' "$RED" ;;
+        grey) printf '%s' "$GREY" ;; fact) printf '%s' "$BLUE" ;; link) printf '%s' "$CYAN" ;;
+    esac
+}
+# one "label|value|tone|note" row -> the menus' coloured value (note = a lowercase qualifier in brackets)
+# a fact's detail is part of the fact -> blue with it ("1 (184,611 rules)"); a status word's isn't
+_row_value() {
+    local r="$1" v t n; r=${r#*|}; v=${r%%|*}; r=${r#*|}; t=${r%%|*}; n=${r#*|}
+    if [ "$t" = fact ]; then printf '%s%s%s%s' "$(_tone_color "$t")" "$v" "${n:+ ($n)}" "$RESET"
+    else printf '%s%s%s%s' "$(_tone_color "$t")" "$v" "$RESET" "${n:+ ($n)}"; fi
+}
+
+# AdGuardHome in this firmware? supported, unsupported (never shipped) or missing (startup script gone)
+agh_presence() {
+    if [ -f "$AGH_INIT" ]; then echo supported
+    elif [ -f "/rom$AGH_INIT" ]; then echo missing
+    else echo unsupported; fi
+}
+# the presence warning both interfaces show when AdGuardHome can't be used
+agh_presence_msg() {
+    case "$1" in
+        missing)     printf '%s' "AdGuardHome's startup script is missing - Reset to Factory Settings restores it" ;;
+        unsupported) printf '%s' "This router's firmware doesn't include AdGuardHome" ;;
+    esac
+}
+# The AdGuardHome lifecycle word for a run state (agh_run_state) or a presence -> AGH_WORD AGH_TONE AGH_NOTE
+agh_life() {
+    AGH_NOTE=""
+    case "$1" in
+        on)          AGH_WORD="ENABLED";       AGH_TONE=green ;;
+        partial)     AGH_WORD="ENABLED";       AGH_TONE=yellow; AGH_NOTE="GL switch off" ;;
+        down)        AGH_WORD="SERVICE DOWN";  AGH_TONE=red ;;
+        unsupported) AGH_WORD="NOT SUPPORTED"; AGH_TONE=grey ;;
+        missing)     AGH_WORD="MISSING";       AGH_TONE=red;    AGH_NOTE="startup script" ;;
+        *)           AGH_WORD="DISABLED";      AGH_TONE=grey ;;
+    esac
+}
+# The Control Center STATUS rows both interfaces show, in screen order (after get_agh_stats). The menus
+# add their own rows around these (Update, Persistence, storage, backups); the Web UI shows these.
+agh_rows() {
+    agh_life "$agh_state"
+    printf '%s|%s|%s|%s\n' "AdGuardHome" "$AGH_WORD" "$AGH_TONE" "$AGH_NOTE"
+    # DISABLED hides Config - unless config.yaml is missing: a broken state is never hidden
+    if [ "$agh_state" != off ] || [ "$agh_config_missing" = 1 ]; then
+        if [ "$agh_config_missing" = 1 ]; then echo "Config|MISSING|red|"; else echo "Config|OK|green|"; fi
+    fi
+    case "$agh_state" in
+        on|partial)   # the dashboard's own address only matters while it runs
+            if agh_direct_on; then echo "Direct UI Access|ENABLED|green|"; else echo "Direct UI Access|DISABLED|grey|"; fi
+            [ -n "$agh_ui_url" ] && echo "Direct URL|$agh_ui_url|link|" ;;
+    esac
+    if [ "$agh_chan" = BETA ]; then echo "Channel|BETA|yellow|"; else echo "Channel|STABLE|green|"; fi
+    if [ -n "$v_num" ]; then echo "Version|v$v_num|fact|"; else echo "Version|N/A|fact|"; fi
+}
+# EVERY Control Center STATUS row, in the menu's order - the menu and the page both render this list (after
+# get_agh_stats): agh_rows, then Update under Version, Persistence, the lists, storage and backups. label|value|tone|note
+agh_status_rows() {
+    local r rows oifs; rows=$(agh_rows); oifs=$IFS; IFS='
+'
+    for r in $rows; do
+        IFS=$oifs; echo "$r"
+        case "$r" in "Version|"*)
+            agh_update_state
+            case "$AGH_UPD" in
+                AVAILABLE) echo "Update|AVAILABLE|yellow|v$AGH_UPD_VER" ;;
+                UPTODATE)  echo "Update|UP TO DATE|green|" ;;
+                *)         echo "Update|UNKNOWN|grey|offline" ;;
+            esac ;;
+        esac
+    done
+    IFS=$oifs
+    echo "Persistence|$(_agh_persist_row)"
+    if [ "${agh_config_missing:-0}" = 1 ]; then echo "Filter lists|—|grey|"
+    else echo "Filter lists|${list_count:-0}|fact|${cached_rules:-0} rules"; fi
+    echo "Filter storage|${filt_u:-0B} used|fact|${filt_f:-N/A} free"
+    echo "Log storage|${qlog_u:-0B} used|fact|${qlog_f:-N/A} free"
+    if [ "${bk_date:-None}" = None ]; then echo "Last backup|NONE|grey|"
+    else echo "Last backup|$bk_date|fact|"; echo "Backups|${bk_count:-0}|fact|${bk_total_u:-0B}"; fi
+}
+# Item 1 follows the state - first match wins (after get_agh_stats): a missing config can't be fixed by
+# Enable/Disable, and a crashed service needs a restart - or a reinstall when the binary can't read its
+# config (e.g. after a firmware update)
+agh_primary_action() {
+    if [ "$agh_config_missing" = 1 ]; then echo recover
+    elif [ "$agh_state" = down ] && ! _agh_reads_cfg "$(_agh_bin)" "$(_agh_config_path)"; then echo reinstall
+    elif [ "$agh_state" = down ]; then echo restart
+    elif [ "$agh_state" = off ];  then echo enable
+    else echo disable; fi
+}
+# Every AdGuardHome action's words: the label, the warning + question when it needs confirming (only a
+# non-obvious side effect does), the progress line, the verified result, the failure + its usual fix,
+# and A_WEB = 1 when the Web UI runs it, else why it stays in the menus (a step-by-step flow)
+agh_action_text() {   # <action> -> A_LABEL A_WARN A_ASK A_PROG A_DONE A_FAIL A_FIX A_WEB
+    A_WARN=""; A_ASK=""; A_PROG=""; A_DONE=""; A_FAIL=""; A_FIX=""; A_WEB=1
+    case "$1" in
+        enable)  A_LABEL="Enable AdGuardHome";  A_PROG="Enabling AdGuardHome";  A_DONE="AdGuardHome enabled"
+                 A_FAIL="AdGuardHome did not start"; A_FIX="A bad config.yaml is the usual cause - check it, then retry" ;;
+        disable) A_LABEL="Disable AdGuardHome"; A_PROG="Disabling AdGuardHome"; A_DONE="AdGuardHome disabled"
+                 A_WARN="Disabling AdGuardHome stops DNS filtering for the LAN"; A_ASK="Disable AdGuardHome?"
+                 A_FAIL="AdGuardHome did not stop" ;;
+        restart) A_LABEL="Restart AdGuardHome"; A_PROG="Restarting AdGuardHome"; A_DONE="AdGuardHome restarted"
+                 A_FAIL="AdGuardHome did not start"; A_FIX="A bad config.yaml is the usual cause - check it, then retry" ;;
+        reinstall)     A_LABEL="Reinstall AdGuardHome";     A_WEB="it downloads and swaps the AdGuardHome binary step by step" ;;
+        recover)       A_LABEL="Recover Configuration";     A_WEB="it walks through restoring a backup or a factory reset" ;;
+        factory_reset) A_LABEL="Reset to Factory Settings"; A_WEB="it rebuilds AdGuardHome from the firmware's own copy step by step" ;;
+        *) return 1 ;;
+    esac
+}
+# Do an action; 0 only once it verifiably took effect (the caller reports, in its own interface)
+agh_do() {   # <enable|disable|restart>
+    case "$1" in
+        enable)  uci set adguardhome.config.enabled='1' && uci set adguardhome.config.dns_enabled='1' && uci commit adguardhome
+                 "$AGH_INIT" enable >/dev/null 2>&1
+                 _agh_svc_verify "$AGH_INIT" start ;;
+        disable) uci set adguardhome.config.enabled='0' && uci set adguardhome.config.dns_enabled='0' && uci commit adguardhome
+                 _agh_svc_stop "$AGH_INIT" ;;
+        restart) _agh_svc_verify "$AGH_INIT" restart ;;
+        *)       return 2 ;;
+    esac
+}
+
 _agh_unavailable_screen() {
     local ch
     while true; do
         clear; print_centered_header "AdGuardHome Control Center"
         printf " %b\n" "${CYAN}STATUS${RESET}"
         if [ "$AGH_DISABLED" = 2 ]; then
-            printf "   AdGuardHome:  %bMISSING%b (startup script)\n\n" "$RED" "$RESET"
-            print_warning "AdGuardHome's startup script is missing - Reset to Factory Settings restores it"
-            printf "%s%sReset to Factory Settings\n" "$N1" "$NSEP"
+            printf "   AdGuardHome:  %b\n\n" "$(_row_value "AdGuardHome|$(agh_life missing; echo "$AGH_WORD|$AGH_TONE|$AGH_NOTE")")"
+            print_warning "$(agh_presence_msg missing)"
+            agh_action_text factory_reset; printf "%s%s%s\n" "$N1" "$NSEP" "$A_LABEL"
             printf "%s%sMain Menu\n" "$N0" "$NSEP"
             printf "%s Help\n" "$NQ"
             printf "\nChoose [1/0/?]: "
         else
-            printf "   AdGuardHome:  %bNOT SUPPORTED%b\n\n" "$GREY" "$RESET"
-            print_warning "This router's firmware doesn't include AdGuardHome"
+            printf "   AdGuardHome:  %b\n\n" "$(_row_value "AdGuardHome|$(agh_life unsupported; echo "$AGH_WORD|$AGH_TONE|$AGH_NOTE")")"
+            print_warning "$(agh_presence_msg unsupported)"
             printf "%s%sMain Menu\n" "$N0" "$NSEP"
             printf "%s Help\n" "$NQ"
             printf "\nChoose [0/?]: "
@@ -5775,49 +6176,26 @@ agh_control_center() {
         # config.yaml is missing, because a broken state is never hidden. SERVICE DOWN keeps Config
         # (the likeliest cause) but drops Direct UI Access; the URL only appears while running.
         _agh_row() { printf "   %-18s%b\n" "$1" "$2"; }
-        local _vdisp="N/A" _chdisp
-        [ -n "$v_num" ] && _vdisp="v$v_num"
-        _chdisp="${GREEN}STABLE${RESET}"; [ "$agh_chan" = BETA ] && _chdisp="${YELLOW}BETA${RESET}"
         printf " ${CYAN}STATUS${RESET}\n"
-        _agh_row "AdGuardHome:" "$agh_life_disp"
-        if [ "$agh_state" != off ] || [ "$agh_config_missing" = 1 ]; then
-            _agh_row "Config:" "$agh_config_disp"
-        fi
-        case "$agh_state" in
-            on|partial)
-                _agh_row "Direct UI Access:" "$agh_direct_disp"
-                [ -n "$agh_ui_url" ] && _agh_row "Direct URL:" "${CYAN}${agh_ui_url}${RESET}" ;;
-        esac
-        _agh_row "Channel:" "$_chdisp"
-        # the installed build and its update state belong to the channel -> indented sub-rows
-        printf "     %-16s%b\n" "Version:" "${BLUE}${_vdisp}${RESET}"
-        agh_update_state; printf "     %-16s%b\n" "Update:" "$(_agh_upd_disp)"
-        _agh_row "Persistence:" "$(_agh_persist_disp)"   # at a glance: yellow when a firmware update would stop AGH
-        if [ "${agh_config_missing:-0}" = 1 ]; then
-            _agh_row "Filter lists:" "${GREY}—${RESET}"
-        else
-            _agh_row "Filter lists:" "${BLUE}${list_count:-0} (${cached_rules:-0} rules)${RESET}"   # the rule count is a fact -> follows its value
-        fi
-        _agh_row "Filter storage:" "${BLUE}${filt_u:-0B} used, ${filt_f:-N/A} free${RESET}"
-        _agh_row "Log storage:" "${BLUE}${qlog_u:-0B} used, ${qlog_f:-N/A} free${RESET}"
-        if [ "${bk_date:-None}" = None ]; then
-            _agh_row "Last backup:" "${GREY}NONE${RESET}"
-        else
-            _agh_row "Last backup:" "${BLUE}${bk_date}${RESET}"
-            _agh_row "Backups:" "${BLUE}${bk_count:-0} (${bk_total_u:-0B})${RESET}"
-        fi
+        # every row comes from agh_status_rows - the page shows the same list; a for loop, not a pipe, so
+        # nothing in it can read the rows as its stdin
+        local _rows _r _oifs _v; _rows=$(agh_status_rows); _oifs=$IFS; IFS='
+'
+        for _r in $_rows; do
+            IFS=$_oifs
+            _v=$(_row_value "$_r")
+            case "$_r" in
+                # the installed build and its update state belong to the channel -> indented sub-rows
+                "Version|"*|"Update|"*) printf "     %-16s%b\n" "${_r%%|*}:" "$_v" ;;
+                *)                      _agh_row "${_r%%|*}:" "$_v" ;;
+            esac
+        done
+        IFS=$_oifs
         printf "\n"
         # Item 1 follows the state (action matches state), first match wins: a missing config can't
         # be fixed by Enable/Disable, and a crashed service needs a restart, not a toggle.
-        local svc_label svc_act=toggle
-        if [ "$agh_config_missing" = 1 ]; then svc_label="Recover Configuration"; svc_act=recover
-        elif [ "$agh_state" = down ] && ! _agh_reads_cfg "$(_agh_bin)" "$(_agh_config_path)"; then
-                                              svc_label="Reinstall AdGuardHome"; svc_act=reinstall   # e.g. after a firmware update
-        elif [ "$agh_state" = down ];    then svc_label="Restart AdGuardHome";   svc_act=restart
-        elif [ "$agh_state" = off ];     then svc_label="Enable AdGuardHome"
-        else                                  svc_label="Disable AdGuardHome"
-        fi
-        printf "%s%s%s\n" "$N1" "$NSEP" "$svc_label"
+        local svc_act; svc_act=$(agh_primary_action); agh_action_text "$svc_act"
+        printf "%s%s%s\n" "$N1" "$NSEP" "$A_LABEL"
         printf "%s%sManage Allow/Blocklists\n" "$N2" "$NSEP"
         printf "%s%sAdvanced Settings\n" "$N3" "$NSEP"
         printf "%s%sBackup & Recovery Suite\n" "$N4" "$NSEP"
@@ -6020,14 +6398,16 @@ manage_zram() {
         _zram_persist_is_on && per_status="${GREEN}ENABLED${RESET}" || per_status="${GREY}DISABLED${RESET}"
 
         printf " %b\n" "${CYAN}STATUS${RESET}"
-        printf "   %-13s %b\n" "Zram Swap:" "$(_lc_value "$state")"
+        printf "   %-15s %b\n" "Zram Swap:" "$(_lc_value "$state")"
         if [ "$state" = ENABLED ] && [ -f /sys/block/zram0/disksize ]; then
             disksize=$(cat /sys/block/zram0/disksize 2>/dev/null)
             case "$disksize" in ''|*[!0-9]*) disksize=0 ;; esac
             disksize_mb=$((disksize / 1024 / 1024))
-            printf "   %-13s %b\n" "Disk Size:" "${BLUE}${disksize_mb} MB${RESET}"
+            # the zram device's capacity: how much can be swapped into it, counted before compression
+            # (it lives compressed in RAM - it's not disk space)
+            printf "   %-15s %b\n" "Swap Capacity:" "${BLUE}${disksize_mb} MB${RESET}"
         fi
-        printf "   %-13s %b\n" "Persistence:" "$per_status"
+        printf "   %-15s %b\n" "Persistence:" "$per_status"
         printf "\n"
 
         acts=$(_lc_actions "$state" 1); n=0
@@ -6249,8 +6629,11 @@ start() {
         && logger -t glinet_fanstatic "fan held at ${pct}%" || logger -t glinet_fanstatic "could not set the fan to ${pct}%"
 }
 INITEOF
-    chmod +x "$fi_"; "$fi_" enable >/dev/null 2>&1
+    chmod +x "$fi_"; _fan_static_enable "$fi_"
 }
+# rc.common names the boot link after the script's own file name (S99<name>) - its own helper, so the e2e can
+# stub it (a test's temp script called "init" once left a real /etc/rc.d/S99init behind)
+_fan_static_enable() { "$1" enable >/dev/null 2>&1; }
 # Stop GL's fan controller and WAIT for it to exit: procd kills it seconds after `stop` returns, and until
 # then it keeps writing its own level over ours (after the 4.11 update the fan went back to 0 this way).
 _fan_glfan_stop() {
@@ -6280,6 +6663,9 @@ _fan_static_clear() {   # back to GL's dynamic control; the boot service goes to
 # Restart the fan controller and confirm it is actually running. 0 if up. Wrapped by spin_run so a
 # failed restart no longer prints a false "Dynamic control restored".
 _fan_restart_verify() { /etc/init.d/gl_fan restart >/dev/null 2>&1; sleep 1; pgrep gl_fan >/dev/null 2>&1; }
+# Back to GL's own (dynamic) fan control: no fixed speed, gl_fan on at boot and running. 0 once it runs.
+# Enable Dynamic Fan Control, the fan's factory reset and the e2e's fleet guard all use this one.
+fan_dynamic_restore() { _fan_static_clear; /etc/init.d/gl_fan enable >/dev/null 2>&1; _fan_restart_verify; }
 
 # The web UI fan slider's maximum (°C) as shipped in overview bundle $1 - the same parse the Fan
 # screen uses on the live copy. Pointed at the /rom copy it gives GL's factory limit.
@@ -6295,6 +6681,55 @@ _fan_sp_disp() {   # <°C value or empty> -> coloured setpoint
     case "$1" in ''|*[!0-9]*) printf '%bUNKNOWN%b' "$YELLOW" "$RESET" ;; *) printf '%b%s°C%b' "$BLUE" "$1" "$RESET" ;; esac
 }
 
+# Fan Management's readings and setpoints (the menu screen and the Admin Panel page): has_fan, c_mode(+_note,
+# _color), c_temp_fmt, c_fan_rpm, c_speed_pct, view_gz, u_min / u_cur / u_wrn / ui_max
+_fan_state() {
+    has_fan=true
+    [ ! -d "/sys/class/thermal/cooling_device0" ] && has_fan=false
+
+    c_mode="DYNAMIC"; c_mode_note="(system)"
+    c_mode_color="${GREEN}"
+    if ! pgrep -f '/usr/bin/gl_fan' >/dev/null; then
+        c_mode="MANUAL"; c_mode_note="(static)"
+        c_mode_color="${YELLOW}"
+    fi
+    
+    c_temp_fmt=$(get_cpu_temp)
+    c_fan_rpm="N/A"
+    c_speed_pct=0
+    
+    if [ "$has_fan" = "true" ]; then
+        c_fan_rpm=$(get_fan_speed)
+        c_pwm=$(cat /sys/class/thermal/cooling_device0/cur_state 2>/dev/null)
+        [ -z "$c_pwm" ] && c_pwm=0
+        c_speed_pct=$(( (c_pwm * 100 + 127) / 255 ))
+    fi
+
+    # 2. Get Current UI Max Setpoint
+    view_gz="/www/views/gl-sdk4-ui-overview.common.js.gz"
+    util_file="/lib/functions/gl_util.sh"
+    attrs_block=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "attrs:\{min:[-0-9]+,max:[0-9]+")
+
+    if [ -n "$attrs_block" ]; then
+        raw_min=$(echo "$attrs_block" | cut -d: -f3 | cut -d, -f1)
+        raw_max=$(echo "$attrs_block" | cut -d: -f4)
+        u_min=$((raw_min + 1))
+        ui_max=$((raw_max - 1))
+    else
+        u_min=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "minimumTemperature:[^}]*" | grep -oE "[0-9]{2,3}" | head -n 1)
+        ui_max=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "maximumTemperature:[^}]*" | grep -oE "[0-9]{2,3}" | head -n 1)
+    fi
+
+    # --- 3. UCI Configuration State (The "Truth") ---
+    u_cur=$(uci -q get glfan.globals.temperature)
+    u_wrn=$(uci -q get glfan.globals.warn_temperature)
+
+    # --- 4. Sanitization & Fallbacks ---
+    [ -z "$u_min" ] && u_min=70
+    [ -z "$ui_max" ] && ui_max=90
+    [ -z "$u_cur" ] && u_cur=75
+    [ -z "$u_wrn" ] && u_wrn=75
+}
 manage_fan_settings() {
     current_model=$(cat /proc/gl-hw-info/model)
     nav_choice=""
@@ -6309,51 +6744,7 @@ manage_fan_settings() {
     while true; do
         
         # 1. State Capture & Fanless Detection
-        has_fan=true
-        [ ! -d "/sys/class/thermal/cooling_device0" ] && has_fan=false
-
-        c_mode="DYNAMIC"; c_mode_note="(system)"
-        c_mode_color="${GREEN}"
-        if ! pgrep -f '/usr/bin/gl_fan' >/dev/null; then
-            c_mode="MANUAL"; c_mode_note="(static)"
-            c_mode_color="${YELLOW}"
-        fi
-        
-        c_temp_fmt=$(get_cpu_temp)
-        c_fan_rpm="N/A"
-        c_speed_pct=0
-        
-        if [ "$has_fan" = "true" ]; then
-            c_fan_rpm=$(get_fan_speed)
-            c_pwm=$(cat /sys/class/thermal/cooling_device0/cur_state 2>/dev/null)
-            [ -z "$c_pwm" ] && c_pwm=0
-            c_speed_pct=$(( (c_pwm * 100 + 127) / 255 ))
-        fi
-
-        # 2. Get Current UI Max Setpoint
-        local view_gz="/www/views/gl-sdk4-ui-overview.common.js.gz"
-        local util_file="/lib/functions/gl_util.sh"
-        local attrs_block=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "attrs:\{min:[-0-9]+,max:[0-9]+")
-
-        if [ -n "$attrs_block" ]; then
-            raw_min=$(echo "$attrs_block" | cut -d: -f3 | cut -d, -f1)
-            raw_max=$(echo "$attrs_block" | cut -d: -f4)
-            u_min=$((raw_min + 1))
-            ui_max=$((raw_max - 1))
-        else
-            u_min=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "minimumTemperature:[^}]*" | grep -oE "[0-9]{2,3}" | head -n 1)
-            ui_max=$(gzip -dc "$view_gz" 2>/dev/null | grep -oE "maximumTemperature:[^}]*" | grep -oE "[0-9]{2,3}" | head -n 1)
-        fi
-
-        # --- 3. UCI Configuration State (The "Truth") ---
-        u_cur=$(uci -q get glfan.globals.temperature)
-        u_wrn=$(uci -q get glfan.globals.warn_temperature)
-
-        # --- 4. Sanitization & Fallbacks ---
-        [ -z "$u_min" ] && u_min=70
-        [ -z "$ui_max" ] && ui_max=90
-        [ -z "$u_cur" ] && u_cur=75
-        [ -z "$u_wrn" ] && u_wrn=75
+        _fan_state
 
         printf '\033[H'
         print_centered_header "Fan Management"
@@ -6443,9 +6834,7 @@ manage_fan_settings() {
                     fi
                     press_any_key; clear ;;
                 2)
-                    _fan_static_clear
-                    /etc/init.d/gl_fan enable >/dev/null 2>&1
-                    if spin_run "Restoring dynamic fan control" _fan_restart_verify; then
+                    if spin_run "Restoring dynamic fan control" fan_dynamic_restore; then
                         print_success "Dynamic control restored"
                     else
                         fail_report "The fan controller did not restart" "$(logread 2>/dev/null | grep -i gl_fan | tail -3)"
@@ -6515,7 +6904,7 @@ manage_fan_settings() {
                 7)
                     print_warning "Restoring to Factory Defaults"
                     reset_to_factory
-                    _fan_static_clear; /etc/init.d/gl_fan enable >/dev/null 2>&1; /etc/init.d/gl_fan restart >/dev/null 2>&1
+                    fan_dynamic_restore
                     glwebui_disable fan   # drop the fan app-bundle patch, re-paint terminal/switch if active
                     glpersist_is_on fan && glpersist_disable fan   # nothing left to persist
                     printf "\n"
@@ -7365,7 +7754,7 @@ HELPEOF
 _netlimit_bands_edit() {   # <net> <dev> - multi-select which sub-interfaces (bands) are UP; apply on [C]
     # Mirrors the AdGuardHome Backup Cleanup selector: a persistent selection map, checkmark = "this
     # band should be UP". Confirm applies every band's wireless.disabled and syncs network.disabled.
-    local net="$1" dev="$2" mf="/tmp/nl_bands_map" input cmd idx sec band ssid sel box _bdiv i
+    local net="$1" dev="$2" mf="/tmp/nl_bands_map" input cmd idx sec band ssid sel box _bdiv i _bwas
     rm -f "$mf"; i=1
     netlimit_net_wifi "$net" | while IFS='|' read -r sec band ssid dis; do
         [ -z "$sec" ] && continue
@@ -7373,10 +7762,12 @@ _netlimit_bands_edit() {   # <net> <dev> - multi-select which sub-interfaces (ba
         i=$((i+1))
     done
     [ -s "$mf" ] || { rm -f "$mf"; return; }
+    _bwas=$(cut -d'|' -f5 "$mf" | tr -d '\n')   # the bands' state as it opened: Confirm with no change applies nothing
     _bdiv=$(awk -F'|' 'function m(a,b){return a>b?a:b} {w=25+m(16,length($2))+length($4); if(w>x)x=w} END{s="";for(i=0;i<x;i++)s=s"─";print s}' "$mf")
     while true; do
         clear
         print_centered_header "$net - Wi-Fi Bands"
+        print_info "$(_nl_wifi_restart)"; printf '\n'
         printf " %-3s  %-4s  %-16s  %-9s  %s\n" "Sel" "Idx" "Iface" "Band" "SSID"
         printf " %s\n" "$_bdiv"
         while IFS='|' read -r idx sec band ssid sel; do
@@ -7396,7 +7787,10 @@ _netlimit_bands_edit() {   # <net> <dev> - multi-select which sub-interfaces (ba
                     sel=$(grep "^$cmd|" "$mf" | cut -d'|' -f5)
                     sed -i "s/^\($cmd|[^|]*|[^|]*|[^|]*|\).*/\1$((1-sel))/" "$mf"
                 else print_error "Index $cmd not found"; sleep 1; fi ;;
-            c) spin_run "Applying Wi-Fi bands" netlimit_bands_apply "$net" "$dev" "$mf" \
+            c) if [ "$(cut -d'|' -f5 "$mf" | tr -d '\n')" = "$_bwas" ]; then
+                   print_info "No changes - nothing applied"; sleep 1; rm -f "$mf"; return
+               fi
+               spin_run "Applying Wi-Fi bands" netlimit_bands_apply "$net" "$dev" "$mf" \
                    || _nl_toggle_fail "Some Wi-Fi bands didn't reach the selected state"
                rm -f "$mf"; return ;;
             0) rm -f "$mf"; return ;;
@@ -7405,11 +7799,10 @@ _netlimit_bands_edit() {   # <net> <dev> - multi-select which sub-interfaces (ba
     done
 }
 _netlimit_edit() {   # <map-line>
-    local idx name iface type zone dl ul wb ps st ans rl ifstate _dis _togglable _iso dev _wcount _bup _banded _blabel
+    local idx name iface type zone dl ul wb ps st ans rl ifstate _dis _togglable _iso dev _wcount _bup _banded _blabel _acts _nn
     IFS='|' read -r idx name iface type zone dl ul wb ps st ifstate <<EOF
 $1
 EOF
-    case "$type" in guest|iot|vlan) _togglable=1 ;; *) _togglable=0 ;; esac
     dev=$(uci -q get "network.$name.device" 2>/dev/null); [ -z "$dev" ] && dev="$iface"
     while true; do
         clear
@@ -7421,14 +7814,6 @@ EOF
         if [ "$dl" -gt 0 ] || [ "$ul" -gt 0 ]; then
             [ "$(offload_state)" = off ] && st="ACTIVE" || st="BYPASSED (HW accel on)"
         fi
-        # Sub-interfaces (Wi-Fi bands) on this network's bridge, and how many are up. A network with
-        # 2+ bands gets per-band control (a grid); 0-1 stays the simple whole-interface toggle.
-        _wcount=0; _bup=0; _banded=0
-        if [ "$_togglable" = 1 ]; then
-            _wcount=$(netlimit_net_wifi "$name" | grep -c .)
-            _bup=$(netlimit_net_wifi "$name" | awk -F'|' '$4!=1{c++} END{print c+0}')
-            [ "$_wcount" -ge 2 ] && _banded=1
-        fi
         # Recompute If-State live - band-aware for wifi networks (UP iff any band up), else the
         # network.disabled flag. It flips when the user brings the interface(s) up/down below.
         case "$type" in
@@ -7436,6 +7821,15 @@ EOF
             *) _dis=$(uci -q get "network.$name.disabled" 2>/dev/null); [ "$_dis" = 1 ] && ifstate=down || ifstate=up ;;
         esac
         [ "$ifstate" = down ] && wb=na   # a down network is unreachable - don't imply a router state
+        # What this network offers comes from netlimit_net_actions (shared with the Admin Panel). A network with
+        # 2+ Wi-Fi bands gets per-band control (a grid); otherwise guest/iot/vlan get the whole-interface toggle.
+        _acts=$(netlimit_net_actions "$idx|$name|$iface|$type|$zone|$dl|$ul|$wb|$ps|$st|$ifstate")
+        _wcount=0; _bup=0; _banded=0; _togglable=0
+        case "$_acts" in *bands*) _banded=1; _togglable=1 ;; *toggle*) _togglable=1 ;; esac
+        if [ "$_banded" = 1 ]; then
+            _wcount=$(netlimit_net_wifi "$name" | grep -c .)
+            _bup=$(netlimit_net_wifi "$name" | awk -F'|' '$4!=1{c++} END{print c+0}')
+        fi
         # Standard vertical-menu layout (see [[ui-vertical-menu-structure]]): the Status summary
         # leads, then the detail fields with no blank between (grid-column order: Network, Interface,
         # Download, Upload, Router, Persist), then a blank line, then the numbered options. Status
@@ -7445,7 +7839,8 @@ EOF
         # Outdented labels are cyan with DEFAULT fact values; indented rows are white keys with
         # blue facts / state colours (indent cascade, see the Status values rule).
         printf " %bStatus:%b      %b%s%b\n" "$CYAN" "$RESET" "$_stc" "$st" "$RESET"
-        printf " %bNetwork:%b     %s\n" "$CYAN" "$RESET" "$name"
+        _nn=$(_nl_net_note "$name" "$type")
+        printf " %bNetwork:%b     %s%b\n" "$CYAN" "$RESET" "$name" "${_nn:+  $GREY($_nn)$RESET}"
         printf " %bInterface:%b   %s\n" "$CYAN" "$RESET" "$iface"
         _upc="${GREEN}UP${RESET}"
         if [ "$ifstate" = down ]; then printf " %bIf-State:%b    %bDOWN%b\n" "$CYAN" "$RESET" "$GREY" "$RESET"
@@ -7534,7 +7929,7 @@ EOF
             # shifting any other number (menu rule 3).
             local _nbr="" _nun="" _max=4 _k
             { [ "$_banded" = 1 ] || [ "$_togglable" = 1 ]; } && { _max=5; _nbr=5; }
-            { [ "$dl" -gt 0 ] || [ "$ul" -gt 0 ]; } && { _max=$((_max + 1)); _nun=$_max; }
+            case "$_acts" in *unlimit*) _max=$((_max + 1)); _nun=$_max ;; esac
             if [ -n "$_nbr" ]; then
                 if [ "$_banded" = 1 ]; then
                     [ "$_bup" -eq "$_wcount" ] && _blabel="Bring Interfaces DOWN" || _blabel="Bring Interfaces UP or DOWN"
@@ -7571,13 +7966,7 @@ EOF
                      full)            spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 0 ;;
                      *)   # Check Router Access (menu rule 2): re-measure, report, redraw
                           spin_run "Checking router access" netlimit_router_state "$zone"
-                          case "$(tail -n1 "$SPIN_LOG" 2>/dev/null)" in
-                              open)    print_info "Router access: REACHABLE (managed by the '$zone' firewall zone)" ;;
-                              full)    print_info "Router access: REACHABLE (all ports) - it can be managed here now" ;;
-                              partial) print_info "Router access: PARTIAL (some ports) - it can be managed here now" ;;
-                              blocked) print_info "Router access: BLOCKED (no access) - it can be managed here now" ;;
-                              *)       print_info "Router access isn't limited here - this network has no firewall zone" ;;
-                          esac
+                          print_info "$(_nl_access_says "$zone" "$(tail -n1 "$SPIN_LOG" 2>/dev/null)")"
                           press_any_key ;;
                    esac ;;
                 4) netlimit_conf_put "$iface" "$dl" "$ul" "$(netlimit_conf_field "$iface" 4)" "$([ "$ps" = 1 ] && echo 0 || echo 1)"; netlimit_persist_sync ;;
@@ -7591,6 +7980,42 @@ EOF
     done
 }
 
+# What one network offers - the ONE list the menu's per-network editor and the Admin Panel both read, so the two
+# can't drift (the web once couldn't bring a VLAN network up while the menu could).  <map-line> -> one token per line:
+#   limits / access (router reachable on all ports can be switched) or check (only re-measured) / persist  - an UP network
+#   toggle (the whole interface on/off) or bands (per Wi-Fi band, 2+ SSIDs)  - guest/iot/vlan, up or down
+#   unlimit  - an UP network with a limit set
+_nl_net_note() {   # <name> <type> -> what a network carries, where it isn't obvious: lan = wired ports + the main SSIDs
+    [ "$2" = lan ] || return 0
+    [ "$(netlimit_net_wifi "$1" | grep -c .)" -gt 0 ] && echo "wired + main Wi-Fi" || echo "wired"
+}
+_nl_wifi_restart() { echo "Applying restarts Wi-Fi - devices may disconnect briefly"; }   # the band grid's note (menu + web)
+_nl_access_says() {   # <zone> [measured state] -> Check Router Access's answer (menu + web)
+    local r="${2-$(netlimit_router_state "$1")}"
+    case "$r" in
+        open)    echo "Router access: REACHABLE (managed by the '$1' firewall zone)" ;;
+        full)    echo "Router access: REACHABLE (all ports) - it can be managed here now" ;;
+        partial) echo "Router access: PARTIAL (some ports) - it can be managed here now" ;;
+        blocked) echo "Router access: BLOCKED (no access) - it can be managed here now" ;;
+        *)       echo "Router access isn't limited here - this network has no firewall zone" ;;
+    esac
+}
+netlimit_net_actions() {
+    local idx name iface type zone dl ul wb ps st ifstate
+    IFS='|' read -r idx name iface type zone dl ul wb ps st ifstate <<EOF
+$1
+EOF
+    if [ "$ifstate" != down ]; then
+        echo limits
+        case "$wb" in blocked|partial|full) echo access ;; *) echo check ;; esac
+        echo persist
+    fi
+    case "$type" in guest|iot|vlan)
+        if [ "$(netlimit_net_wifi "$name" | grep -c .)" -ge 2 ]; then echo bands; else echo toggle; fi ;;
+    esac
+    [ "$ifstate" != down ] && { [ "${dl:-0}" -gt 0 ] || [ "${ul:-0}" -gt 0 ]; } && echo unlimit
+    return 0
+}
 _nl_map_row() {   # name iface type zone ifstate -> name|iface|type|zone|dl|ul|wb|ps|st|ifstate
     local name="$1" iface="$2" type="$3" zone="$4" ifstate="$5" dl ul ps wb st
     if [ "$ifstate" = down ]; then
@@ -7907,29 +8332,44 @@ _switch_has_guest_wifi() {
 # selectable leaves are numbered; VPN / Wi-Fi are unnumbered group headers with numbered
 # children; empty groups are omitted. Each selectable line maps to "func|subid" so a single
 # numeric pick resolves both. Writes uci switch-button; GL applies it on the next flip/reboot.
-_switch_set_function() {
-    local n=0 f choice sel subid ti tid tname vpnhdr=0 pick
-    print_info "Assign the switch's function:"
+# the functions the switch can be given, in the picker's order: "func|sub id|label|group" (group = VPN / Wi-Fi
+# for the indented sub-lists) - the menu's numbered picker and the Admin Panel's select read the same list
+_switch_func_list() {
+    local f ti tid tname
     for f in none $(_switch_gl_funcs); do
         case "$f" in vpn|wifi) continue ;; esac
-        n=$((n + 1)); eval "SWF_${n}=\"$f|\""
-        printf "   %s. %s\n" "$n" "$(_switch_func_label "$f")"
+        printf '%s||%s|\n' "$f" "$(_switch_func_label "$f")"
     done
     if _switch_has_func vpn; then
         ti=0
         while tid=$(uci -q get "route_policy.@rule[$ti].tunnel_id" 2>/dev/null); do
             tname=$(uci -q get "route_policy.@rule[$ti].name" 2>/dev/null)
-            [ "$vpnhdr" = 0 ] && { printf "   VPN\n"; vpnhdr=1; }
-            n=$((n + 1)); eval "SWF_${n}=\"vpn|$tid\""
-            printf "      %s. %s\n" "$n" "${tname:-tunnel $tid}"
+            printf 'vpn|%s|%s|VPN\n' "$tid" "${tname:-tunnel $tid}"
             ti=$((ti + 1)); [ "$ti" -gt 50 ] && break
         done
     fi
     if _switch_has_func wifi; then
-        printf "   Wi-Fi\n"
-        n=$((n + 1)); eval "SWF_${n}=\"wifi|main_wifi\""; printf "      %s. Main Wi-Fi\n" "$n"
-        _switch_has_guest_wifi && { n=$((n + 1)); eval "SWF_${n}=\"wifi|guest_wifi\""; printf "      %s. Guest Wi-Fi\n" "$n"; }
+        printf 'wifi|main_wifi|Main Wi-Fi|Wi-Fi\n'
+        _switch_has_guest_wifi && printf 'wifi|guest_wifi|Guest Wi-Fi|Wi-Fi\n'
     fi
+}
+_switch_set_function() {
+    local n=0 f choice sel subid lab grp lastgrp="" pick list
+    print_info "Assign the switch's function:"
+    list=$(_switch_func_list)
+    while IFS='|' read -r f subid lab grp; do
+        [ -n "$f" ] || continue
+        n=$((n + 1)); eval "SWF_${n}=\"$f|$subid\""
+        if [ -n "$grp" ]; then
+            [ "$grp" != "$lastgrp" ] && printf "   %s\n" "$grp"
+            printf "      %s. %s\n" "$n" "$lab"
+        else
+            printf "   %s. %s\n" "$n" "$lab"
+        fi
+        lastgrp=$grp
+    done <<SWFEOF
+$list
+SWFEOF
     [ "$n" -eq 0 ] && { print_warning "No assignable functions found on this device"; press_any_key; return; }
     printf "\nChoose function [1-%s/0]: " "$n"; read -r choice; printf "\n"
     case "$choice" in 0|"") return ;; *[!0-9]*) print_error "Invalid choice"; sleep 1; return ;; esac
@@ -8550,25 +8990,32 @@ glwebui_prov_ttyd() {
                         : host;
       const modal = document.createElement('div');
       modal.id = 'term-modal';
-      // Sized to the toolkit's standard 110x33.
+      // Sized to the toolkit's standard 110 x 33, MEASURED in this browser rather than set in pixels.
+      // A fixed 800x520 box gave 112x33 in Chrome but 110x31 in Safari: each browser lays the same
+      // 12px monospace out at a different cell height, and three pixel estimates in a row were wrong.
+      // So measure one cell here, in ttyd's font (fontSize=12 is the toolkit's ttyd client_option;
+      // the family is ttyd's default, measured the way xterm does: 'W' x 32 at line-height normal), and size the box to fit 110 x 33 cells plus ttyd's 5px
+      // padding each side, the 38px title bar and half a row of slack for rounding. 800x560 is the
+      // fallback when the measure fails. vw/vh caps keep it on a small screen.
       //
-      // Calibrated from measured sessions, not estimated - three estimates in a
-      // row were wrong, including a linear scaling that assumed cell size tracks
-      // fontSize proportionally. It does not.
-      //
-      //   default font, 1095x700 box -> 142x43  => cell 7.7  x 15.4
-      //   fontSize=14,   800x520 box -> 96x29   => cell 8.33 x 16.6
-      //
-      // At fontSize=12 the cell measures about 7.14 x 14.25, so this 800x520 box
-      // should land near 112x33. Trim the width to ~785px if exactly 110 matters.
-      //
-      // FIXED PIXELS, not percentages - a percentage yields a different
-      // cols x rows on every window size, which is what produced 134x38.
-      //
-      // max() inside min() rather than the min-width/min-height PROPERTIES:
-      // those are a permanent floor, and minimise sets the modal to 250x38, so a
-      // floor silently stops it collapsing (the old min-width:300px did that).
-      modal.style.cssText = 'position:fixed; top:8%; left:10%; width:min(96vw, 800px); height:min(90vh, 520px); background:#000 !important; z-index:9999; border-radius:10px; box-shadow:0 20px 50px rgba(0,0,0,0.9); overflow:hidden; border:1px solid #444;';
+      // max() inside min() rather than the min-width/min-height PROPERTIES: those are a permanent
+      // floor, and minimise sets the modal to 250x38, so a floor silently stops it collapsing.
+      const TERM_COLS = 110, TERM_ROWS = 33, TERM_PAD = 10, TERM_HEAD = 38;
+      let boxW = 800, boxH = 560;
+      try {
+        const probe = document.createElement('span');
+        probe.style.cssText = 'position:absolute; top:-999px; left:-999px; visibility:hidden; white-space:pre; line-height:normal; font-size:12px; font-family:"Menlo For Powerline",Consolas,"Liberation Mono",Menlo,Courier,monospace;';
+        probe.textContent = 'W'.repeat(32);
+        document.body.appendChild(probe);
+        const r = probe.getBoundingClientRect();
+        probe.remove();
+        const cw = r.width / 32, ch = r.height;
+        if (cw > 3 && ch > 6) {
+          boxW = Math.ceil(TERM_COLS * cw + TERM_PAD + 16);            // + room for xterm's scrollbar
+          boxH = Math.ceil((TERM_ROWS + 0.5) * ch + TERM_PAD + TERM_HEAD);
+        }
+      } catch (e) {}
+      modal.style.cssText = 'position:fixed; top:8%; left:10%; width:min(96vw, '+boxW+'px); height:min(90vh, '+boxH+'px); background:#000 !important; z-index:9999; border-radius:10px; box-shadow:0 20px 50px rgba(0,0,0,0.9); overflow:hidden; border:1px solid #444;';
       const head = document.createElement('div');
       head.id = 'term-header';
       head.style.cssText = 'background:#1a1a1a; padding:10px 15px; display:flex; justify-content:space-between; align-items:center; cursor:move; user-select:none; border-bottom:1px solid #333;';
@@ -8709,7 +9156,7 @@ GLPERSIST_VERFILE="$GLPERSIST_DIR/glversion"
 GLPERSIST_UNSEEN="$GLPERSIST_DIR/.unseen"
 
 glpersist_is_on() { [ -f "${GLPERSIST_DIR:-/etc/glinet_utils/persist}/$1" ]; }               # $1 = fan|ttyd|switch
-glpersist_any()   { [ -f "$GLPERSIST_DIR/fan" ] || [ -f "$GLPERSIST_DIR/ttyd" ] || [ -f "$GLPERSIST_DIR/switch" ] || [ -f "$GLPERSIST_DIR/ost" ] || [ -s "$(_lazlist)" ]; }
+glpersist_any()   { [ -f "$GLPERSIST_DIR/fan" ] || [ -f "$GLPERSIST_DIR/ttyd" ] || [ -f "$GLPERSIST_DIR/switch" ] || [ -f "$GLPERSIST_DIR/ost" ] || [ -f "$GLPERSIST_DIR/webui" ] || [ -s "$(_lazlist)" ]; }
 glpersist_curver(){ cat "${GLPERSIST_VERSRC:-/etc/glversion}" 2>/dev/null; }
 
 _glpersist_label() {
@@ -8718,6 +9165,7 @@ _glpersist_label() {
         fan)    printf 'fan control' ;;
         ttyd)   printf 'Web Terminal' ;;
         ost)    printf 'OpenSpeedTest' ;;
+        webui)  printf 'Admin Panel page' ;;
     esac
 }
 
@@ -8863,7 +9311,7 @@ _glpersist_ost_restore() {
         if ! command -v nginx >/dev/null 2>&1; then
             printf 'ost|fail|nginx\n' >> "$GLPERSIST_REPORT"; logger -t glinet_persist "could not re-install nginx for OpenSpeedTest"; return 0
         fi
-        { /etc/init.d/nginx stop; /etc/init.d/nginx disable; } >/dev/null 2>&1; rm -f /etc/nginx/conf.d/default.conf
+        _stock_nginx_off
         logger -t glinet_persist "re-installed nginx for OpenSpeedTest"
     fi
     if "$OST_STARTUP_SCRIPT" enabled 2>/dev/null; then
@@ -8880,6 +9328,9 @@ _glpersist_reapply_all() {
     printf 'ver|%s|%s\n' "$oldv" "$newv" >> "$GLPERSIST_REPORT"
     _glpersist_pkgs_restore
     glpersist_is_on ost && _glpersist_ost_restore
+    if glpersist_is_on webui; then
+        if webui_enable >/dev/null 2>&1; then printf 'webui|ok\n' >> "$GLPERSIST_REPORT"; else printf 'webui|fail\n' >> "$GLPERSIST_REPORT"; fi
+    fi
 
     # --- backends first (independent of the shared bundle) ---
     if glpersist_is_on switch; then
@@ -8890,7 +9341,7 @@ _glpersist_reapply_all() {
     if glpersist_is_on ttyd; then
         glwebui_is_on ttyd || printf 'http' > "$GLWEBUI_DIR/ttyd"
         command -v ttyd >/dev/null 2>&1 || install_package ttyd >/dev/null 2>&1
-        [ -x /etc/init.d/ttyd ] && { /etc/init.d/ttyd enable >/dev/null 2>&1; /etc/init.d/ttyd restart >/dev/null 2>&1; }
+        _ttyd_service_restore
     fi
     if glpersist_is_on fan && glwebui_is_on fan; then        # setpoints (Web-UI + controller patch)
         set -- $(cat "$GLWEBUI_DIR/fan" 2>/dev/null); rmin="${1:-70}"; rmax="${2:-90}"; rcur="${3:-75}"
@@ -9082,10 +9533,13 @@ _ttyd_disable() {
     glpersist_is_on ttyd && glpersist_disable ttyd
     return 0
 }
+_ttyd_remove_files() { rm -f /etc/config/ttyd /etc/ttyd.crt /etc/ttyd.key; }   # its config + certificate
+# after a firmware update: turn the service back on at boot and restart it (its own helper so the e2e can stub it)
+_ttyd_service_restore() { [ -x /etc/init.d/ttyd ] && { /etc/init.d/ttyd enable >/dev/null 2>&1; /etc/init.d/ttyd restart >/dev/null 2>&1; }; return 0; }
 _ttyd_uninstall() {
     _ttyd_stop_service
     pkg_remove ttyd >/dev/null 2>&1
-    rm -f /etc/config/ttyd /etc/ttyd.crt /etc/ttyd.key
+    _ttyd_remove_files
     glwebui_disable ttyd
     glpersist_is_on ttyd && glpersist_disable ttyd
     return 0
@@ -9224,6 +9678,19 @@ manage_web_terminal() {
 
 # --- Manage Packages ---
 
+_pm_stage_targets() {   # <map file> - set the rows PM_TARGETS names to their target state (see manage_packages)
+    local idx name ti tp act type paths oi op want
+    while IFS='|' read -r idx name ti tp act type paths oi op; do
+        if [ "$type" = F ]; then
+            want=$(printf '%s\n' "$PM_TARGETS" | awk -F= -v k="F:$paths" '$1 == k { print $2; exit }')
+            [ -n "$want" ] && { ti=1; tp=$want; act=$(get_action_text 1 "$tp" "$oi" "$op"); }
+        else
+            want=$(printf '%s\n' "$PM_TARGETS" | awk -F= -v k="$name" '$1 == k { print $2; exit }')
+            [ -n "$want" ] && { ti=${want%%:*}; tp=${want#*:}; act=$(get_action_text "$ti" "$tp" "$oi" "$op"); }
+        fi
+        echo "$idx|$name|$ti|$tp|$act|$type|$paths|$oi|$op"
+    done < "$1" > "$1.st" && mv "$1.st" "$1"
+}
 get_action_text() {
     local t_i=$1 local t_p=$2 local o_i=$3 local o_p=$4
     
@@ -9493,17 +9960,20 @@ _pm_feat_set() {
 manage_packages() {
     local UTILITY_DB; UTILITY_DB=$(_pm_utility_db)
 
-    local map_file="/tmp/pkg_manage_map"
+    # the Admin Panel runs this from a job while its screen re-reads it (PM_TARGETS / PM_LIST): each run gets
+    # its own working files, so an apply never reads a map another run is rewriting
+    local _pmx=""; [ -n "${PM_LIST:-}${PM_TARGETS:-}" ] && _pmx=".$$"
+    local map_file="/tmp/pkg_manage_map$_pmx"
     local sys_conf="/etc/sysupgrade.conf"
     local laz_list="/etc/lazarus.list"
     local sort_mode="size"                    # size | name; toggled by [S]
-    local sizes_file="/tmp/pkg_manage_sizes"  # name|sizeKB, computed once per entry
-    local keep_file="/tmp/pkg_manage_keep"    # name|KB of the files that row keeps across an update
+    local sizes_file="/tmp/pkg_manage_sizes$_pmx"  # name|sizeKB, computed once per entry
+    local keep_file="/tmp/pkg_manage_keep$_pmx"    # name|KB of the files that row keeps across an update
     # init_system_state runs under spin_run (a background subshell), so its measurements come back in files
-    local keep_totf="/tmp/pkg_manage_keeptot" # KB on the keep list right now (measured)
-    local keep_archf="/tmp/pkg_manage_keeparch" # KB the flash would pack them into (measured, compressed)
-    local feat_file="/tmp/pkg_manage_feat"    # the Features rows (_pm_feat_rows)
-    local idx_sizes="/tmp/pkg_manage_idx"     # name|bytes from ONE batched 'opkg info' (see init)
+    local keep_totf="/tmp/pkg_manage_keeptot$_pmx" # KB on the keep list right now (measured)
+    local keep_archf="/tmp/pkg_manage_keeparch$_pmx" # KB the flash would pack them into (measured, compressed)
+    local feat_file="/tmp/pkg_manage_feat$_pmx"    # the Features rows (_pm_feat_rows)
+    local idx_sizes="/tmp/pkg_manage_idx$_pmx"     # name|bytes from ONE batched 'opkg info' (see init)
     # Two pages, one per section (Packages / Features) - together they outgrow a 36-row
     # terminal. Footer = the standard paged nav line (as the AGH Lists Manager) + a selection line. On a
     # paged screen None is [Z] so [N] stays Next; [A]/[Z] act on the CURRENT page only ("options match what
@@ -9539,7 +10009,9 @@ manage_packages() {
             # reports the installed size for BOTH installed and available (index) packages in one fast
             # local call ("<pkg>-<ver> installed size:\n284 KiB"), so it fills the whole column. Fall
             # back to du only for a toolkit-made symlink apk doesn't know (e.g. stress -> stress-ng).
-            kb=$(_apk_footprint_kb "$name")   # installed: its size; not installed: + the dependencies it pulls in
+            # installed: its size; not installed: + the dependencies it pulls in (measured for all at once when it can be)
+            kb=$(grep -m1 "^$name|" "${_APK_KB:-/nonexistent}" 2>/dev/null | cut -d'|' -f2)
+            [ -n "$kb" ] || kb=$(_apk_footprint_kb "$name")
             case "$kb" in ''|*[!0-9]*) kb=0 ;; esac
             # non-index binaries (Ookla speedtest, speedtest-go) aren't in apk either - use the estimate
             if [ "$kb" -le 0 ]; then bytes=$(_nonindex_bytes "$name"); [ "$bytes" -gt 0 ] && kb=$(( (bytes + 1023) / 1024 )); fi
@@ -9676,6 +10148,12 @@ EOF
                     /^Installed-Size: /{ sz = $2 } /^Depends: /{ dp = substr($0, 10) }
                     END { if (n != "") print n "|" sz "|" dp }' | awk -F'|' '$2 != "" && !seen[$1]++' > "$idx_sizes"   # same shape as _opkg_index_table
     fi
+    # apk: the sizes still to measure, in one batch (_pkg_size reads it; see _apk_footprint_batch)
+    _APK_KB="/tmp/.apkkb.$$"; rm -f "$_APK_KB"
+    if [ "$_need" = 1 ] && [ "$(pkg_mgr)" = apk ]; then
+        _apk_footprint_batch $(echo "$UTILITY_DB" | cut -d'|' -f1 | while read -r _n; do
+            [ -n "$_n" ] && ! grep -q "^$_n|" "$PKG_SIZE_CACHE" 2>/dev/null && echo "$_n"; done) > "$_APK_KB"
+    fi
     local i=1
     echo "$UTILITY_DB" | while IFS='|' read -r name bin type paths; do
         [ -z "$name" ] && continue
@@ -9702,6 +10180,7 @@ EOF
         printf '%s|%s\n' "$name" "$(_pm_kb $paths)" >> "$keep_file"
         i=$((i+1))
     done
+    rm -f "$_APK_KB"
     # Features (persist only - Install is fixed at 1, type F, the "paths" field holds the key)
     _pm_feat_rows > "$feat_file"
     while IFS='|' read -r _k _lb _pr _kb _; do
@@ -9752,6 +10231,17 @@ EOF
     clear
     print_centered_header "Package & Persistence Manager"
     spin_run "Collecting package sizes" init_system_state
+    # the Admin Panel page: PM_LIST=<file> writes the rows (name|type|installed|persisted|sizeKB|paths) and stops;
+    # PM_TARGETS ("<name>=<I>:<P>" / "F:<key>=<P>" lines) stages those targets and goes straight to Confirm
+    if [ -n "${PM_LIST:-}" ]; then
+        while IFS='|' read -r idx name ti tp act type paths oi op; do
+            [ -n "$name" ] && printf '%s|%s|%s|%s|%s|%s\n' "$name" "$type" "$oi" "$op" "$(grep -m1 "^$name|" "$sizes_file" 2>/dev/null | cut -d'|' -f2)" "$paths"
+        done < "$map_file" > "$PM_LIST"
+        rm -f "$map_file" "$sizes_file" "$idx_sizes" "$keep_file" "$feat_file" "$keep_totf" "$keep_archf" 2>/dev/null
+        return 0
+    fi
+    _pm_did=""
+    [ -n "${PM_TARGETS:-}" ] && _pm_stage_targets "$map_file"
     # from Firmware Update: the Update Memory meter's archive size - measured (usually already done in the
     # background since Firmware Update opened; this waits only for the rest)
     if [ -n "${PM_FW_IMAGE_KB:-}" ]; then
@@ -9759,6 +10249,8 @@ EOF
     fi
 
     while true; do
+        # scripted (the Admin Panel): one pass - stage, Confirm, apply - then stop before drawing again
+        [ -n "${PM_TARGETS:-}" ] && [ -n "$_pm_did" ] && { rm -f "$map_file" "$sizes_file" "$idx_sizes" "$keep_file" "$feat_file" "$keep_totf" "$keep_archf" 2>/dev/null; return 0; }
         clear
         print_centered_header "Package & Persistence Manager"
         # a message about the whole screen sits right under the title (as the Lists Manager's state warning)
@@ -9804,7 +10296,12 @@ EOF
         printf " %s\n" "$_pkg_acts"
         printf " [P] Previous   Page %s of %s   [N] Next\n" "$page" "$pages"
         printf "\n Choose [%s-%s/A/Z/S/C/P/N/0/?]: " "$pg_first" "$pg_last"
-        read -r cmd
+        if [ -n "${PM_TARGETS:-}" ]; then
+            [ -n "$_pm_did" ] && { rm -f "$map_file" "$sizes_file" "$idx_sizes" "$keep_file" "$feat_file" "$keep_totf" "$keep_archf" 2>/dev/null; return 0; }
+            _pm_did=1; cmd=c; printf 'C\n'
+        else
+            read -r cmd
+        fi
         cmd=$(echo "$cmd" | tr 'A-Z' 'a-z')
 
         case "$cmd" in
@@ -10040,6 +10537,7 @@ EOF
                     press_any_key
                     # opened from Firmware Update: back to the update (it re-checks what's kept)
                     [ "${PM_FW_STAGE:-0}" = 1 ] && { rm -f "$map_file" "$sizes_file" "$idx_sizes" "$keep_file" "$feat_file" "$keep_totf" "$keep_archf" 2>/dev/null; return; }
+                    [ -n "${PM_TARGETS:-}" ] && continue   # scripted: done (the loop top returns)
                     clear
                     print_centered_header "Package & Persistence Manager"
                     spin_run "Refreshing package list" init_system_state
@@ -10389,6 +10887,15 @@ Uninstall
 ─────────
 Removes /usr/sbin/glinet_utils and its sysupgrade.conf entry.
 The script you are currently running is not affected.
+
+Admin Panel Page
+────────────────
+Adds a Router Toolkit entry to the GL.iNet Admin Panel's own menu. It opens a
+page with the AdGuardHome status and Enable / Disable, using the same words and
+checks as these menus; the Admin Panel's login protects it, and it follows the
+Admin Panel's light or dark theme. Disable removes the entry and the page. With
+the toolkit installed, the page comes back after a firmware update. Shown as
+NOT SUPPORTED on firmware whose Admin Panel can't host it.
 HELPEOF
 }
 
@@ -10415,7 +10922,9 @@ check_install_prompt() {
     printf "\n"
     case "$ip_ans" in
         n|N)
-            sed -i 's/^INSTALL_PROMPTED=0$/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
+            # remember the "no" until the next update replaces this file (the line carries a comment, so match
+            # its start - the old "=0$" match never fired, so this was asked on every run)
+            sed -i 's/^INSTALL_PROMPTED=0/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
             print_info "Skipping. You can install later via System Tweaks → Toolkit Management."
             STARTUP_NOTICE=1
             ;;
@@ -10704,7 +11213,7 @@ DS_EOF
             full)
                 case "$_TERM_PROFILE" in
                     ttyd)    detected_desc="ttyd (browser) → Full mode" ;;
-                    wt)      detected_desc="Windows Terminal → Full mode" ;;
+                    wt)      detected_desc="$([ "${_TERM_KC_EMOJI:-}" = 1 ] && echo Termius || echo "Windows Terminal") → Full mode" ;;
                     termius) detected_desc="Termius → Full mode" ;;
                     *)       detected_desc="macOS/Linux Terminal → Full mode" ;;
                 esac
@@ -10830,7 +11339,7 @@ manage_toolkit() {
                 full)
                     case "$_TERM_PROFILE" in
                         ttyd)    mode_display="$mode_display  [auto: ttyd]" ;;
-                        wt)      mode_display="$mode_display  [auto: Windows Terminal]" ;;
+                        wt)      mode_display="$mode_display  [auto: $([ "${_TERM_KC_EMOJI:-}" = 1 ] && echo Termius || echo "Windows Terminal")]" ;;
                         termius) mode_display="$mode_display  [auto: Termius]" ;;
                         *)       mode_display="$mode_display  [auto: macOS/Linux]" ;;
                     esac
@@ -10865,6 +11374,16 @@ manage_toolkit() {
         [ -n "$kc_status" ] && printf "   Keycap spacing:  %b\n" "$kc_status"
         printf "   Installation:    %b\n"   "$installed_status"
         printf "   Persistence:     %b\n"   "$persistence_status"
+        # the Admin Panel page: a status word, its address while it's on, and item 5 follows the state
+        # (no item where GL's firmware can't host it - NOT SUPPORTED is the whole story)
+        local wb_state wb_label=""; wb_state=$(webui_state)
+        case "$wb_state" in
+            ENABLED)       printf "   Admin Panel:     %b\n" "$(_lc_value ENABLED)"
+                           printf "   Admin Panel URL: %b\n" "${CYAN}$(webui_url)${RESET}"; wb_label="Disable Admin Panel Page" ;;
+            SERVICE_DOWN)  printf "   Admin Panel:     %b\n" "$(_lc_value SERVICE_DOWN)"; wb_label="Disable Admin Panel Page" ;;
+            DISABLED)      printf "   Admin Panel:     %b\n" "$(_lc_value DISABLED)"; wb_label="Enable Admin Panel Page" ;;
+            *)             printf "   Admin Panel:     %b\n" "${GREY}NOT SUPPORTED${RESET}" ;;
+        esac
         printf "   Running from:    %b\n"   "$running_from"
         printf "   Version:         %b\n"   "${BLUE}${local_ver}${RESET}"
         printf "   Update:          %b\n\n" "$update_display"
@@ -10873,9 +11392,10 @@ manage_toolkit() {
         printf "%s%s%s\n" "$N2" "$NSEP" "$persist_label"
         printf "%s%sDisplay Settings\n"          "$N3" "$NSEP"
         printf "%s%s%s\n"                        "$N4" "$NSEP" "$update_label"
+        [ -n "$wb_label" ] && printf "%s%s%s\n"  "$N5" "$NSEP" "$wb_label"
         printf "%s%sBack\n"                      "$N0" "$NSEP"
         printf "%s Help\n"                       "$NQ"
-        printf "\nChoose [1-4/0/?]: "
+        if [ -n "$wb_label" ]; then printf "\nChoose [1-5/0/?]: "; else printf "\nChoose [1-4/0/?]: "; fi
         read -r tk_choice
         printf "\n"
 
@@ -10931,11 +11451,2356 @@ manage_toolkit() {
                 fi
                 CL_EXIT_LABEL=""
                 ;;
+            5) if [ -n "$wb_label" ]; then webui_toggle; else print_error "Invalid option"; sleep 1; fi ;;
             \?|h|H|❓) show_toolkit_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
         esac
     done
+}
+
+# =============================================================================
+# Admin Panel Page - the toolkit inside GL.iNet's Admin Panel
+# =============================================================================
+# A "Router Toolkit" entry in the Admin Panel's own menu (GL's plugin mechanism: a menu.d entry + a view,
+# the same format on 4.3, 4.9 and the OpenWrt 25 builds) opens the toolkit's page inside GL's frame. The
+# page talks to the toolkit through GL's own /rpc, so GL's admin login guards it, and it shows exactly the
+# words the menus show (the shared feature model + glu_api). It follows the Admin Panel's theme and colours.
+# Every file is written from here - the one script stays the whole toolkit.
+WEBUI_RPC=/usr/lib/oui-httpd/rpc/glutils                  # the /rpc bridge (Lua)
+WEBUI_PAGE=/www/glu/gl_home.html                          # the page (gl_home.html = GL's folder index name)
+WEBUI_MENU_DIR=/usr/share/oui/menu.d                     # one menu entry per screen: glutils-<id>.json
+WEBUI_VIEW_DIR=/www/views                                 # one view per screen: gl-sdk4-ui-glutils-<id>.common.js.gz
+WEBUI_LIVE=/usr/lib/glutils/live.sh                       # the 1-second sampler (Hardware Information)
+WEBUI_BUILD=/usr/lib/glutils/build                        # checksum of the toolkit that wrote the files
+# The screens in the Admin Panel's "ROUTER TOOLKIT" group, in the toolkit main menu's order: "id|title|index",
+# one per line (titles have spaces). Adding a screen to the web = one line here + its _ws_<id>_* screen functions
+# (Hardware Information keeps its own live page). Not here, on purpose: the toolkit's own terminal settings.
+_webui_screens() {
+    printf '%s\n' "hardware|Hardware Information|10" "agh|AdGuardHome Control Center|20" "tweaks|System Tweaks|30" \
+        "bench|System Benchmarks|40" "net|Network and VPN Tools|50" "uci|System Configuration|60"
+}
+_webui_screen_ids() { _webui_screens | cut -d'|' -f1; }
+WEBUI_NGINX=/etc/nginx/gl-conf.d/glutils.conf             # lets the Admin Panel show the page in its frame
+
+webui_supported() {   # GL's plugin menu, its /rpc modules and its nginx drop-in folder are all there
+    [ -d /usr/share/oui/menu.d ] && [ -d /usr/lib/oui-httpd/rpc ] && [ -d /www/views ] && [ -d /etc/nginx/gl-conf.d ] \
+        && command -v nginx >/dev/null 2>&1
+}
+webui_installed() {
+    local id; [ -f "$WEBUI_RPC" ] && [ -f "$WEBUI_PAGE" ] || return 1
+    for id in $(_webui_screen_ids); do [ -f "$WEBUI_MENU_DIR/glutils-$id.json" ] && [ -f "$WEBUI_VIEW_DIR/gl-sdk4-ui-glutils-$id.common.js.gz" ] || return 1; done
+}
+# every file the Admin Panel page owns (and the single entry the first version wrote), for Disable
+_webui_files() {
+    local id; echo "$WEBUI_RPC $WEBUI_PAGE $WEBUI_NGINX $WEBUI_LIVE $WEBUI_BUILD $WEBUI_MENU_DIR/glutils.json $WEBUI_VIEW_DIR/gl-sdk4-ui-glutils.common.js.gz"
+    for id in $(_webui_screen_ids); do echo "$WEBUI_MENU_DIR/glutils-$id.json $WEBUI_VIEW_DIR/gl-sdk4-ui-glutils-$id.common.js.gz"; done
+}
+webui_url() { printf 'http://%s/glu/' "$(get_lan_ip)"; }
+# the page answers locally (oui-access lets 127.0.0.1 through without the HTTPS redirect)
+_webui_serving() { wget -q -T 5 -O /dev/null http://127.0.0.1/glu/ 2>/dev/null; }
+# a copy of the toolkit that the page can run: installed, or a saved file that isn't in /tmp
+_webui_toolkit_ok() {
+    toolkit_is_installed && return 0
+    _is_toolkit_file "$SCRIPT_PATH" || return 1
+    case "$SCRIPT_PATH" in /tmp/*) return 1 ;; esac
+}
+webui_state() {   # NOT_SUPPORTED | DISABLED | ENABLED | SERVICE_DOWN (installed, but the page isn't served)
+    webui_supported || { echo NOT_SUPPORTED; return; }
+    webui_installed || { echo DISABLED; return; }
+    if _webui_serving; then echo ENABLED; else echo SERVICE_DOWN; fi
+}
+
+_webui_write_rpc() {   # <lua list of toolkit paths>
+    mkdir -p "$(dirname "$WEBUI_RPC")"
+    cat << 'GLULUA' | sed "s#@GLU_PATHS@#$1#" > "$WEBUI_RPC"
+--[[
+    @object-name: glutils
+    @object-desc: GL.iNet Router Toolkit (glinet_utils) - the bridge its Web UI page calls.
+
+    Installed as /usr/lib/oui-httpd/rpc/glutils. GL's /rpc only reaches it with a signed-in admin
+    session, so the page needs no login of its own. Every method runs the toolkit's own `--api` entry
+    point (an argument list - never a shell), so the page shows the same words and states as the
+    toolkit's menus. A fixed method set; ids are checked here AND again by the toolkit.
+--]]
+local cjson = require "cjson"
+
+local M = {}
+
+-- written by the toolkit: the installed command first, then the copy that installed this page; must
+-- really be the toolkit (an old installer bug once copied busybox to /usr/sbin/glinet_utils)
+local CANDIDATES = { @GLU_PATHS@ }
+
+local function toolkit()
+    for _, path in ipairs(CANDIDATES) do
+        local f = io.open(path, "r")
+        if f then
+            local head = f:read(2048) or ""
+            f:close()
+            if head:find("# Version:", 1, true) then return path end
+        end
+    end
+end
+
+local function fail(text)
+    return { ok = false, message = { tone = "error", text = text, details = {}, fix = "" } }
+end
+
+local function id_ok(v)
+    return type(v) == "string" and #v <= 32 and v:match("^[a-z_][a-z0-9_]*$") ~= nil
+end
+
+-- run a toolkit command and return its one JSON object, or nil + why not
+local function spawn_json(cmd, timeout_ms)
+    -- timeouts go in the spawn options (GL's ngx.pipe has no set_timeouts)
+    local proc, err = ngx.pipe.spawn(cmd, { stdout_read_timeout = timeout_ms, wait_timeout = timeout_ms })
+    if not proc then return nil, "The toolkit couldn't be started (" .. tostring(err) .. ")" end
+    pcall(proc.shutdown, proc, "stdin")     -- nothing it runs may wait on input
+    local out, rerr = proc:stdout_read_all()
+    if not out then
+        if proc.kill then pcall(proc.kill, proc, 9) end
+        return nil, "The toolkit didn't answer in time (" .. tostring(rerr) .. ")"
+    end
+    proc:wait()
+    local ok, res = pcall(cjson.decode, out)
+    if not ok or type(res) ~= "table" then return nil, "The toolkit's answer couldn't be read" end
+    return res
+end
+
+-- `glinet_utils --api <args...>`
+local function run(args, timeout_ms)
+    local script = toolkit()
+    if not script then return nil, "The GL.iNet Router Toolkit isn't installed on this router" end
+    local cmd = { "/bin/sh", script, "--api" }
+    for _, a in ipairs(args) do cmd[#cmd + 1] = a end
+    return spawn_json(cmd, timeout_ms)
+end
+
+--[[
+    @method-name: get_features
+    @method-desc: The toolkit's version and the features this page can show.
+--]]
+M.get_features = function()
+    local res, err = run({ "features" }, 15000)
+    return res or fail(err)
+end
+
+--[[
+    @method-name: get_status
+    @method-desc: A feature's STATUS rows, its current action and any screen message.
+    @in string feature
+--]]
+M.get_status = function(params)
+    if not id_ok(params.feature) then return fail("Unknown feature") end
+    local args = { "status", params.feature }
+    if params.tab ~= nil then
+        if not id_ok(params.tab) then return fail("Unknown tab") end
+        args[#args + 1] = params.tab
+        if params.reveal == true then args[#args + 1] = "--reveal" end
+    end
+    local res, err = run(args, 30000)
+    return res or fail(err)
+end
+
+--[[
+    @method-name: get_live
+    @method-desc: Hardware Information's live values (the page asks every second). Runs the small sampler the
+                  toolkit wrote from its own functions - milliseconds, not a full toolkit start.
+    @in bool fs   true every 10 s: include filesystem usage
+--]]
+M.get_live = function(params)
+    local fs = params.fs == true and "fs" or nil
+    local f = io.open("/usr/lib/glutils/live.sh", "r")
+    if f then
+        f:close()
+        local res, err = spawn_json({ "/bin/sh", "/usr/lib/glutils/live.sh", fs }, 5000)
+        return res or fail(err)
+    end
+    local res, err = run({ "live", fs }, 15000)      -- the sampler is missing: the full toolkit answers the same
+    return res or fail(err)
+end
+
+--[[
+    @method-name: get_help
+    @method-desc: A feature's help text (the same text as its [?] Help in the menus).
+    @in string feature
+--]]
+M.get_help = function(params)
+    if not id_ok(params.feature) then return fail("Unknown feature") end
+    if params.tab ~= nil and not id_ok(params.tab) then return fail("Unknown tab") end
+    local res, err = run({ "help", params.feature, params.tab }, 15000)
+    return res or fail(err)
+end
+
+--[[
+    @method-name: get_helps
+    @method-desc: Every tab's help for one screen at once (the page keeps it for the session).
+    @in string feature
+--]]
+M.get_helps = function(params)
+    if not id_ok(params.feature) then return fail("Unknown feature") end
+    local res, err = run({ "helps", params.feature }, 30000)
+    return res or fail(err)
+end
+
+--[[
+    @method-name: do_action
+    @method-desc: Run a feature's current action; returns the verified result and the re-read status.
+    @in string feature
+    @in string action
+    @in bool   confirmed   true once the person confirmed an action that asks first
+--]]
+M.do_action = function(params)
+    if not id_ok(params.feature) or not id_ok(params.action) then return fail("Unknown action") end
+    local args = { "action", params.feature, params.action }
+    if params.confirmed == true then args[#args + 1] = "--confirmed" end
+    local res, err = run(args, 90000)
+    return res or fail(err)
+end
+
+-- a screen's form fields: a few k=v strings, single line, no NUL - the toolkit checks each value again
+local function args_ok(t, out)
+    if t == nil then return true end
+    if type(t) ~= "table" then return false end
+    local n = 0
+    for k, v in pairs(t) do
+        n = n + 1
+        if n > 80 or type(k) ~= "string" or #k > 32 or not k:match("^[a-z_][a-z_0-9]*$") then return false end
+        if type(v) == "number" or type(v) == "boolean" then v = tostring(v) end
+        if type(v) ~= "string" or #v > 2048 or v:find("[%z\r\n]") then return false end
+        out[#out + 1] = k .. "=" .. v
+    end
+    return true
+end
+
+--[[
+    @method-name: get_screen
+    @method-desc: Any menu screen as cards, rows, tables and actions (the toolkit's screen description).
+    @in string screen
+    @in string tab
+    @in object args
+--]]
+M.get_screen = function(params)
+    if not id_ok(params.screen) then return fail("Unknown screen") end
+    if params.tab ~= nil and params.tab ~= "" and not id_ok(params.tab) then return fail("Unknown tab") end
+    local args = { "screen", params.screen, params.tab or "" }
+    if not args_ok(params.args, args) then return fail("Those values can't be used") end
+    local res, err = run(args, 60000)
+    return res or fail(err)
+end
+
+--[[
+    @method-name: do_act
+    @method-desc: Run one of a screen's actions; returns the result and the screen re-read after it. A long action
+                  starts a job instead (its log is read with job_poll).
+    @in string screen
+    @in string tab
+    @in string action
+    @in bool   confirmed
+    @in object args
+--]]
+M.do_act = function(params)
+    if not id_ok(params.screen) or not id_ok(params.action) then return fail("Unknown action") end
+    if params.tab ~= nil and params.tab ~= "" and not id_ok(params.tab) then return fail("Unknown tab") end
+    local args = { "act", params.screen, params.tab or "", params.action }
+    if params.confirmed == true then args[#args + 1] = "--confirmed" end
+    if not args_ok(params.args, args) then return fail("Those values can't be used") end
+    local res, err = run(args, 300000)
+    return res or fail(err)
+end
+
+local function slurp(path, max)
+    local f = io.open(path, "r")
+    if not f then return nil end
+    local s = f:read(max or 4096)
+    f:close()
+    return s
+end
+
+--[[
+    @method-name: job_poll
+    @method-desc: The new part of a job's log since offset, and whether it is still running. Reads the log the
+                  job writes - no toolkit start, so the page can ask every second.
+    @in string id
+    @in number offset
+--]]
+M.job_poll = function(params)
+    if not id_ok(params.id) then return fail("No such job") end
+    local dir = "/tmp/glutils/jobs/" .. params.id
+    local f = io.open(dir .. "/log", "r")
+    if not f then return fail("No such job") end
+    local off = tonumber(params.offset) or 0
+    local size = f:seek("end")
+    if off < 0 or off > size then off = 0 end
+    -- a menu item run as a job (_ws_cli_one): show only the item - from where it starts to where the menu redraws
+    local mirror = io.open(dir .. "/mirror", "r") ~= nil
+    local st = tonumber((slurp(dir .. "/start") or ""):match("%d+"))
+    local en = tonumber((slurp(dir .. "/end") or ""):match("%d+"))
+    local limit = 65536
+    if mirror and not st then limit = 0 end                 -- the menu is still drawing itself
+    if st and off < st then off = st end
+    if en then limit = math.max(0, math.min(limit, en - off)) end
+    f:seek("set", off)
+    local text = limit > 0 and (f:read(limit) or "") or ""
+    f:close()
+    local nextoff = off + #text
+    -- a spinner redraws its line with \r: keep what a terminal would show (the text after the last \r)
+    text = text:gsub("\27%[[%d;?]*%a", ""):gsub("\r\n", "\n"):gsub("[^\n]*\r([^\r\n]*)", "%1")
+    local rc = tonumber((slurp(dir .. "/rc") or ""):match("%d+"))
+    local running = false
+    if not rc then
+        local pid = (slurp(dir .. "/pid") or ""):match("%d+")
+        running = pid ~= nil and io.open("/proc/" .. pid .. "/stat", "r") ~= nil
+    end
+    -- the outcome, from the menu's own last result line (a menu returns 0 when you cancel too): green = done,
+    -- red = failed, otherwise a cancel / "no change" / invalid input = nothing changed
+    local outcome = nil
+    -- "stopped": you pressed Stop (its marker), whatever the program exited with - and as soon as it is gone, even
+    -- before its exit code is written (a poll in that gap read FAILED); 143 = it died of the stop signal
+    local stopped = io.open(dir .. "/stopped", "r")
+    if stopped then stopped:close() end
+    if stopped and not running then outcome = "stopped"
+    elseif rc then
+        if rc == 143 then outcome = "stopped" elseif rc ~= 0 then outcome = "failed" else
+            local all = slurp(dir .. "/log", 262144) or ""
+            if st or en then all = all:sub((st or 0) + 1, en or #all) end
+            -- only the menus' result lines count: print_success / print_error open with bold + green / red
+            -- (a pick list's coloured [Y] marks are not results)
+            local last = nil
+            for line in all:gmatch("[^\n]+") do
+                if line:find("\27%[1m\27%[31m", 1, false) then last = "failed"
+                elseif line:find("\27%[1m\27%[32m", 1, false) then last = "done" end
+            end
+            local plain = all:gsub("\27%[[%d;?]*%a", "")
+            if last then outcome = last                       -- the last result line wins
+            elseif plain:find("Invalid option") or plain:find("[Cc]ancelled") or plain:find("[Nn]o change") or plain:find("nothing changed") then outcome = "nochange"
+            elseif mirror then outcome = "nochange"           -- a menu item that ended without a result: cancelled
+            else outcome = "done" end
+        end
+    end
+    return { ok = true, id = params.id, title = slurp(dir .. "/title") or "", text = text, offset = nextoff,
+             running = running, rc = rc, outcome = outcome, started = tonumber(slurp(dir .. "/started") or ""),
+             ended = (slurp(dir .. "/ended") or ""):match("[^\n]+"),
+             interactive = io.open(dir .. "/interactive", "r") ~= nil }
+end
+
+--[[
+    @method-name: job_input
+    @method-desc: Answer the question an interactive job is asking (one line). It's echoed into the log after the
+                  question, as a terminal would show it.
+    @in string id
+    @in string text
+--]]
+M.job_input = function(params)
+    if not id_ok(params.id) then return fail("No such job") end
+    local text = params.text
+    if type(text) ~= "string" or #text > 512 or text:find("[%z\r\n]") then return fail("That answer can't be sent") end
+    local dir = "/tmp/glutils/jobs/" .. params.id
+    if not io.open(dir .. "/interactive", "r") or io.open(dir .. "/rc", "r") then return fail("That job isn't waiting for an answer") end
+    -- echoed after the question, as a terminal shows it - but never a password (the question says so)
+    local echo = text
+    local lf = io.open(dir .. "/log", "r")
+    if lf then
+        local sz = lf:seek("end"); lf:seek("set", math.max(0, sz - 300)); local tail = lf:read("*a") or ""; lf:close()
+        local lastline = (tail:match("([^\n]*)$") or ""):lower()
+        if lastline:find("password") or lastline:find("passphrase") then echo = string.rep("*", #text) end
+    end
+    local log = io.open(dir .. "/log", "a")
+    if log then log:write(echo .. "\n"); log:close() end
+    local f = io.open(dir .. "/input", "a")
+    if not f then return fail("No such job") end
+    f:write(text .. "\n"); f:close()
+    return { ok = true }
+end
+
+--[[
+    @method-name: job_stop
+    @method-desc: Stop a running job and everything it started.
+    @in string id
+--]]
+M.job_stop = function(params)
+    if not id_ok(params.id) then return fail("No such job") end
+    local res, err = run({ "job", "stop", params.id }, 30000)
+    return res or fail(err)
+end
+
+return M
+GLULUA
+}
+_webui_write_page() {
+    mkdir -p "$(dirname "$WEBUI_PAGE")"
+    cat << 'GLUPAGE' > "$WEBUI_PAGE"
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GL.iNet Router Toolkit</title>
+<style>
+/* Palette = GL's. Every token is GL's own colour variable (the same names in all of GL's themes), with a
+   fallback for a firmware that renames one. Light or dark follows the theme chosen in the Admin Panel
+   (localStorage "theme"), never the computer's setting - GL has no "auto". Status tones match the
+   toolkit's menus: green healthy, yellow worth a look, red broken, grey inactive. */
+:root {
+  --bg: var(--background-content, #f3f5f8); --surface: var(--background-card, #ffffff);
+  --text: var(--text-header, #1d2330); --muted: var(--text-badge, #5d6677); --line: var(--border, #dde2ea);
+  --accent: var(--primary, #2f6fdf); --accent-text: #ffffff;
+  --green: var(--success, #17803d); --green-bg: var(--success-background, #e3f4e8);
+  --yellow: var(--warning, #8a5a00); --yellow-bg: var(--warning-background, #fbf0d4);
+  --red: var(--error, #c42b2b); --red-bg: var(--error-background, #fbe4e4);
+  --grey: var(--text-badge, #596273); --grey-bg: var(--background-badge, #eceff3);
+  --info: var(--primary, #24589f); --info-bg: var(--primary-background, #e3edfb);
+  --danger: var(--error, #c42b2b); --danger-text: #ffffff;
+  --rule: var(--divider, #dde2ea); --tab-text: var(--text-strong, #1d2330);
+  --title-bg: var(--background-title, #f4f5f8); --title-text: var(--text-title, #1d2330);
+  --card-shadow: var(--shadow, rgba(28, 35, 51, .06));
+  --switch-on: var(--secondary, #02b6d2); --pick-bg: var(--secondary-background, #e6f8fb);   /* GL's control colour */
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+:root[data-theme="dark"] {
+  --bg: var(--background-content, #12151b); --surface: var(--background-card, #1b2029);
+  --text: var(--text-header, #e6e9ef); --muted: var(--text-badge, #9aa3b2); --line: var(--border, #2c3340);
+  --accent: var(--primary, #5b8ff0);
+  --green: var(--success, #5fd38a); --green-bg: var(--success-background, #173523);
+  --yellow: var(--warning, #f0c25a); --yellow-bg: var(--warning-background, #3a2e12);
+  --red: var(--error, #ff7b7b); --red-bg: var(--error-background, #3d1a1c);
+  --grey: var(--text-badge, #a3acbb); --grey-bg: var(--background-badge, #262c37);
+  --info: var(--primary, #8fb4f5); --info-bg: var(--primary-background, #1a2a45);
+  --danger: var(--error, #ff6b6b);
+  --rule: var(--divider, #2c3340); --tab-text: var(--text-strong, #e6e9ef);
+  --title-bg: var(--background-title, #232936); --title-text: var(--text-title, #e6e9ef);
+  --card-shadow: var(--shadow, rgba(0, 0, 0, .25));
+  --switch-on: var(--secondary, #02a4bd); --pick-bg: var(--secondary-background, #0f3036);
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body { background: var(--bg); color: var(--text); font: 14px/1.5 var(--sans); }
+html.embedded body { background: transparent; }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* ===== the web standard (2026-10-11): GL's own page pattern =========================================
+   page title on the page background, its actions at the right (GL's Log: Export Log / Contact Support)
+   -> tabs as a header strip (GL's Log) -> GL cards: a 60px header bar on --background-title with an 18px
+   title, a 20px body on --background-card, radius 5, soft shadow -> rows as GL's Device Info: label left,
+   value right, a rule between rows. One card per row; two side by side only for PEERS of a kind and size
+   (CPU | Memory, radio | radio), never three, and a row's cards are one height. */
+
+/* ---- standalone header (inside GL's frame its own top bar + menu are the way around) ---- */
+.top { background: var(--surface); border-bottom: 1px solid var(--rule); }
+.top-in { display: flex; align-items: center; gap: 12px; min-height: 56px; flex-wrap: wrap; max-width: 1100px; margin: 0 auto; padding: 0 16px; }
+.back { text-decoration: none; font-size: 14px; white-space: nowrap; }
+.brand { font-weight: 650; font-size: 16px; margin-right: auto; }
+.ver { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+.screens { display: flex; gap: 6px; flex-wrap: wrap; }
+.screens a { text-decoration: none; font-size: 14px; padding: 4px 10px; border-radius: 6px; color: var(--muted); }
+.screens a[aria-current="page"] { color: var(--accent); background: var(--info-bg); }
+html.embedded .top { display: none; }
+
+main { max-width: 1100px; margin: 0 auto; padding: 20px 16px 40px; display: grid; gap: 20px; }
+html.embedded main { max-width: none; padding: 4px 2px 12px; }
+
+/* ---- page head: GL's page title + actions at the right ---- */
+.page-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; min-height: 44px; }
+.page-head h1 { font-size: 22px; font-weight: 700; color: var(--text); margin: 0 auto 0 0; text-wrap: balance; }
+.page-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+/* ---- buttons: GL's rounded buttons (outlined default, filled primary / danger) ---- */
+button { font: inherit; font-weight: 500; border-radius: 20px; min-height: 36px; padding: 0 22px; cursor: pointer;
+         border: 1px solid var(--text); background: transparent; color: var(--text); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+button.danger { background: var(--danger); border-color: var(--danger); color: var(--danger-text); }
+button.small { min-height: 30px; padding: 0 14px; font-size: 13px; }
+button:disabled { opacity: .55; cursor: default; }
+
+/* ---- screen messages sit directly under the title (ui-screen-message-placement) ---- */
+.banner { border-radius: 5px; padding: 12px 16px; display: grid; gap: 4px; }
+.banner[hidden] { display: none; }
+.banner.success { background: var(--green-bg); color: var(--green); }
+.banner.warning { background: var(--yellow-bg); color: var(--yellow); }
+.banner.error   { background: var(--red-bg); color: var(--red); }
+.banner.info    { background: var(--info-bg); color: var(--info); }
+.banner .text { font-weight: 600; }
+.banner ul { margin: 2px 0 0; padding-left: 18px; color: var(--text); font: 13px/1.45 var(--mono); }
+.banner .fix { color: var(--text); }
+
+/* ---- tabs: GL's Log page - the tabs ARE the top of one card (a 60px strip on the title colour, a rule under
+   it); the active tab is the body's colour, so it opens into the content. A tab's sections sit inside that
+   card as flat cards (a border, no second shadow). A screen without tabs puts its cards straight on the page. */
+.panel { display: grid; gap: 20px; }
+.panel.tabbed { gap: 0; background: var(--surface); border-radius: 5px; overflow: hidden; box-shadow: 2px 6px 16px 6px var(--card-shadow); }
+.tabwrap { position: relative; }
+.panel > *, main > * { min-width: 0; }   /* a grid item never grows to its content (the tab row, a wide table) */
+.tabnav { position: absolute; top: 16px; bottom: 1px; z-index: 2; width: 36px; min-height: 0; padding: 0; border: 0; border-radius: 0;
+          display: flex; align-items: center; justify-content: center; color: var(--text); background: var(--title-bg); }
+.tabnav.prev { left: 0; box-shadow: 8px 0 8px -4px var(--title-bg); }
+.tabnav.next { right: 0; box-shadow: -8px 0 8px -4px var(--title-bg); }
+.tabnav[hidden] { display: none; }
+.tabstrip::-webkit-scrollbar { display: none; }
+/* the strip scrolls sideways only: its rule is drawn inside it (the chosen tab's background covers it), so nothing pokes
+   out below - a 1 px overhang made it a vertical scroller too, and Safari let a finger drag the tabs out of the strip */
+.tabstrip { display: flex; overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none;
+            background: var(--title-bg); padding: 16px 24px 0; min-height: 60px; box-shadow: inset 0 -1px 0 var(--rule); }
+.tab { flex: none; border: 0; border-radius: 4px 4px 0 0; min-height: 44px; padding: 0 20px; background: transparent;
+       color: var(--text); font-size: 16px; font-weight: 500; }
+.tab[aria-selected="true"] { background: var(--surface); color: var(--tab-text); }
+.panel.tabbed > .progress, .panel.tabbed > .cards { padding: 20px 24px; }
+.panel.tabbed > .progress[hidden] + .cards { padding-top: 24px; }
+.panel.tabbed .gcard { box-shadow: none; border: 1px solid var(--rule); }
+
+/* ---- cards (GL's gl-card) in a two-column row grid; .full spans the row ---- */
+.cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; align-items: stretch; }
+.cards:empty { display: none; }
+.cards > .full { grid-column: 1 / -1; }
+@media (max-width: 860px) { .cards { grid-template-columns: minmax(0, 1fr); } }
+.gcard { background: var(--surface); border-radius: 5px; overflow: hidden; box-shadow: 2px 6px 16px 6px var(--card-shadow);
+         display: flex; flex-direction: column; min-width: 0; }
+.gcard > header { min-height: 60px; padding: 0 20px; background: var(--title-bg); display: flex; align-items: center; gap: 12px; }
+.gcard > header h2 { font-size: 18px; font-weight: 500; color: var(--title-text); margin: 0 auto 0 0; }
+.loglatest.ended { font: 13px/1.5 var(--sans); }
+.gcard > header .aside { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.gcard > .body { padding: 8px 20px 16px; flex: 1; }
+.gcard > footer { padding: 12px 20px; background: var(--title-bg); border-top: 1px solid var(--rule);
+                  display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.gcard .note { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.gcard h3 { font-size: 14px; font-weight: 600; color: var(--text); margin: 14px 0 4px; }
+
+/* ---- rows: GL's Device Info - label left, value right, a rule between ---- */
+.rows { margin: 0; }
+.rows > div { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 48px; padding: 6px 0;
+              border-bottom: 1px solid var(--rule); }
+.rows > div:last-child { border-bottom: 0; }
+.rows dt { color: var(--text); }
+.rows dd { margin: 0; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.badge { display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; }
+.t-green  { color: var(--green);  background: var(--green-bg); }
+.t-yellow { color: var(--yellow); background: var(--yellow-bg); }
+.t-red    { color: var(--red);    background: var(--red-bg); }
+.t-grey   { color: var(--grey);   background: var(--grey-bg); }
+.t-info   { color: var(--info);   background: var(--info-bg); }
+/* a job at work, the way GL shows work in progress (its primary blue): a ring in the badge, a bar running along the
+   top of the Log card, its latest line in blue - anything that moves is still working */
+.badge .ring { display: inline-block; width: 9px; height: 9px; margin-right: 6px; vertical-align: -1px; border: 2px solid currentColor;
+  border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+#jobCard { position: relative; overflow: hidden; }
+#jobCard.running::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; z-index: 1;
+  background: linear-gradient(90deg, transparent 0%, var(--accent) 40%, var(--accent) 60%, transparent 100%);
+  background-size: 40% 100%; background-repeat: no-repeat; animation: glu-busy 1.4s ease-in-out infinite; }
+@keyframes glu-busy { from { background-position: -40% 0; } to { background-position: 140% 0; } }
+#jobCard.running .loglatest { color: var(--info); }
+@media (prefers-reduced-motion: reduce) {
+  .badge .ring { animation: none; border-right-color: currentColor; }
+  #jobCard.running::before { animation: none; background: var(--accent); }
+}
+.qual { color: var(--muted); margin-left: 6px; }
+
+/* ---- tables ---- */
+.tbl-wrap { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.tbl th { text-align: left; font-weight: 500; color: var(--muted); padding: 12px 16px 10px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.tbl td { padding: 12px 16px 12px 0; border-bottom: 1px solid var(--rule); white-space: nowrap; }
+.tbl tr:last-child td { border-bottom: 0; }
+
+.progress { display: flex; align-items: center; gap: 10px; color: var(--muted); }
+.progress[hidden] { display: none; }
+.spin { width: 16px; height: 16px; border: 2px solid var(--line); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spin { animation-duration: 2.4s; } }
+.terminal-note { color: var(--muted); font-size: 14px; margin: 0; flex-basis: 100%; }
+
+/* ---- generic screens: preformatted output, GL's log viewer, form fields ---- */
+.gcard .note { white-space: pre-line; }
+.gcard pre.out { margin: 8px 0 0; font: 13px/1.5 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); }
+.logbox { margin: 8px 0 0; min-height: 120px; max-height: 520px; overflow: auto; background: var(--bg); border: 1px solid var(--rule); border-radius: 4px;
+          padding: 10px 12px; font: 13px/1.5 var(--mono); white-space: pre; color: var(--text); }
+#jobCard .logbox, #jobCard .jobask, #jobCard #jobWhat { display: none; }
+#jobCard.open .logbox { display: block; } #jobCard.open .jobask:not([hidden]) { display: flex; } #jobCard.open #jobWhat { display: block; }
+#jobCard.open .loglatest { display: none; }
+.loglatest { margin: 4px 0 0; font: 13px/1.5 var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.jobask { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 10px; }
+.jobask input { flex: 1; min-width: 180px; font: 13px var(--mono); min-height: 36px; padding: 0 10px; border: 1px solid var(--line);
+                border-radius: 4px; background: var(--surface); color: var(--text); }
+.logbox:empty::before { content: "Waiting for output"; color: var(--muted); }
+/* ---- the editable table: GL-style switches, staged rows, a change bar that follows you down the page ---- */
+.switch { position: relative; display: inline-block; width: 40px; height: 22px; vertical-align: middle; }
+.switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+.switch .slider { position: absolute; inset: 0; border-radius: 11px; background: var(--line); transition: background .15s; cursor: pointer; }
+.switch .slider::after { content: ""; position: absolute; left: 2px; top: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.switch input:checked + .slider { background: var(--switch-on); }   /* GL's switches: its control colour */
+.switch input:checked + .slider::after { transform: translateX(18px); }
+.switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (prefers-reduced-motion: reduce) { .switch .slider, .switch .slider::after { transition: none; } }
+.tbl.editor td:first-child { white-space: normal; min-width: 140px; }   /* names wrap so the switches and plan fit */
+.tbl th.sortable { cursor: pointer; user-select: none; }
+.tbl th .cr { display: inline-flex; flex-direction: column; gap: 2px; margin-left: 6px; vertical-align: middle; }
+.tbl th .cr i { width: 0; height: 0; border-left: 4px solid transparent; border-right: 4px solid transparent; }
+.tbl th .cr .u { border-bottom: 5px solid var(--line); } .tbl th .cr .d { border-top: 5px solid var(--line); }
+.tbl th .cr .u.on { border-bottom-color: var(--switch-on); } .tbl th .cr .d.on { border-top-color: var(--switch-on); }   /* GL's caret colour */
+.tbl tr.group td { font-weight: 600; color: var(--muted); padding-top: 18px; background: transparent; }   /* a section heading row: the Lists editor's, also the firmware channels */
+.tbl.editor tr.staged td { background: var(--info-bg); }
+.plan { font-size: 13px; white-space: nowrap; }
+.plan.t-none { color: var(--muted); } .plan.t-on, .t-on { color: var(--green); } .plan.t-off, .t-off { color: var(--red); }
+.meter { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: 8px 0 12px; }
+.meterlabel { font-weight: 600; }
+.meterbar { display: inline-flex; gap: 2px; }
+.meterbar span { width: 9px; height: 14px; border-radius: 2px; background: var(--rule); }
+.meterbar span.g { background: var(--green); } .meterbar span.y { background: var(--yellow); } .meterbar span.r { background: var(--red); }
+.metertext { font-variant-numeric: tabular-nums; } .metertext.t-y { color: var(--yellow); } .metertext.t-r { color: var(--red); }
+.changebar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; padding: 10px 14px;
+             background: var(--info-bg); border-radius: 5px; }
+.changebar .count { font-weight: 600; margin-right: auto; }
+/* a phone: the switches stay in view - Type and Planned Action step aside (a changed row is still tinted) */
+@media (max-width: 600px) {
+  .tbl.editor .ph-hide { display: none; }
+  .tbl.editor td:first-child { white-space: normal; min-width: 0; }
+  .tbl.editor th, .tbl.editor td { padding-right: 10px; }
+  .tbl.editor { font-size: 13px; }
+}
+.summary { margin: 0 0 8px; } .summary ul { margin: 4px 0 0; padding-left: 20px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin: 8px 0 14px; }   /* two a row on a phone */
+@media (max-width: 480px) { .tile { padding: 12px; } .tvalue { font-size: 24px; } }
+.tile { display: grid; gap: 4px; padding: 14px 16px; border-radius: 5px; background: var(--bg); border: 1px solid var(--rule); }
+.tlabel { color: var(--muted); font-size: 13px; }
+.tvalue { font-size: 28px; font-weight: 600; font-variant-numeric: tabular-nums; line-height: 1.1; color: var(--text); }
+.tvalue small { font-size: 14px; font-weight: 500; color: var(--muted); }
+.tnote { color: var(--muted); font-size: 12px; }
+.cellbar { display: inline-block; width: 110px; height: 8px; border-radius: 4px; background: var(--rule); overflow: hidden; vertical-align: middle; }
+.cellbar > span { display: block; height: 100%; background: var(--accent); }
+.tbl strong.mine { color: var(--accent); font-weight: 600; }
+.form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin: 0 0 18px; }   /* never wider than the dialog */
+.form label { display: grid; gap: 6px; font-weight: 500; min-width: 0; }
+.form .hint { font-weight: 400; color: var(--muted); font-size: 13px; }
+.form input[type=text], .form input[type=number], .form input[type=password], .form select {
+  font: inherit; min-height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface); color: var(--text);
+  width: 100%; min-width: 0; box-sizing: border-box; }
+.form label.check { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 2px 8px; }
+.form label.check .hint { grid-column: 2; }   /* a check box's hint sits under its label, not beside it */
+.form .picked { margin: 0; font-weight: 600; color: var(--text); }
+.tbl input.pick, .form input[type=checkbox] { width: 16px; height: 16px; border-radius: 3px; accent-color: var(--accent); }
+.tbl input.pick { width: 16px; height: 16px; accent-color: var(--accent); margin: 0; vertical-align: middle; cursor: pointer; }
+.tbl input[type=checkbox] { accent-color: var(--switch-on); }   /* GL's tick boxes are its control teal; its radios stay blue */
+.tbl tr:has(input.pick:checked) td { background: var(--pick-bg); }   /* GL's selection tint */
+/* its bubbles one step deeper in their own colour: GL's green bubble and its selection tint are nearly the same colour */
+.tbl tr:has(input.pick:checked) .badge { background: color-mix(in srgb, currentColor 18%, transparent); }
+.tbl tr:has(input.pick) { cursor: pointer; }
+.page-actions .small { min-height: 36px; }
+.help .body { max-width: 75ch; padding-top: 4px; }
+.help h3 { font-size: 14px; font-weight: 600; margin: 14px 0 4px; }
+.help h3:first-child { margin-top: 6px; }
+.help p { margin: 0 0 8px; }
+.help dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 8px; }
+.help dt { font-weight: 600; }
+.help ul { margin: 0 0 8px; padding-left: 20px; display: grid; gap: 4px; }
+.help dd { margin: 0; }
+/* a reading view (release notes, the change log): the help card's look, with the document's own headings */
+.reader h3 { font-size: 16px; font-weight: 600; margin: 18px 0 6px; } .reader h3:first-child { margin-top: 4px; }
+.reader h4 { font-size: 14px; font-weight: 600; margin: 14px 0 4px; }
+.reader h5 { font-size: 13px; font-weight: 600; margin: 10px 0 4px; color: var(--muted); }
+.reader code { font: 13px var(--mono); background: var(--bg); padding: 0 4px; border-radius: 3px; }
+@media (max-width: 480px) { .help dl { grid-template-columns: 1fr; gap: 0; } .help dd { margin-bottom: 6px; } }
+
+dialog { border: 0; border-radius: 5px; background: var(--surface); color: var(--text); padding: 24px; max-width: min(460px, calc(100vw - 32px));
+         box-shadow: 0 10px 30px var(--card-shadow); }
+dialog::backdrop { background: rgba(10, 14, 22, .45); }
+dialog h2 { font-size: 18px; font-weight: 500; color: var(--title-text); margin: 0 0 10px; }
+dialog p { margin: 0 0 18px; color: var(--yellow); }
+.dialog-buttons { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; }
+
+@media (max-width: 480px) {
+  .rows > div { flex-wrap: wrap; gap: 2px 16px; }
+  .page-head h1 { font-size: 20px; }
+  .tabstrip { padding: 12px 12px 0; }
+  .panel.tabbed > .progress, .panel.tabbed > .cards { padding: 12px; }
+  .gcard > header, .gcard > .body, .gcard > footer { padding-left: 14px; padding-right: 14px; }
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <!-- the [0] Back of the menus: always a way out (GL's own frame provides it when embedded) -->
+    <a class="back" href="/">&larr; GL.iNet Admin Panel</a>
+    <span class="brand">GL.iNet Router Toolkit</span>
+    <nav class="screens" id="screens" aria-label="Toolkit screens"></nav>
+    <span class="ver" id="ver"></span>
+  </div>
+</header>
+
+<main>
+  <div class="page-head">
+    <h1 id="title">GL.iNet Router Toolkit</h1>
+    <div class="page-actions" id="pageActions"><button type="button" id="helpBtn" aria-expanded="false" aria-controls="help">Help</button></div>
+  </div>
+  <div class="banner" id="banner" role="status" aria-live="polite" hidden></div>
+  </section>
+  <div class="panel" id="panel">
+    <div class="tabwrap" id="tabwrap" hidden>
+      <button type="button" class="tabnav prev" id="tabPrev" aria-label="Earlier tabs" hidden><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <div class="tabstrip" id="tabs" role="tablist"></div>
+      <button type="button" class="tabnav next" id="tabNext" aria-label="More tabs" hidden><svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true"><path d="m6 3 5 5-5 5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </div>
+    <div class="progress" id="loading"><span class="spin" aria-hidden="true"></span><span id="loadingText">Reading the router</span></div>
+    <div class="cards" id="content" aria-live="off"></div>
+  </div>
+</main>
+
+<script>
+"use strict";
+const ACCESS_DENIED = -32000;
+const $ = (id) => document.getElementById(id);
+const embedded = window.self !== window.top;
+let seq = 0, busy = false;
+
+// The screens of the Admin Panel's "Router Toolkit" group come from the toolkit (_webui_screens: its main menu,
+// in order). Each menu entry opens this page with ?s=<id>; a sub-screen is a tab (?t=<id>, kept on reload).
+let SCREENS = [];
+const URLP = new URLSearchParams(location.search);
+let SCREEN = URLP.get("s") || "hardware";
+
+class SignedOut extends Error {}
+// GL's /rpc decodes and re-encodes the toolkit's JSON, which turns an empty array into {}
+const list = (x) => (Array.isArray(x) ? x : []);
+
+// ---- GL's palette ----------------------------------------------------------------------------
+// The Admin Panel keeps its theme in localStorage "theme": default / classic (light) or dark.
+// Inside GL's frame the colours GL already resolved are copied from it; on its own the page reads
+// GL's theme file (shipped gzipped) and takes the colour variables from it.
+const GL_VARS = ["--background-content", "--background-card", "--background-title", "--text-header", "--text-title",
+  "--text-badge", "--border", "--divider", "--text-strong", "--shadow", "--primary", "--primary-background",
+  "--success", "--success-background", "--warning", "--warning-background", "--error", "--error-background",
+  "--background-badge", "--secondary", "--secondary-background"];
+function glTheme() {
+  try { return localStorage.getItem("theme") || "default"; } catch (e) { return "default"; }
+}
+function fromParent() {
+  try {
+    const app = parent.document.querySelector("#app") || parent.document.documentElement;
+    const cs = parent.getComputedStyle(app), out = {};
+    GL_VARS.forEach((v) => { const x = cs.getPropertyValue(v).trim(); if (x) out[v] = x; });
+    return Object.keys(out).length ? out : null;
+  } catch (e) { return null; }
+}
+async function fromThemeFile(theme) {
+  try {
+    if (typeof DecompressionStream === "undefined") return null;
+    const r = await fetch("/theme/" + encodeURIComponent(theme) + "/index.css.gz", { cache: "no-store" });
+    if (!r.ok) return null;
+    const css = await new Response(r.body.pipeThrough(new DecompressionStream("gzip"))).text();
+    // every custom property, so GL's own var(--gl-...) chains resolve too
+    const decls = css.match(/--[A-Za-z0-9-]+\s*:[^;{}]+/g) || [];
+    return decls.length ? decls : null;
+  } catch (e) { return null; }
+}
+async function applyTheme() {
+  const theme = glTheme();
+  document.documentElement.dataset.theme = theme === "dark" ? "dark" : "light";
+  const root = document.documentElement.style;
+  GL_VARS.forEach((v) => root.removeProperty(v));
+  let style = $("glTheme");
+  if (style) style.textContent = "";
+  const p = embedded ? fromParent() : null;
+  if (p) { Object.keys(p).forEach((v) => root.setProperty(v, p[v])); return; }
+  const decls = await fromThemeFile(theme);
+  if (decls) {
+    if (!style) { style = document.createElement("style"); style.id = "glTheme"; document.head.prepend(style); }
+    style.textContent = ":root{" + decls.join(";") + "}";
+  }
+}
+// switching the theme in the Admin Panel reaches this page as a storage event; GL swaps its stylesheet
+// a moment later, so read its colours again once it has
+window.addEventListener("storage", (e) => {
+  if (e.key === "theme") { applyTheme(); setTimeout(applyTheme, 400); setTimeout(applyTheme, 1200); }
+});
+
+// ---- size: inside GL's frame the page tells the frame how tall it is --------------------------
+if (embedded) {
+  document.documentElement.classList.add("embedded");
+  // the body's own height: the document's never drops below the frame's, so the frame could grow but never shrink
+  const tell = () => { try { parent.postMessage({ glutilsHeight: document.body.scrollHeight }, location.origin); } catch (e) {} };
+  try { new ResizeObserver(tell).observe(document.body); } catch (e) { setInterval(tell, 1000); }
+  window.addEventListener("load", tell);
+}
+
+function sid() {
+  const m = document.cookie.match(/(?:^|;\s*)Admin-Token=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+// GL's own /rpc: the session id rides in the call, so only a signed-in admin reaches the toolkit
+async function rpc(method, params) {
+  const s = sid();
+  if (!s) throw new SignedOut();
+  const r = await fetch("/rpc", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: ++seq, method: "call", params: [s, "glutils", method, params || {}] })
+  });
+  const j = await r.json();
+  if (j.error) {
+    if (j.error.code === ACCESS_DENIED) throw new SignedOut();
+    throw new Error(j.error.message || "The router refused the request");
+  }
+  return j.result;
+}
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+// ---- the overlay: GL's own dialog model (Admin Panel > Multi-WAN > Sensitivity Options) - a dim layer over the whole
+// Admin Panel, a centred box with a tinted title bar, its content, and a tinted footer with the buttons centred. ONE
+// overlay for everything that asks (confirm + its choices) or that you read (Help, release notes, the change log).
+// Inside GL's frame it is drawn in GL's page: the frame is as tall as this page, so an overlay drawn in it could open
+// out of sight; drawn in GL's page it sits in the middle of what you are looking at. It carries this page's colours.
+const OV_TOKENS = ["--bg", "--surface", "--text", "--muted", "--line", "--accent", "--accent-text", "--green", "--yellow",
+  "--switch-on", "--pick-bg", "--red-bg", "--green-bg", "--grey", "--grey-bg",
+  "--yellow-bg", "--red", "--danger", "--danger-text", "--rule", "--title-bg", "--title-text", "--info", "--info-bg", "--mono", "--sans"];
+const OV_CSS = `
+.glu-ov { position: fixed; inset: 0; z-index: 2001; display: flex; align-items: center; justify-content: center; padding: 16px;
+  box-sizing: border-box; font: 14px/1.5 var(--sans); color: var(--text); text-align: left; }
+.glu-ov *, .glu-ov *::before, .glu-ov *::after { box-sizing: border-box; }
+.glu-ov-mask { position: absolute; inset: 0; background: #000; opacity: .5; }
+/* dvh: the height you can see now - Safari on iPad/iPhone counts 100vh as if its bars were hidden, so a long dialog
+   ran off the top and bottom (vh stays for browsers without dvh) */
+.glu-ov-dlg { position: relative; width: min(600px, 100%); max-height: calc(100vh - 32px); max-height: calc(100dvh - 32px);
+  display: flex; flex-direction: column;
+  background: var(--surface); border-radius: 6px; box-shadow: 0 1px 3px rgba(0, 0, 0, .3); overflow: hidden; }
+.glu-ov.wide .glu-ov-dlg { width: min(760px, 100%); }
+.glu-ov-head { flex: none; display: flex; align-items: center; min-height: 60px; padding: 0 20px; background: var(--title-bg);
+  border-bottom: 1px solid var(--rule); }
+.glu-ov-head h2 { margin: 0; font-size: 18px; font-weight: 400; color: var(--title-text); }   /* GL: 18 px, regular */
+.glu-ov-body { flex: 1 1 auto; overflow-y: auto; padding: 20px 24px; }
+.glu-ov-foot { flex: none; display: flex; justify-content: center; flex-wrap: wrap; gap: 12px 24px; padding: 14px 20px;
+  background: var(--title-bg); border-top: 1px solid var(--rule); }
+.glu-ov button { font: inherit; font-weight: 400; border-radius: 20px; min-height: 36px; min-width: 124px; padding: 0 22px;   /* GL: 36 px */
+  cursor: pointer; border: 1px solid var(--text); background: transparent; color: var(--text); }
+.glu-ov button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+.glu-ov button.danger { background: var(--danger); border-color: var(--danger); color: var(--danger-text); }
+.glu-ov button:disabled { opacity: .55; cursor: default; }
+.glu-ov button:focus-visible, .glu-ov input:focus-visible, .glu-ov select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.glu-ov.ptr button:focus-visible { outline: none; }   /* opened by a tap or click: no ring on the button until a key is used */
+.glu-ov .warn { margin: 0 0 16px; padding: 12px 16px; border-radius: 4px; background: var(--yellow-bg); color: var(--text); }
+.glu-ov .form { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin: 0; }
+.glu-ov .form label { display: grid; gap: 6px; font-weight: 500; min-width: 0; }
+.glu-ov .form .hint { font-weight: 400; color: var(--muted); font-size: 13px; }
+.glu-ov .form input[type=text], .glu-ov .form input[type=number], .glu-ov .form input[type=password], .glu-ov .form select {
+  font: inherit; min-height: 36px; padding: 0 10px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface);
+  color: var(--text); width: 100%; min-width: 0; }
+.glu-ov .form input[type=checkbox] { width: 16px; height: 16px; margin: 0; accent-color: var(--accent); }
+.glu-ov .form label.check { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 2px 8px; }
+.glu-ov .form label.check .hint { grid-column: 2; }
+.glu-ov [hidden] { display: none !important; }
+.glu-ov .swfield { display: grid; gap: 8px; }
+.glu-ov .form label.swrow { display: flex; justify-content: space-between; align-items: center; gap: 16px; font-weight: 400; }
+.glu-ov .gsw { position: relative; flex: none; width: 40px; height: 20px; }
+.glu-ov .form .gsw input[type=checkbox] { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.glu-ov .gsw .knob { position: absolute; inset: 0; border-radius: 10px; background: var(--line); transition: background .2s; }
+.glu-ov .gsw .knob::after { content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .2); transition: left .2s; }
+.glu-ov .gsw input:checked + .knob { background: var(--switch-on); }
+.glu-ov .gsw input:checked + .knob::after { left: 22px; }
+.glu-ov .gsw input:focus-visible + .knob { outline: 2px solid var(--accent); outline-offset: 2px; }
+.glu-ov .offwarn { margin: 0; padding: 10px 14px; border-radius: 4px; background: var(--red-bg); color: var(--red); }
+.glu-ov .gsel { position: relative; min-width: 0; }
+.glu-ov button.gsel-box { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; min-width: 0;
+  height: 36px; min-height: 36px; padding: 0 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--surface);
+  color: var(--text); font-weight: 400; text-align: left; }
+.glu-ov button.gsel-box:hover { border-color: var(--muted); }
+.glu-ov .gsel.open button.gsel-box { border-color: var(--switch-on); }
+.glu-ov .gsel-box > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glu-ov .gsel-chev { flex: none; width: 7px; height: 7px; margin-top: -3px; border-right: 1.5px solid var(--muted);
+  border-bottom: 1.5px solid var(--muted); transform: rotate(45deg); transition: transform .2s, margin .2s; }
+.glu-ov .gsel.open .gsel-chev { transform: rotate(225deg); margin-top: 3px; }
+.glu-ov .gsel-list { position: fixed; z-index: 3; overflow-y: auto; padding: 6px 0; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 4px; box-shadow: 0 2px 12px rgba(0, 0, 0, .12); }
+.glu-ov .gsel-item { height: 34px; line-height: 34px; padding: 0 20px; font-size: 14px; color: var(--text); cursor: pointer;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.glu-ov .gsel-item:hover { background: var(--pick-bg); }
+.glu-ov .gsel-item.selected { background: var(--switch-on); color: #fff; }
+.glu-ov .gsel-title { padding: 0 20px; font-size: 12px; line-height: 30px; color: var(--muted); }
+.glu-ov .gsel-item.sub { padding-left: 32px; }
+.glu-ov .numctl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; font-weight: 400; }
+.glu-ov .numctl .track { position: relative; padding: 6px 0; }
+.glu-ov .numctl input[type=range] { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 20px; margin: 0;
+  background: transparent; cursor: pointer; --fill: 0%; }
+.glu-ov .numctl input[type=range]::-webkit-slider-runnable-track { height: 6px; border-radius: 3px;
+  background: linear-gradient(var(--accent), var(--accent)) 0 / var(--fill) 100% no-repeat, var(--line); }
+.glu-ov .numctl input[type=range]::-moz-range-track { height: 6px; border-radius: 3px; background: var(--line); }
+.glu-ov .numctl input[type=range]::-moz-range-progress { height: 6px; border-radius: 3px; background: var(--accent); }
+.glu-ov .numctl input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; margin-top: -5px;
+  border-radius: 50%; background: var(--surface); border: 2px solid var(--accent); }
+.glu-ov .numctl input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%; background: var(--surface); border: 2px solid var(--accent); }
+.glu-ov .numctl .mark { position: absolute; top: 28px; width: 2px; height: 6px; margin-left: -1px; background: var(--muted); border-radius: 1px; }
+.glu-ov .stepper { display: flex; height: 36px; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.glu-ov .stepper button { flex: none; min-width: 36px; width: 36px; min-height: 0; height: 100%; padding: 0; border: 0; border-radius: 0;
+  background: var(--bg); color: var(--text); font-size: 16px; line-height: 1; }
+.glu-ov .stepper button:hover { color: var(--accent); }
+.glu-ov .form .stepper input[type=number] { width: 10ch; min-height: 0; height: 100%; border: 0; border-left: 1px solid var(--line);
+  border-right: 1px solid var(--line); border-radius: 0; text-align: center; -moz-appearance: textfield; appearance: textfield; }
+.glu-ov .stepper input::-webkit-inner-spin-button, .glu-ov .stepper input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.glu-ov .picked { margin: 0; font-weight: 600; }
+.glu-ov .summary { margin: 0 0 8px; } .glu-ov .summary ul { margin: 4px 0 0; padding-left: 20px; }
+.glu-ov .t-on { color: var(--green); } .glu-ov .t-off { color: var(--red); }
+.glu-ov .read { max-width: 75ch; }
+.glu-ov .read h3 { font-size: 16px; font-weight: 600; margin: 18px 0 6px; color: var(--title-text); }
+.glu-ov .read h4 { font-size: 14px; font-weight: 600; margin: 14px 0 4px; color: var(--title-text); }
+.glu-ov .read h5 { font-size: 13px; font-weight: 600; margin: 10px 0 4px; color: var(--muted); }
+.glu-ov .read > :first-child { margin-top: 0; }
+.glu-ov .read .logh { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.glu-ov .read hr { border: 0; border-top: 1px solid var(--rule); margin: 18px 0; }
+.glu-ov .read .logln { font: 12px/1.6 var(--mono); padding-left: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.glu-ov .badge { display: inline-block; font-size: 11px; font-weight: 700; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; }
+.glu-ov .badge.t-green { color: var(--green); background: var(--green-bg); } .glu-ov .badge.t-yellow { color: var(--yellow); background: var(--yellow-bg); }
+.glu-ov .badge.t-red { color: var(--red); background: var(--red-bg); } .glu-ov .badge.t-grey { color: var(--grey); background: var(--grey-bg); }
+.glu-ov .lt-green { color: var(--green); } .glu-ov .lt-yellow { color: var(--yellow); } .glu-ov .lt-red { color: var(--red); } .glu-ov .lt-grey { color: var(--grey); }
+.glu-ov .read p { margin: 0 0 8px; }
+.glu-ov .read ul, .glu-ov .summary ul { margin: 0 0 8px; padding-left: 20px; display: grid; gap: 4px; list-style: disc outside; }
+.glu-ov .read li, .glu-ov .summary li { display: list-item; }   /* GL's page resets lists - put the bullets back */
+.glu-ov .read dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0 0 8px; }
+.glu-ov .read dt { font-weight: 600; } .glu-ov .read dd { margin: 0; }
+.glu-ov .read code { font: 13px var(--mono); background: var(--bg); padding: 0 4px; border-radius: 3px; }
+.glu-ov a { color: var(--accent); }
+@media (max-width: 600px) {   /* a phone: the whole screen */
+  .glu-ov { padding: 0; align-items: stretch; }
+  .glu-ov-dlg, .glu-ov.wide .glu-ov-dlg { width: 100%; max-height: none; max-height: 100dvh; border-radius: 0; }
+  .glu-ov-body { padding: 16px; } .glu-ov button { min-width: 0; flex: 1; } .glu-ov button.gsel-box { flex: none; }
+  .glu-ov .numctl { grid-template-columns: minmax(0, 1fr); gap: 8px; } .glu-ov .stepper { justify-self: start; }
+  .glu-ov .read dl { grid-template-columns: 1fr; gap: 0; } .glu-ov .read dd { margin-bottom: 6px; }
+}
+@media (prefers-reduced-motion: no-preference) { .glu-ov-dlg { animation: glu-ov-in .15s ease-out; } }
+@keyframes glu-ov-in { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }`;
+let OV = null;   // the open overlay
+// how you last used this page - the overlay is drawn in GL's page, which hasn't seen your tap, so Safari would ring the
+// button it focuses on the first open after a refresh as if you'd used the keyboard
+let lastInput = "key";
+document.addEventListener("pointerdown", () => { lastInput = "pointer"; }, true);
+document.addEventListener("keydown", () => { lastInput = "key"; }, true);
+function ovHost() {
+  if (embedded) { try { if (parent.document && parent.document.body) return parent.document; } catch (e) {} }
+  return document;
+}
+// o: { title, wide, content: [nodes], buttons: [{ label, cls, onClick(ov) }], onClose } -> { close, root }
+function overlay(o) {
+  if (OV) OV.close();
+  const doc = ovHost(), opener = document.activeElement;
+  if (!doc.getElementById("glu-ov-css")) { const st = doc.createElement("style"); st.id = "glu-ov-css"; st.textContent = OV_CSS; doc.head.append(st); }
+  const root = doc.createElement("div"); root.className = "glu-ov" + (o.wide ? " wide" : "") + (lastInput === "pointer" ? " ptr" : "");
+  const cs = getComputedStyle(document.documentElement);
+  OV_TOKENS.forEach((t) => root.style.setProperty(t, cs.getPropertyValue(t).trim()));
+  const mask = doc.createElement("div"); mask.className = "glu-ov-mask";
+  const dlg = doc.createElement("div"); dlg.className = "glu-ov-dlg";
+  dlg.setAttribute("role", "dialog"); dlg.setAttribute("aria-modal", "true"); dlg.setAttribute("aria-labelledby", "glu-ov-title");
+  const head = doc.createElement("div"); head.className = "glu-ov-head";
+  const h = doc.createElement("h2"); h.id = "glu-ov-title"; h.textContent = o.title || ""; head.append(h);
+  const body = doc.createElement("div"); body.className = "glu-ov-body"; list(o.content).forEach((n) => n && body.append(n));
+  const foot = doc.createElement("div"); foot.className = "glu-ov-foot";
+  const ov = { root, body, closed: false };
+  const keys = (e) => {
+    root.classList.remove("ptr");
+    if (e.key === "Escape") { e.preventDefault(); ov.close(); return; }
+    if (e.key !== "Tab") return;
+    // Tab and Shift+Tab go round the dialog's own controls - never out to GL's page behind it
+    const f = [...root.querySelectorAll('button:not([disabled]), input:not([type=hidden]):not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], [tabindex]:not([tabindex="-1"])')]
+      .filter((n) => n.getClientRects().length);
+    if (!f.length) { e.preventDefault(); return; }
+    const i = f.indexOf(doc.activeElement);
+    if (i < 0 || (e.shiftKey && i === 0) || (!e.shiftKey && i === f.length - 1)) {
+      e.preventDefault(); (e.shiftKey ? f[f.length - 1] : f[0]).focus();
+    }
+  };
+  ov.close = () => {
+    if (ov.closed) return; ov.closed = true;
+    root.remove(); doc.removeEventListener("keydown", keys, true); document.removeEventListener("keydown", keys, true);
+    window.removeEventListener("pagehide", ov.close);
+    if (OV === ov) OV = null;
+    if (o.onClose) o.onClose();
+    try { if (opener && opener.isConnected) opener.focus(); } catch (e) {}
+  };
+  list(o.buttons).forEach((b) => {
+    const x = doc.createElement("button"); x.type = "button"; x.className = b.cls || ""; x.textContent = b.label;
+    x.addEventListener("click", () => b.onClick ? b.onClick(ov) : ov.close()); foot.append(x);
+  });
+  mask.addEventListener("click", () => ov.close());   // like GL's: a click outside puts it away (and asks nothing)
+  dlg.append(head, body, foot); root.append(mask, dlg); doc.body.append(root);
+  doc.addEventListener("keydown", keys, true); if (doc !== document) document.addEventListener("keydown", keys, true);
+  window.addEventListener("pagehide", ov.close);      // GL's menu took you elsewhere: don't leave it on GL's page
+  OV = ov;
+  const first = body.querySelector("input:not([type=hidden]),select,textarea") || foot.querySelector("button.primary,button.danger") || foot.querySelector("button");
+  if (first) first.focus();
+  return ov;
+}
+// something to read in the overlay (Help, release notes, the change log)
+function readOverlay(title, nodes) {
+  const box = el("div", "read"); box.append(nodes);
+  return overlay({ title: title, wide: true, content: [box], buttons: [{ label: "Close", cls: "primary" }] });
+}
+function btn(label, cls, onClick) {
+  const b = el("button", cls || "", label);
+  b.type = "button";
+  if (onClick) b.addEventListener("click", onClick);
+  return b;
+}
+
+// one screen message, directly under the title; details + fix follow the toolkit's failure report
+function banner(msg) {
+  const b = $("banner");
+  b.replaceChildren();
+  if (!msg || !msg.text) { b.hidden = true; return; }
+  b.className = "banner " + (msg.tone || "info");
+  b.append(el("div", "text", msg.text));
+  if (list(msg.details).length) {
+    const ul = el("ul");
+    list(msg.details).forEach((d) => ul.append(el("li", "", d)));
+    b.append(ul);
+  }
+  if (msg.fix) b.append(el("div", "fix", msg.fix));
+  if (msg.link) {
+    const a = el("a", "", msg.link.text);
+    a.href = msg.link.href; a.target = "_top";
+    b.append(a);
+  }
+  b.hidden = false;
+}
+
+function loading(on, text) {
+  $("loading").hidden = !on;
+  if (text) $("loadingText").textContent = text;
+  $("content").setAttribute("aria-busy", on ? "true" : "false");
+}
+function signedOut() {
+  stopLive();
+  loading(false);
+  banner({ tone: "warning", text: "Sign in to the GL.iNet Admin Panel first, then reopen this page",
+           link: { text: "Open the Admin Panel", href: "/" } });
+}
+function failed(e, what) {
+  if (e instanceof SignedOut) return signedOut();
+  loading(false);
+  banner({ tone: "error", text: (what || "The router didn't answer") + " - " + e.message });
+}
+
+// ---- building blocks ----------------------------------------------------------------------------
+// a GL card: header bar (title + optional action), body; .full spans the row (one card per row is the default)
+function card(title, opts) {
+  opts = opts || {};
+  const c = el("section", "gcard" + (opts.half ? "" : " full"));
+  const h = el("header");
+  h.append(el("h2", "", title));
+  if (opts.aside) h.append(el("span", "aside", opts.aside));   // a note at the header's right (a result's date)
+  if (opts.action) h.append(opts.action);
+  c.append(h);
+  const body = el("div", "body");
+  c.append(body);
+  c.body = body;
+  return c;
+}
+// a status value: a coloured CAPS word (green / yellow / red / grey), a plain fact, or a link
+function valueNode(value, tone, note) {
+  const dd = el("dd");
+  if (tone === "link") {
+    const a = el("a", "", value); a.href = value; a.target = "_blank"; a.rel = "noopener"; dd.append(a);
+  } else if (tone === "fact" || !tone) {
+    dd.textContent = value;
+  } else {
+    dd.append(el("span", "badge t-" + tone, value));
+  }
+  if (note) dd.append(el("span", "qual", "(" + note + ")"));
+  return dd;
+}
+// label/value rows, GL's Device Info style; a row with a key is updated in place by the live refresh
+function rowsList(rows) {
+  const dl = el("dl", "rows");
+  list(rows).forEach((r) => {
+    const row = el("div");
+    row.append(el("dt", "", r.label));
+    const dd = valueNode(r.value, r.tone, r.note);
+    if (r.key) dd.dataset.key = r.key;
+    row.append(dd);
+    dl.append(row);
+  });
+  return dl;
+}
+function tableBlock(headers, rows) {
+  const wrap = el("div", "tbl-wrap"), t = el("table", "tbl"), thead = el("thead"), tr = el("tr");
+  headers.forEach((h) => tr.append(el("th", "", h)));
+  thead.append(tr); t.append(thead);
+  const tb = el("tbody");
+  // a heading row ("~group~": the channel over its builds) spans the table - the Lists editor's section row
+  let grp = "";
+  rows.forEach((r) => {
+    const row = el("tr"), first = r[0], kind = first instanceof Element ? first.dataset.row || "" : "";
+    if (kind === "group") {
+      const td = el("td"); td.colSpan = Math.max(headers.length, r.length); td.append(first); row.append(td);
+      row.className = "group";   // the Lists editor's section row ("Recommended", "General")
+      grp = first.dataset.label;
+      return tb.append(row);
+    }
+    if (grp) row.dataset.group = grp;
+    r.forEach((c) => { const td = el("td"); if (c instanceof Node) td.append(c); else td.textContent = c; row.append(td); });
+    tb.append(row);
+  });
+  t.append(tb); wrap.append(t);
+  return wrap;
+}
+
+// ---- help (per screen, and per tab where there are tabs) ---------------------------------------
+let helpFor = null;   // { feature, tab }
+// the help is written for the terminal (fixed-width, indented); here it reads as prose: a heading is a line
+// underlined with ─ or a lone shallow line over an indented block, "Term   text" lines are definition rows
+// (deeper lines continue them), any other lines join into a paragraph. The card header carries the title.
+// a document to read -> headings, lists and paragraphs. md: the change log (# headings, - items, **bold**, `code`);
+// notes: GL's release notes as _fw_notes words them (a heading alone on its line, "  • " items, wrapped lines)
+// log: the firmware update history - "## <title>|<RESULT>|<tone>" opens an attempt (its result a badge), an unindented
+// line is a section, an indented one a step in the terminal's monospace with its [TAG] coloured like the menu's
+function logNodes(text) {
+  const f = document.createDocumentFragment(); let first = true;
+  const tag = { OK: "green", ISSUE: "yellow", PENDING: "yellow", WARN: "yellow", FAILED: "red", REMOVED: "red", CANCELLED: "grey", SKIPPED: "grey" };
+  text.split("\n").forEach((raw) => {
+    const t = raw.trim(); if (!t) return;
+    const h = /^## (.*)\|([A-Z ]+)\|(\w+)$/.exec(t);
+    if (h) {
+      if (!first) f.append(el("hr")); first = false;
+      const e = el("h3", "logh"); e.append(el("span", "", h[1]), el("span", "badge t-" + h[3], h[2])); f.append(e); return;
+    }
+    if (!/^\s/.test(raw)) { f.append(el("h5", "", t)); return; }
+    const m = /^\[([A-Z]+)\]\s+(.*)$/.exec(t), d = el("div", "logln");
+    if (m) d.append(el("span", "lt-" + (tag[m[1]] || "grey"), "[" + m[1] + "]"), document.createTextNode(" " + m[2]));
+    else d.textContent = t;
+    f.append(d);
+  });
+  return f;
+}
+function readerNodes(text, format) {
+  if (format === "log") return logNodes(text);
+  const f = document.createDocumentFragment();
+  const esc = (t) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = (t) => esc(t).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>');
+  const lines = text.split("\n");
+  let para = null, ul = null, li = null;
+  const end = () => { para = null; ul = null; li = null; };
+  const add = (tag, html) => { const e = el(tag); e.innerHTML = html; f.append(e); return e; };
+  lines.forEach((raw, i) => {
+    const t = raw.trim();
+    if (!t) { end(); return; }
+    const md = format === "md" && /^(#{1,6})\s+(.*)$/.exec(t);
+    if (md) { end(); add(["h3", "h3", "h4", "h5", "h5", "h5"][md[1].length - 1], inline(md[2])); return; }
+    const item = /^\s*(?:[-*]|•)\s+(.*)$/.exec(raw);
+    if (item) { para = null; if (!ul) { ul = el("ul"); f.append(ul); } li = el("li"); li.innerHTML = inline(item[1]); ul.append(li); return; }
+    if (li && /^\s{2,}/.test(raw)) { li.innerHTML += " " + inline(t); return; }   // a wrapped item continues
+    // notes: a short line on its own, without closing punctuation, is a section heading
+    const alone = !(lines[i - 1] || "").trim() && !(lines[i + 1] || "").trim();
+    if (format !== "md" && alone && t.length < 48 && !/[.:;,!?]$/.test(t)) { end(); add("h4", inline(t)); return; }
+    if (para) { para.innerHTML += " " + inline(t); return; }
+    ul = null; li = null; para = add("p", inline(t));
+  });
+  return f;
+}
+function helpNodes(text) {
+  const out = document.createDocumentFragment(), L = text.replace(/\s+$/, "").split("\n");
+  const ind = (x) => x.length - x.trimStart().length;
+  let para = null, dl = null, dd = null, termInd = 0, ul = null, li = null, liInd = 0;
+  const close = () => { para = null; dl = null; dd = null; ul = null; li = null; };
+  for (let i = 0; i < L.length; i++) {
+    const line = L[i], t = line.trim(), next = L[i + 1] || "";
+    if (!t) { close(); continue; }
+    if (/^─+$/.test(t)) continue;
+    if (/ - Quick Help$/.test(t) && i < 2) continue;
+    if (/^─+$/.test(next.trim()) || (ind(line) <= 1 && !para && !dl && ind(next) > ind(line) && t.length < 50 && !/[:.]$/.test(t))) {
+      close(); out.append(el("h3", "", t)); continue;
+    }
+    // "• item" lines are a list; deeper lines continue the item
+    const b = line.match(/^(\s*)[•*-] (.*)$/);
+    if (b) {
+      if (!ul) { close(); ul = el("ul"); out.append(ul); }
+      li = el("li", "", b[2].replace(/\s{2,}/g, " ")); liInd = b[1].length; ul.append(li); continue;
+    }
+    if (ul && li && ind(line) > liInd) { li.textContent += " " + t; continue; }
+    if (ul) close();
+    const m = line.match(/^(\s{3,})(\S+(?: \S+)?)\s{2,}(\S.*)$/);
+    if (m && !para) {
+      if (!dl) { dl = el("dl"); out.append(dl); }
+      termInd = m[1].length;
+      dl.append(el("dt", "", m[2])); dd = el("dd", "", m[3]); dl.append(dd); continue;
+    }
+    if (dl && dd && ind(line) > termInd) { dd.textContent += " " + t; continue; }
+    if (dl) close();
+    if (!para) { para = el("p", "", t); out.append(para); } else para.textContent += " " + t;
+  }
+  return out;
+}
+// ---- reading ahead: what you are about to read is fetched while you look at the screen, so it opens at once -
+// a tab's Help once it has drawn, and a read action (release notes) for the row picked in its table. Each reply is
+// kept for this visit; one that fails is forgotten (asked again when you press the button)
+const ahead = new Map();
+function fetchAhead(key, call) {
+  if (!ahead.has(key)) { const p = call(); ahead.set(key, p); p.catch(() => ahead.delete(key)); }
+  return ahead.get(key);
+}
+const helpKey = () => "help|" + JSON.stringify(helpFor || { feature: SCREEN });
+// Help only changes with the toolkit, so a screen's help - every tab, one request - is fetched once the screen has
+// drawn (before you're likely to press Help) and kept for the browser session under this exact toolkit build (its size
+// and modification time): an update or a redeploy, even under the same version, misses the saved copy and reads it
+// fresh. Was a request per tab per page load (1.4 s each on a MIPS router)
+let TOOLKIT_BUILD = "";
+const helpStore = (f) => "glu-help|" + TOOLKIT_BUILD + "|" + f;
+async function helpsFor(f) {
+  if (!TOOLKIT_BUILD) return null;
+  try { const v = sessionStorage.getItem(helpStore(f)); if (v) return JSON.parse(v); } catch (e) {}
+  const m = await fetchAhead("helps|" + f, () => rpc("get_helps", { feature: f }).then((r) => (r && r.helps) || null));
+  if (m) { try { sessionStorage.setItem(helpStore(f), JSON.stringify(m)); } catch (e) {} }
+  return m;
+}
+async function helpFetch(hf) {
+  try {
+    const m = await helpsFor(hf.feature);
+    const r = m && (hf.tab ? m[hf.tab] : m[Object.keys(m)[0]]);
+    if (r && r.text) return r;
+  } catch (e) {}
+  return fetchAhead(helpKey(), () => rpc("get_help", hf));   // not in the screen's set: ask for this one
+}
+function helpAhead() {
+  const hf = helpFor || { feature: SCREEN };
+  setTimeout(() => helpFetch(hf).catch(() => {}), 600);
+}
+async function showHelp() {
+  try {
+    const hf = helpFor || { feature: SCREEN };
+    const r = await helpFetch(hf);
+    $("helpBtn").setAttribute("aria-expanded", "true");
+    const ov = readOverlay(r.title || "Help", helpNodes(r.text || ""));
+    const was = ov.close; ov.close = () => { was(); $("helpBtn").setAttribute("aria-expanded", "false"); };
+  } catch (e) { return failed(e, "The help couldn't be loaded"); }
+}
+$("helpBtn").addEventListener("click", showHelp);
+
+// ===============================================================================================
+// Every other screen: the toolkit describes it (title, tabs, cards of rows / tables / output, the menu's
+// actions with their questions and fields); this draws it the GL way. A long action runs as a job whose
+// log shows in a card like GL's log viewer.
+// ===============================================================================================
+const gen = {
+  st: null, tab: "", liveTimer: null, job: null,
+  open() {
+    $("title").textContent = (SCREENS.find((x) => x.id === SCREEN) || {}).title || "Router Toolkit";
+    gen.load(URLP.get("t") || reloadTab(), { first: true });
+  },
+  async load(tab, opts) {
+    opts = opts || {};
+    if (busy && !opts.force) return;
+    gen.stopLive();
+    // a tab whose first reading is slow names what it's doing (the toolkit's _wl_ line), else the usual words
+    const t = list(gen.st && gen.st.tabs).find((x) => x.id === tab);
+    const my = gen.loadSeq = (gen.loadSeq || 0) + 1;
+    if (!opts.quiet) {
+      // a chosen tab shows as chosen at once (as Hardware Information does) and its panel waits under the spinner;
+      // the old tab's page buttons go with it, so nothing acts on a tab that's no longer showing
+      if (gen.st && tab !== gen.tab) {
+        gen.tab = tab;
+        tabStrip(list(gen.st.tabs), tab, gen.pickTab);
+        $("pageActions").querySelectorAll(".gen").forEach((b) => b.remove());
+      }
+      $("content").replaceChildren(); loading(true, (t && t.wait) || "Reading the router");
+    }
+    try {
+      const st = await rpc("get_screen", { screen: SCREEN, tab: tab || "" });
+      if (my !== gen.loadSeq) return;     // another tab was chosen meanwhile - the last choice draws
+      loading(false);
+      if (st.ok === false) return banner(st.message);
+      if (!opts.quiet || st.message || opts.ended) banner(st.message);   // a finished job's "Running" banner goes
+      gen.render(st);
+    } catch (e) { if (my === gen.loadSeq) failed(e); }
+  },
+  pickTab(id) { banner(null); gen.load(id); },
+  render(st) {
+    gen.st = st; gen.tab = st.tab || "";
+    keepTab(gen.tab);
+    helpFor = { feature: SCREEN, tab: gen.tab };
+    $("title").textContent = st.title || $("title").textContent;
+    tabStrip(list(st.tabs), gen.tab, gen.pickTab);
+    const pa = $("pageActions");
+    pa.querySelectorAll(".gen").forEach((b) => b.remove());
+    list(st.actions).forEach((a) => { const b = gen.button(a); b.classList.add("gen"); pa.prepend(b); });
+    const out = list(st.cards).map((c) => gen.card(c));
+    if (st.job && st.job.id) out.push(gen.logCard(st.job));
+    $("content").replaceChildren(...out);
+    if (st.job && st.job.id && gen.logShown === st.job.id) gen.logOpen(true);
+    gen.allBoxes(); gen.readAhead(); helpAhead(); gen.syncNeeds();
+    // a row picked in a table stays picked when the screen is re-read (a job ending re-reads it)
+    Object.entries(gen.picks || {}).forEach(([n, v]) => {
+      const r = document.querySelector('#content input.pick[name="' + n + '"][value="' + v + '"]'); if (r) r.checked = true;
+    });
+    if (st.job && st.job.id) gen.follow(st.job.id);
+    if (st.live > 0) gen.startLive(st.live);
+  },
+  card(c) {
+    if (c.editor) return gen.editorCard(c);
+    const k = card(c.title || "", { half: c.half, aside: c.aside });
+    // the menu's order: STATUS rows / tables, then what's said about them
+    if (list(c.rows).length) k.body.append(rowsList(c.rows));
+    if (list(c.headers).length || list(c.table).length) {
+      k.body.append(tableBlock(list(c.headers), list(c.table).map((r) => list(r).map((x) => gen.cell(x)))));
+    }
+    list(c.notes).forEach((n) => k.body.append(el("p", "note", n)));
+    if (c.pre) k.body.append(el("pre", "out", c.pre));
+    if (list(c.tiles).length) {
+      const g = el("div", "tiles");
+      list(c.tiles).forEach((t) => {
+        const d = el("div", "tile");
+        d.append(el("span", "tlabel", t.label));
+        const v = el("span", "tvalue", t.value); if (t.unit) v.append(el("small", "", " " + t.unit));
+        d.append(v);
+        if (t.note) d.append(el("span", "tnote", t.note));
+        g.append(d);
+      });
+      k.body.prepend(g);
+    }
+    if (!k.body.childNodes.length) k.body.remove();
+    const acts = list(c.actions);
+    if (acts.length) {
+      const f = el("footer");
+      acts.forEach((a) => f.append(a.mode === "terminal" ? el("p", "terminal-note", a.label + " - " + a.ask) : gen.button(a)));
+      k.append(f);
+    }
+    return k;
+  },
+  // a table cell: plain text, a coloured status word, "this router" (green text) or a bar (percent of the best)
+  cell(x) {
+    if (!x || typeof x !== "object") return x == null ? "" : String(x);
+    if (x.tone === "bar") {
+      const b = el("span", "cellbar"), f = el("span");
+      f.style.width = Math.max(0, Math.min(100, parseInt(x.text, 10) || 0)) + "%";
+      b.append(f); b.setAttribute("role", "img"); b.setAttribute("aria-label", x.text + "% of the best");
+      return b;
+    }
+    // a row you pick in place: pick = one of the table (a radio - the firmware build), pickm = any number of them
+    // (a tick box - the keys or backups to delete); the actions read the ticked rows
+    if (x.tone === "group") { const s = el("span", "", x.text); s.dataset.row = "group"; s.dataset.label = x.text.split(" · ")[0]; return s; }
+    if (x.tone === "pick" || x.tone === "pickm") {
+      const m = /^(\w+)=([^*]*)(\*?)$/.exec(x.text) || [];
+      const i = el("input"); i.type = x.tone === "pick" ? "radio" : "checkbox"; i.name = m[1] || "pick"; i.value = m[2] || "";
+      i.checked = m[3] === "*"; i.className = "pick"; i.setAttribute("aria-label", "Select this row");
+      return i;
+    }
+    // a Planned Action that follows the pick ("<tone>:<text>|<tone>:<text>" = picked | not picked), as in the menu's
+    // build picker: only the picked row says what will happen. "!" = only when picked by hand (the installed build
+    // starts picked so Release Notes always has one, but it says Reinstall only once you choose it)
+    if (x.tone === "plan") {
+      const [on, off] = x.text.split("|"), s = el("span", "badge plan");
+      s.dataset.on = on || ""; s.dataset.off = off || "";
+      return s;
+    }
+    if (x.tone === "green" && / \(this router\)$/.test(x.text)) return el("strong", "mine", x.text);
+    return el("span", "badge t-" + x.tone, x.text);
+  },
+  // paint every Planned Action from the row's pick
+  syncPlans() {
+    document.querySelectorAll("#content .badge.plan").forEach((s) => {
+      const r = s.closest("tr") && s.closest("tr").querySelector("input.pick");
+      let v = s.dataset.off;
+      if (r && r.checked) {
+        const hand = s.dataset.on.startsWith("!");
+        if (!hand || (gen.picks || {})[r.name] === r.value) v = s.dataset.on.replace(/^!/, "");
+      }
+      const i = v.indexOf(":");
+      s.className = "badge plan t-" + (i > 0 ? v.slice(0, i) : "fact"); s.textContent = i > 0 ? v.slice(i + 1) : v;
+      s.dataset.state = v === s.dataset.off ? "off" : "on";
+    });
+  },
+  // ---- an editable table (the Lists Manager on the web): two switches per row, the menu's planned actions, its
+  // Memory Impact meter recomputed as you toggle, and one change bar - nothing happens until Apply Changes ----
+  // the editor's kinds: the Lists Manager (agh), the Package Manager (pkg) and its Features page (feat) - each with
+  // the menu's own columns, planned-action words and meter
+  edKinds: {
+    agh: { cols: ["List", "Type", "Rules", "Installed", "Enabled", "Planned Action"], sw: ["installed", "enabled"], hide: [2, 6],
+           cells: (r) => [r.name, r.type, r.est === 2 || r.est === 3 ? el("span", "badge t-red", "FAILED") : (r.est === 1 ? "~" : "") + gen.fmtRules(r.rules)],
+           titles: { "> Install + Enable": "Install + Enable", "> Install": "Install (left disabled)", "> Enable": "Enable", "> Disable": "Disable", "> Remove": "Remove" } },
+    pkg: { cols: ["Package", "Size", "Install", "Persist", "Planned Action"], sw: ["installed", "kept across firmware updates"], hide: [5],
+           cells: (r) => [r.name, gen.fmtKB(r.rules)],
+           // the menu's [S] Sort, as GL's sortable headers (Flow Statistics): Size largest-first by default, a click reverses
+           sort: { 1: ["name", "asc"], 2: ["size", "desc"] } },
+    feat: { cols: ["Feature", "Persist", "Planned Action"], sw: [null, "kept across firmware updates"], hide: [],
+            cells: (r) => [r.name] },
+  },
+  plan(r, kind) {   // the menu's get_agh_action_text / get_action_text
+    if (r.ti === r.oi && r.te === r.oe) return "No Change";
+    const pk = kind === "pkg" || kind === "feat";
+    if (r.oi === 0 && r.ti === 1) return pk ? (r.te === 1 ? "> Install + Persist" : "> Install Package") : (r.te === 1 ? "> Install + Enable" : "> Install");
+    if (r.oi === 1 && r.ti === 1 && r.te !== r.oe) return pk ? (r.te === 1 ? "> Enable Persistence" : "> Disable Persistence") : (r.te === 1 ? "> Enable" : "> Disable");
+    if (r.oi === 1 && r.ti === 0) return pk ? (r.oe === 1 ? "> Remove + Unpersist" : "> Remove Package") : "> Remove";
+    return "No Change";
+  },
+  fmtRules(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? (n / 1000).toFixed(1) + "K" : String(n); },
+  fmtKB(k) { return k <= 0 ? "-" : k >= 1048576 ? (k / 1048576).toFixed(1) + "G" : k >= 1024 ? (k / 1024).toFixed(1) + "M" : k + "K"; },
+  editorCard(c) {
+    const kind = gen.edKinds[c.kind] ? c.kind : "agh", K = gen.edKinds[kind];
+    const rows = list(c.erows).map((r) => Object.assign({}, r));
+    const k = card(c.title || "", {});
+    const act = list(c.actions).find((a) => a.id === c.editor);
+    // the meter: AdGuardHome's Memory Impact (rules that will load against RAM + zram), or the Package Manager's
+    // Storage line (the free space you'll have after Apply)
+    const meter = el("div", "meter");
+    const bar = el("div", "meterbar"), mtext = el("span", "metertext");
+    if (kind === "agh") { for (let i = 0; i < 20; i++) bar.append(el("span")); meter.append(el("span", "meterlabel", "Memory Impact"), bar, mtext); }
+    else meter.append(el("span", "meterlabel", "Storage"), mtext);
+    if (c.meter) k.body.append(meter);
+    const ed = { rows, kind, bar, mtext, m: c.meter, bars: [] };
+    const upd = () => gen.edUpdate(ed);
+    // the change bar, twice: under the meter and after the table (inside GL's frame the page has no viewport of its
+    // own to pin a bar to, so it sits where you start and where you finish)
+    const mkBar = () => {
+      const b = el("div", "changebar"); b.hidden = true;
+      const cnt = el("span", "count");
+      const discard = btn("Discard", "", () => { rows.forEach((r) => { r.ti = r.oi; r.te = r.oe; }); upd(); });
+      const apply = btn(act ? act.label : "Apply Changes", "primary", () => gen.edApply(ed, act));
+      b.append(cnt, discard, apply); b.count = cnt; ed.bars.push(b); return b;
+    };
+    if (act) k.body.append(mkBar());
+    const wrap = el("div", "tbl-wrap"), t = el("table", "tbl editor"), thead = el("thead"), hr = el("tr");
+    const tb = el("tbody");
+    // sortable headers (K.sort: column -> [key, first direction]); the choice is kept for the browser session, as GL
+    // keeps its Clients sort
+    let ord = null;
+    if (K.sort) {
+      try { ord = JSON.parse(sessionStorage.getItem("glu-sort|" + kind) || "null"); } catch (e) {}
+      if (!ord || !["name", "size"].includes(ord.key)) ord = { key: "size", dir: "desc" };
+    }
+    const carets = {};
+    const reorder = () => {
+      if (!ord) return;
+      const v = (r) => (ord.key === "name" ? String(r.name).toLowerCase() : Number(r.rules) || 0);
+      const by = rows.slice().sort((a, b) => (v(a) < v(b) ? -1 : v(a) > v(b) ? 1 : String(a.name).localeCompare(String(b.name))) * (ord.dir === "asc" ? 1 : -1));
+      by.forEach((r) => r.tr && tb.append(r.tr));
+      Object.entries(carets).forEach(([key, c]) => { c.u.classList.toggle("on", ord.key === key && ord.dir === "asc"); c.d.classList.toggle("on", ord.key === key && ord.dir === "desc"); });
+      try { sessionStorage.setItem("glu-sort|" + kind, JSON.stringify(ord)); } catch (e) {}
+    };
+    K.cols.forEach((h, i) => {
+      const th = el("th", K.hide.includes(i + 1) ? "ph-hide" : "", h), s = K.sort && K.sort[i + 1];
+      if (s) {
+        const cr = el("span", "cr"), u = el("i", "u"), d = el("i", "d"); cr.append(u, d); th.append(cr);
+        carets[s[0]] = { u, d }; th.classList.add("sortable"); th.tabIndex = 0;
+        const go = () => { ord = ord.key === s[0] ? { key: s[0], dir: ord.dir === "asc" ? "desc" : "asc" } : { key: s[0], dir: s[1] }; reorder(); };
+        th.addEventListener("click", go);
+        th.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+      }
+      hr.append(th);
+    });
+    thead.append(hr); t.append(thead);
+    t.append(tb); wrap.append(t); k.body.append(wrap);
+    list(c.notes).forEach((n) => k.body.append(el("p", "note", n)));
+    const sw = (on, label, fn) => {
+      const l = el("label", "switch"), i = el("input"); i.type = "checkbox"; i.checked = on; i.setAttribute("role", "switch");
+      i.setAttribute("aria-label", label); i.addEventListener("change", () => fn(i.checked)); l.append(i, el("span", "slider")); return l;
+    };
+    const td = (x, i) => { const d = el("td", K.hide.includes(i) ? "ph-hide" : ""); if (x instanceof Node) d.append(x); else d.textContent = x; return d; };
+    let lastSec = null;
+    rows.forEach((r) => {
+      if (r.sec && r.sec !== lastSec) { const g = el("tr", "group"), d = el("td", "", r.sec); d.colSpan = K.cols.length; g.append(d); tb.append(g); lastSec = r.sec; }
+      const tr = el("tr"); r.tr = tr;
+      const cells = K.cells(r);
+      cells.forEach((x, i) => tr.append(td(x, i + 1)));
+      let col = cells.length;
+      if (K.sw[0]) {
+        r.inst = sw(r.ti === 1, r.name + " " + K.sw[0], (on) => { r.ti = on ? 1 : 0; if (!on) r.te = 0; upd(); });
+        tr.append(td(r.inst, ++col));
+      }
+      r.ena = sw(r.te === 1, r.name + " " + K.sw[1], (on) => { r.te = on ? 1 : 0; if (on) r.ti = 1; upd(); });
+      tr.append(td(r.ena, ++col));
+      r.planTd = td("", ++col); tr.append(r.planTd);
+      tb.append(tr);
+    });
+    reorder();
+    if (act) k.body.append(mkBar());
+    upd();
+    return k;
+  },
+  edUpdate(ed) {
+    const { rows, kind, bar, mtext, m, bars } = ed;
+    let active = 0, n = 0, delta = 0;
+    rows.forEach((r) => {
+      if (r.inst) r.inst.querySelector("input").checked = r.ti === 1;
+      r.ena.querySelector("input").checked = r.te === 1;
+      if (r.ti === 1 && r.te === 1) active += r.rules;
+      if (r.ti !== r.oi) delta += r.ti === 1 ? -r.rules : r.rules;
+      const p = gen.plan(r, kind), changed = p !== "No Change"; if (changed) n++;
+      r.tr.classList.toggle("staged", changed);
+      r.planTd.replaceChildren(el("span", "plan " + (!changed ? "t-none" : /Remove|Disable/.test(p) ? "t-off" : "t-on"), p));
+    });
+    if (m && kind === "agh") {   // agh_mem_fill: the ceiling is (capacity - 128 MB) x 1000 rules
+      const ceil = Math.max(1000, (m.cap - 128) * 1000), fill = Math.max(0, Math.min(20, Math.floor(active * 20 / ceil)));
+      [...bar.children].forEach((s, i) => { s.className = i < fill ? (i < 14 ? "g" : i < 18 ? "y" : "r") : ""; });
+      const st = fill > 18 ? " (critical)" : fill > 14 ? " (high)" : "";
+      mtext.textContent = gen.fmtRules(active) + " rules · " + m.mt + "MB RAM" + (m.st > 0 ? " + " + m.st + "MB zram" : "") + st;
+      mtext.className = "metertext" + (fill > 18 ? " t-r" : fill > 14 ? " t-y" : "");
+    } else if (m) {   // _pkg_storage_line: free + what Apply frees or takes; a projection on a compressing overlay is "≈"
+      const proj = Math.max(0, m.mt + delta), low = proj < 10240;
+      mtext.textContent = (delta !== 0 && m.st === 1 ? "≈ " : "") + gen.fmtKB(proj) + " free" + (low ? " (low)" : "");
+      mtext.className = "metertext" + (low ? " t-y" : "");
+    }
+    bars.forEach((b) => { b.hidden = n === 0; b.count.textContent = n === 1 ? "1 change" : n + " changes"; });
+  },
+  // Apply: the menu's Confirm screen (what's added, what's removed) in the dialog, then its own apply as a job
+  edApply(ed, act) {
+    if (!act) return;
+    const { rows, kind } = ed, K = gen.edKinds[kind], groups = {};
+    rows.forEach((r) => { const p = gen.plan(r, kind); if (p !== "No Change") (groups[p] = groups[p] || []).push(r.name); });
+    const form = el("div", "form");
+    Object.keys(groups).sort((x, y) => /Remove|Disable/.test(x) - /Remove|Disable/.test(y)).forEach((key) => {
+      const sec = el("div", "summary");
+      sec.append(el("strong", /Remove|Disable/.test(key) ? "t-off" : "t-on", (K.titles && K.titles[key]) || key.replace(/^> /, "")));
+      const ul = el("ul"); groups[key].forEach((n) => ul.append(el("li", "", n))); sec.append(ul);
+      form.append(sec);
+    });
+    overlay({ title: act.ask || "Apply these changes?", content: [act.warning ? el("p", "warn", act.warning) : null, form],
+      buttons: [{ label: "Cancel" }, { label: act.label, cls: "primary", onClick: (ov) => {
+        ov.close();
+        const args = {};
+        rows.forEach((r) => { if (gen.plan(r, kind) !== "No Change") args[r.id] = kind === "feat" ? String(r.te) : r.ti + ":" + (r.ti === 1 ? r.te : 0); });
+        gen.run(act, true, args);
+      } }] });
+  },
+  // something to read (release notes, the change log): the overlay, the help's treatment
+  showReader(r) { readOverlay(r.title || "", readerNodes(r.text || "", r.format)); },
+  // a tick-box column gets an all / none box in its header (checked, empty, or part-way)
+  allBoxes() {
+    document.querySelectorAll("#content table").forEach((t) => {
+      const boxes = [...t.querySelectorAll("tbody input.pick[type=checkbox]")], th = t.querySelector("thead th");
+      if (!boxes.length || !th || th.querySelector("input")) return;
+      const all = el("input"); all.type = "checkbox"; all.className = "pick all"; all.setAttribute("aria-label", "Select all rows");
+      const sync = () => { const n = boxes.filter((b) => b.checked).length; all.checked = n === boxes.length; all.indeterminate = n > 0 && n < boxes.length; };
+      all.addEventListener("change", () => { boxes.forEach((b) => { b.checked = all.checked; }); gen.syncNeeds(); });
+      boxes.forEach((b) => b.addEventListener("change", sync)); th.append(all); sync();
+    });
+  },
+  // an inline field's rule: "1" = exactly one row ticked, "1+" = one or more, "" = one (a radio always has one),
+  // "1:<a>,<b>" = exactly one, and it is one of those (an action that applies to some rows only - Router Access)
+  needMet(f, rs) {
+    const n = rs.length, o = f.options || "";
+    if (o === "1+") return n >= 1;
+    if (n !== 1) return false;
+    return !o.startsWith("1:") || o.slice(2).split(",").includes(rs[0].value);
+  },
+  ticked(f) { return [...document.querySelectorAll('#content input.pick[name="' + f.id + '"]:checked')]; },
+  // an action that works on ticked rows is enabled only while its rule is met
+  syncNeeds() {
+    gen.syncPlans();
+    const acts = list(gen.st && gen.st.actions).concat(...list(gen.st && gen.st.cards).map((c) => list(c.actions)));
+    acts.forEach((a) => {
+      const inl = list(a.fields).filter((f) => f.type === "inline" && f.options); if (!inl.length) return;
+      const b = document.querySelector('#content button[data-act="' + a.id + '"]'); if (!b || busy) return;
+      const ok = inl.every((f) => gen.needMet(f, gen.ticked(f)));
+      const one = gen.ticked(inl[0]);
+      b.disabled = !ok;
+      b.title = ok ? "" : inl[0].options === "1+" ? "Tick one or more rows in the table"
+        : one.length === 1 && inl[0].options.startsWith("1:") ? "Doesn't apply to " + one[0].value : "Pick one row in the table";
+      b.hidden = false;
+    });
+    // buttons with the same label for different rows (Bring Interface Up / Down: per band for guest, for iot; whole
+    // interface for vlan18): show the one for the picked row - or, when none applies, just the first (disabled)
+    const groups = {};
+    document.querySelectorAll("#content button[data-act]").forEach((b) => {
+      const a = acts.find((x) => x.id === b.dataset.act), f = a && list(a.fields).find((x) => x.type === "inline");
+      if (f && (f.options || "").startsWith("1:")) (groups[b.textContent] = groups[b.textContent] || []).push(b);
+    });
+    Object.values(groups).filter((g) => g.length > 1).forEach((g) => {
+      const on = g.find((b) => !b.disabled) || g[0];
+      g.forEach((b) => { b.hidden = b !== on; });
+    });
+  },
+  button(a) {
+    const cls = a.style === "primary" ? "primary" : a.style === "danger" ? "danger" : "";
+    const b = btn(a.label, cls, () => gen.start(a));
+    b.dataset.act = a.id;
+    return b;
+  },
+  // an action that asks in the menus asks here too; one with fields gathers them first
+  start(a) {
+    const all = list(a.fields), fields = all.filter((f) => f.type !== "inline");
+    // an inline field's value is the row ticked in the table (its radio), not a question in the dialog
+    const inline = {}, picked = [];
+    for (const f of all.filter((f) => f.type === "inline")) {
+      const rs = gen.ticked(f);
+      if (!gen.needMet(f, rs)) { banner({ tone: "warning", text: f.options === "1" ? "Tick one row in the table first" : "Pick a row in the table first" }); return; }
+      const pl = a.mode !== "read" && rs.length === 1 && rs[0].closest("tr").querySelector(".badge.plan[data-state=off]");
+      if (pl && pl.dataset.on.startsWith("!")) {
+        const doing = pl.dataset.on.slice(pl.dataset.on.indexOf(":") + 1);
+        banner({ tone: "info", text: pl.textContent + " - click its row again to " + doing.toLowerCase() + ", or pick another build" }); return;
+      }
+      inline[f.id] = rs.map((r) => r.value).join(",");
+      // what you ticked, as the dialog lists it: each row's first three cells
+      const what = (r) => { const tr = r.closest("tr");   // a grouped row names its group first (the build's channel)
+        return [tr.dataset.group || ""].concat([...tr.cells].slice(1).map((c) => c.textContent.trim())).filter(Boolean).slice(0, 3).join(" · "); };
+      if (rs.length === 1) picked.push(el("p", "picked", f.label + ": " + what(rs[0])));
+      else { const ul = el("ul"); rs.forEach((r) => ul.append(el("li", "", what(r))));
+             const sec = el("div", "summary"); sec.append(el("strong", "", f.label + " (" + rs.length + ")"), ul); picked.push(sec); }
+    }
+    if (!a.ask && !fields.length) return gen.run(a, false, inline);
+    const form = el("form", "form"); form.addEventListener("submit", (e) => e.preventDefault());
+    picked.forEach((n) => form.append(n));
+    // a field whose value is per row ("~per~<row>=<value>;...") opens with the picked row's value
+    const row = Object.values(inline)[0];
+    fields.forEach((f) => {
+      if (String(f.value || "").startsWith("~per~")) {
+        const m = {}; f.value.slice(5).split(";").forEach((kv) => { const i = kv.indexOf("="); if (i > 0) m[kv.slice(0, i)] = kv.slice(i + 1); });
+        f = Object.assign({}, f, { value: m[row] != null ? m[row] : "" });
+      }
+      form.append(gen.field(f));
+    });
+    // a field that belongs to a check box shows (and is sent) only while it's ticked; a Confirm Password must match
+    const sync = () => fields.forEach((f) => {
+      const i = form.elements[f.id]; if (!i) return;
+      if (f.when && form.elements[f.when]) { const on = form.elements[f.when].checked; (i.closest(".swfield") || i.closest("label")).hidden = !on; i.disabled = !on; }
+      const m = /^match:(\w+)$/.exec(f.options || "");
+      if (m && form.elements[m[1]]) i.setCustomValidity(i.value === form.elements[m[1]].value ? "" : "The passwords don't match");
+    });
+    form.oninput = sync; form.onchange = sync; sync();
+    const ovr = overlay({ title: a.ask || a.label,
+      content: [a.warning ? el("p", "warn", a.warning) : null, (fields.length || picked.length) ? form : null],
+      buttons: [{ label: "Cancel" },                     // cancel is quiet
+                { label: a.label, cls: a.style === "danger" ? "danger" : "primary", onClick: (ov) => {
+        if (!form.reportValidity()) return;
+        const args = Object.assign({}, inline);
+        fields.forEach((f) => { const i = form.elements[f.id]; if (i && !i.disabled) args[f.id] = i.type === "checkbox" ? (i.checked ? "1" : "0") : i.value; });
+        ov.close(); gen.run(a, !!a.ask, args);
+      } }] });
+    // a dialog that changes a setting opens on the current values: its button waits for a change (GL's Apply does the
+    // same) - applying nothing would still reload (a Wi-Fi restart for a network's state). Change it back: waits again
+    if (a.change) {
+      const go = ovr.root.querySelector(".glu-ov-foot button:last-child");
+      const now = () => fields.map((f) => form.elements[f.id]).filter(Boolean).map((i) => (i.type === "checkbox" ? String(i.checked) : i.value));
+      const was = now();
+      const dirty = () => { const d = now().some((v, k) => v !== was[k]); go.disabled = !d; go.title = d ? "" : "No changes"; };
+      form.addEventListener("input", dirty); form.addEventListener("change", dirty); dirty();
+    }
+  },
+  field(f) {
+    // a yes/no in a dialog is GL's switch, its label on the left (GL's Upgrade page "Keep Settings") - tick boxes are
+    // only for picking rows in a table (Vincent 2026-10-14). A switch's options = a warning shown while it's off
+    if (f.type === "switch" || f.type === "check") {
+      const w = el("div", "swfield"), lab = el("label", "swrow"), i = el("input"), s = el("span", "gsw");
+      i.type = "checkbox"; i.name = f.id; i.checked = f.value === "1"; i.setAttribute("role", "switch");
+      s.append(i, el("span", "knob")); lab.append(el("span", "", f.label), s); w.append(lab);
+      if (f.help) w.append(el("span", "hint", f.help));
+      if (f.options) { const wn = el("p", "offwarn", f.options), up = () => { wn.hidden = i.checked; }; i.addEventListener("change", up); up(); w.append(wn); }
+      return w;
+    }
+    const lab = el("label", f.type === "check" ? "check" : "");
+    let i;
+    if (f.type === "select") {
+      lab.append(el("span", "", f.label), gen.glSelect(f));
+      if (f.help) lab.append(el("span", "hint", f.help));
+      return lab;
+    } else {
+      i = el("input");
+      i.type = f.type === "check" ? "checkbox" : (["number", "password"].includes(f.type) ? f.type : "text");
+      if (f.type === "check") i.checked = f.value === "1"; else i.value = f.value || "";
+      if (f.type === "number" && /^-?[\d.]+-[\d.]+(;|$)/.test(f.options || "")) {
+        const m = f.options.match(/^(-?[\d.]+)-([\d.]+)/); i.min = m[1]; i.max = m[2]; i.required = true;
+      }
+      if (f.type === "text" && f.options) i.placeholder = f.options;
+    }
+    i.name = f.id;
+    if (f.type === "check") { lab.append(i, el("span", "", f.label)); }
+    else if (i.min !== "" && f.type === "number") { lab.append(el("span", "", f.label), gen.numCtl(f, i)); }
+    else { lab.append(el("span", "", f.label), i); }
+    if (f.help) lab.append(el("span", "hint", f.help));
+    return lab;
+  },
+  // a drop-down drawn the GL way (Element's select: a box with a chevron, a list under it - 34 px rows, a tinted hover,
+  // the chosen one in GL's control colour, group titles small and grey); the browser's own menu ignores GL's look.
+  // options "value=label|...", "#<title>" = a group heading. The value travels in a hidden input named after the field
+  glSelect(f) {
+    const w = el("div", "gsel"), hid = el("input"), box = el("button", "gsel-box"), txt = el("span", "", "");
+    hid.type = "hidden"; hid.name = f.id; box.type = "button"; box.setAttribute("aria-haspopup", "listbox"); box.setAttribute("aria-expanded", "false");
+    box.append(txt, el("span", "gsel-chev"));
+    const items = [];
+    String(f.options || "").split("|").filter(Boolean).forEach((o) => {
+      if (o.startsWith("#")) return items.push({ title: o.slice(1) });
+      const k = o.indexOf("="); items.push(k > 0 ? { v: o.slice(0, k), t: o.slice(k + 1) } : { v: o, t: o });
+    });
+    const opts = items.filter((x) => !x.title);
+    const set = (v) => { const x = opts.find((o) => o.v === v) || opts[0]; if (x) { hid.value = x.v; txt.textContent = x.t; } };
+    set(String(f.value == null ? "" : f.value));
+    let list = null, d = null;
+    const close = () => {
+      if (!list) return;
+      list.remove(); list = null; w.classList.remove("open"); box.setAttribute("aria-expanded", "false");
+      d.removeEventListener("mousedown", outside, true); d.removeEventListener("scroll", moved, true);
+    };
+    const outside = (e) => { if (list && !list.contains(e.target) && !box.contains(e.target)) close(); };
+    // the page or the dialog scrolling would leave the list behind its box - scrolling the list itself is fine
+    const moved = (e) => { if (list && e.target !== list && !list.contains(e.target)) close(); };
+    const mark = () => list && list.querySelectorAll(".gsel-item").forEach((n) => n.classList.toggle("selected", n.dataset.v === hid.value));
+    const pick = (x) => { set(x.v); close(); hid.dispatchEvent(new Event("change", { bubbles: true })); box.focus(); };
+    box.addEventListener("click", () => {
+      if (list) return close();
+      d = box.ownerDocument;   // drawn in GL's page when embedded - the list goes where the dialog is
+      const host = box.closest(".glu-ov") || d.body, r = box.getBoundingClientRect(), vh = d.defaultView.innerHeight;
+      list = d.createElement("div"); list.className = "gsel-list"; list.setAttribute("role", "listbox");
+      let sub = false;   // items under a heading are indented
+      items.forEach((x) => {
+        const n = d.createElement("div");
+        if (x.title) { n.className = "gsel-title"; n.textContent = x.title; sub = true; }
+        else {
+          n.className = "gsel-item" + (sub ? " sub" : ""); n.textContent = x.t; n.dataset.v = x.v; n.setAttribute("role", "option");
+          n.addEventListener("mousedown", (e) => { e.preventDefault(); pick(x); });
+        }
+        list.append(n);
+      });
+      host.append(list); mark();
+      const below = vh - r.bottom - 16, above = r.top - 16, up = below < Math.min(list.scrollHeight, 274) && above > below;
+      Object.assign(list.style, { left: r.left + "px", width: r.width + "px", maxHeight: Math.max(120, Math.min(274, up ? above : below)) + "px" });
+      if (up) list.style.bottom = (vh - r.top + 6) + "px"; else list.style.top = (r.bottom + 6) + "px";
+      w.classList.add("open"); box.setAttribute("aria-expanded", "true");
+      const sel = list.querySelector(".selected"); if (sel) sel.scrollIntoView({ block: "nearest" });
+      d.addEventListener("mousedown", outside, true); d.addEventListener("scroll", moved, true);
+    });
+    box.addEventListener("keydown", (e) => {
+      const k = e.key, at = opts.findIndex((o) => o.v === hid.value);
+      if (k === "ArrowDown" || k === "ArrowUp") {
+        e.preventDefault(); set(opts[Math.max(0, Math.min(opts.length - 1, at + (k === "ArrowDown" ? 1 : -1)))].v); mark();
+      } else if (k === "Escape" && list) { e.preventDefault(); e.stopPropagation(); close(); }
+      else if ((k === "Enter" || k === " ") && list) { e.preventDefault(); close(); }
+    });
+    w.append(box, hid);
+    return w;
+  },
+  // a bounded number: GL's slider beside its [-] number [+] box (Element's slider with show-input, as on Display
+  // Management). The slider gets you close; the box and - / + are exact (one step). options:
+  //   <min>-<max>[;seg=<end>/<step>/<share %>,...][;mark=<value>]
+  // seg = a track in sections, each with its own step and share of the width (a wide Mbps range stays easy to aim
+  // at under 1,000); mark = a tick the slider snaps to within a few pixels (the Recommended MTU)
+  numCtl(f, i) {
+    const o = String(f.options).split(";"), m = o[0].match(/^(-?[\d.]+)-([\d.]+)/), lo = +m[1], hi = +m[2];
+    let segs = [], mark = null;
+    o.slice(1).forEach((kv) => {
+      const [k, v] = kv.split("=");
+      if (k === "seg") segs = v.split(",").map((x) => { const [e, st, sh] = x.split("/").map(Number); return { e, st, sh }; });
+      if (k === "mark" && v !== "" && !isNaN(+v) && +v >= lo && +v <= hi) mark = +v;
+    });
+    if (!segs.length) segs = [{ e: hi, st: 1, sh: 100 }];
+    let a = lo, p = 0;
+    segs = segs.map((x) => { const r = { a, e: x.e, st: x.st, p0: p, p1: p + x.sh * 10 }; a = x.e; p = r.p1; return r; });
+    const clamp = (v) => Math.min(hi, Math.max(lo, v));
+    const toVal = (pos) => { const x = segs.find((s) => pos <= s.p1) || segs[segs.length - 1];
+      return clamp(Math.round((x.a + (pos - x.p0) / (x.p1 - x.p0) * (x.e - x.a)) / x.st) * x.st); };
+    const toPos = (v) => { const x = segs.find((s) => v <= s.e) || segs[segs.length - 1];
+      return x.p0 + (Math.min(v, x.e) - x.a) / (x.e - x.a) * (x.p1 - x.p0); };
+    const r = el("input"); r.type = "range"; r.min = 0; r.max = 1000; r.step = 1; r.tabIndex = -1;
+    r.setAttribute("aria-hidden", "true");             // the box is the field; the slider is a quicker way to fill it
+    const paint = () => { const v = parseFloat(i.value); if (!isNaN(v)) r.value = toPos(clamp(v)); r.style.setProperty("--fill", (r.value / 10) + "%"); };
+    const say = () => { paint(); i.dispatchEvent(new Event("input", { bubbles: true })); };
+    r.addEventListener("input", () => {
+      let v = toVal(+r.value);
+      if (mark != null && Math.abs(+r.value - toPos(mark)) <= 5 / (r.getBoundingClientRect().width || 300) * 1000) v = mark;
+      i.value = v; say();
+    });
+    i.addEventListener("input", paint);
+    const step = (d) => {   // one step of the section you're in (going down from a boundary uses the section below)
+      const v = parseFloat(i.value); const cur = isNaN(v) ? lo : v;
+      const x = segs.find((s) => (d > 0 ? cur < s.e : cur <= s.e)) || segs[segs.length - 1];
+      i.value = clamp(d > 0 ? Math.floor(cur / x.st) * x.st + x.st : Math.ceil(cur / x.st) * x.st - x.st); say();
+    };
+    i.addEventListener("keydown", (e) => { const k = { ArrowUp: 1, ArrowDown: -1 }[e.key]; if (k) { e.preventDefault(); step(k); } });
+    const track = el("div", "track"); track.append(r);
+    if (mark != null) {
+      const t = el("span", "mark"), at = toPos(mark) / 10;
+      t.style.left = "calc(" + at + "% + " + (8 - at * 0.16) + "px)"; t.title = "Recommended: " + mark;
+      track.append(t);
+    }
+    const minus = btn("\u2212", "", () => step(-1)), plus = btn("+", "", () => step(1));
+    minus.setAttribute("aria-label", "Decrease"); plus.setAttribute("aria-label", "Increase");
+    const box = el("div", "stepper"); box.append(minus, i, plus);
+    const w = el("div", "numctl"); w.append(track, box);
+    paint();
+    return w;
+  },
+  readKey(a, args) { return ["read", SCREEN, gen.tab || "", a.id, JSON.stringify(args || {})].join("|"); },
+  readCall(a, args) { return () => rpc("do_act", { screen: SCREEN, tab: gen.tab, action: a.id, confirmed: false, args: args }); },
+  // a read action (release notes, the change log): its text in the overlay - the screen stays as it is
+  async read(a, args) {
+    let said = false;
+    const slow = setTimeout(() => { said = true; banner({ tone: "info", text: a.label + " - loading" }); }, 250);
+    try {
+      const r = await fetchAhead(gen.readKey(a, args), gen.readCall(a, args));
+      clearTimeout(slow); if (said) banner(null);
+      if (r.reader) gen.showReader(r.reader); else if (r.message) banner(r.message);
+    } catch (e) { clearTimeout(slow); failed(e); }
+  },
+  // fetch every read action the screen offers, for the rows picked now (a little after the last pick)
+  readAhead() {
+    clearTimeout(gen.raT);
+    gen.raT = setTimeout(() => {
+      const acts = list(gen.st && gen.st.actions).concat(...list(gen.st && gen.st.cards).map((c) => list(c.actions)));
+      acts.filter((a) => a.mode === "read").forEach((a) => {
+        const fl = list(a.fields), args = {};
+        if (fl.some((f) => f.type !== "inline")) return;            // it asks something first: nothing to guess
+        for (const f of fl) {
+          const r = document.querySelector('#content input[type=radio][name="' + f.id + '"]:checked');
+          if (!r) return; args[f.id] = r.value;
+        }
+        fetchAhead(gen.readKey(a, args), gen.readCall(a, args));
+      });
+    }, 300);
+  },
+  async run(a, confirmed, args) {
+    if (a.mode === "read") return gen.read(a, args);
+    if (busy) return;
+    busy = true;
+    // a job's start and end are the Log card's to say - a banner that came and went shifted the whole screen twice
+    if (a.mode !== "job" && a.mode !== "ijob") banner({ tone: "info", text: a.label + " - working" });
+    document.querySelectorAll("#content button, #pageActions .gen").forEach((b) => { b.disabled = true; });
+    try {
+      const res = await rpc("do_act", { screen: SCREEN, tab: gen.tab, action: a.id, confirmed: confirmed, args: args });
+      busy = false;
+      if (res.ok === false && !res.cards) { banner(res.message); document.querySelectorAll("#content button").forEach((b) => { b.disabled = false; }); return; }
+      banner(res.message);
+      // this action started a job: re-read the screen when it ends (a run action's screen still lists the LAST job,
+      // finished long ago - that one is not ours, and re-reading for it wiped what the action just showed)
+      if ((a.mode === "job" || a.mode === "ijob") && res.job && res.job.id) gen.mine = res.job.id;
+      gen.render(res);
+      if (res.reader) gen.showReader(res.reader);
+      // a job started: bring its output into view (a long table can push it below the fold)
+      if ((a.mode === "job" || a.mode === "ijob") && $("jobCard")) $("jobCard").scrollIntoView({ behavior: "smooth", block: "center" });
+      // a log you asked to watch IS the content: open it
+      if (a.id === "watch" && $("jobCard")) gen.logOpen(true);
+    } catch (e) { busy = false; failed(e); }
+  },
+  // ---- a job's log: GL's log viewer (Refresh-free: it follows the job every second while it runs) ----
+  // the output (GL's log viewer) stays minimized - its state and latest line - and opens on demand, when it fails,
+  // or when the work asks a question; it's there for spot-checking, not the result (the screen shows that)
+  logCard(j) {
+    const k = card("Log");   // GL's own word (System > Log): the record of a job you started
+    k.dataset.job = j.id;
+    const what = el("p", "note", j.title || ""); what.id = "jobWhat";
+    const latest = el("p", "loglatest"); latest.id = "jobLatest";
+    const tog = btn("Show Log", "small", () => gen.logOpen(!k.classList.contains("open")));
+    tog.id = "jobToggle";
+    k.body.append(what, latest);
+    const stop = btn("Stop", "small", async () => {
+      stop.disabled = true;
+      try { const r = await rpc("job_stop", { id: j.id }); if (r.ok === false) banner(r.message); } catch (e) { failed(e); }   // STOPPED shows on the card
+    });
+    stop.id = "jobStop"; stop.hidden = true;
+    const state = el("span", "badge t-grey", "");
+    state.id = "jobState";
+    k.querySelector("header").append(state, stop, tog);
+    k.id = "jobCard";
+    const box = el("pre", "logbox"); box.id = "jobLog";
+    k.body.append(box);
+    // an interactive job asks the menu's own questions in the log: answer them here (Enter on its own = the default)
+    const ask = el("form", "jobask"); ask.id = "jobAsk"; ask.hidden = true;
+    const yes = btn("Yes", "primary", () => gen.answer(j.id, "y")); yes.id = "jobYes";
+    const no = btn("No", "", () => gen.answer(j.id, "n")); no.id = "jobNo";
+    const inp = el("input"); inp.type = "text"; inp.id = "jobInput"; inp.placeholder = "Type an answer, then Send"; inp.autocomplete = "off";
+    const send = btn("Send", "", null); send.type = "submit";
+    ask.addEventListener("submit", (e) => { e.preventDefault(); gen.answer(j.id, inp.value); inp.value = ""; });
+    ask.append(yes, no, inp, send);
+    k.body.append(ask);
+    return k;
+  },
+  logOpen(open) {
+    const k = $("jobCard"); if (!k) return;
+    k.classList.toggle("open", open);
+    gen.logShown = open ? k.dataset.job : null;   // a re-read (the job ending) keeps it open
+    $("jobToggle").textContent = open ? "Hide Log" : "Show Log";
+    if (open) { const b = $("jobLog"); b.scrollTop = b.scrollHeight; }
+  },
+  async answer(id, text) {
+    try { const r = await rpc("job_input", { id: id, text: text }); if (r.ok === false) banner(r.message); }
+    catch (e) { failed(e); }
+  },
+  async follow(id) {
+    if (gen.job === id) return;
+    gen.job = id;
+    let off = 0, wasRunning = null, settle = 0;
+    const tick = async () => {
+      if (gen.job !== id || !$("jobLog")) { gen.job = null; return; }
+      try {
+        const r = await rpc("job_poll", { id: id, offset: off });
+        if (r.ok === false) { gen.job = null; return; }
+        // just ended, its exit code not written yet: still finishing - ask again (up to 5 s) before saying how it ended
+        if (!r.running && r.rc == null && !r.outcome && settle++ < 5) { setTimeout(tick, 1000); return; }
+        const box = $("jobLog");
+        const atEnd = box.scrollTop + box.clientHeight >= box.scrollHeight - 8;
+        let t = r.text || "";
+        if (off === 0) t = t.replace(/^\s*\n/, "");
+        if (t) { box.append(document.createTextNode(t)); if (atEnd) box.scrollTop = box.scrollHeight; }
+        if (off === 0 && r.started) $("jobWhat").textContent = (r.title || "") + " - started " + new Date(r.started * 1000).toLocaleString();
+        off = r.offset;
+        const st = $("jobState");
+        // finished: the toolkit's reading of the menu's own result (a cancel exits 0 too - that's NO CHANGE, not DONE)
+        const oc = r.running ? "running" : (r.outcome || (r.rc === 0 ? "done" : r.rc === 143 ? "stopped" : "failed"));
+        const OC = { running: ["RUNNING", "info"], done: ["DONE", "green"], nochange: ["NO CHANGE", "grey"],
+                     stopped: ["STOPPED", "grey"], failed: ["FAILED", "red"] }[oc] || ["DONE", "green"];
+        st.replaceChildren(...(oc === "running" ? [el("span", "ring"), OC[0]] : [OC[0]]));
+        st.className = "badge t-" + OC[1];
+        $("jobCard").classList.toggle("running", oc === "running");
+        $("jobStop").hidden = !r.running;
+        const lines = box.textContent.split("\n").filter((x) => /[A-Za-z0-9]/.test(x));   // a rule of dashes says nothing
+        // running: its latest line (progress); finished: what it was and when, by the router's clock - its last line
+        // alone said nothing out of context (the badge says how it ended)
+        $("jobLatest").textContent = r.running ? (lines.length ? lines[lines.length - 1].trim() : "Starting")
+          : (r.title || "Job") + " · finished" + (r.ended ? " " + r.ended : "");
+        $("jobLatest").classList.toggle("ended", !r.running);   // a sentence, not a log line
+        if (oc === "failed" || (r.running && r.interactive && /[:?]\s*$/.test(lines[lines.length - 1] || ""))) gen.logOpen(true);
+        const ask = $("jobAsk");
+        if (ask) {
+          const open = !!(r.running && r.interactive);
+          ask.hidden = !open;
+          const last = box.textContent.split("\n").pop() || "";
+          const yn = /\[(y\/N|Y\/n)\]:?\s*$/.test(last);
+          $("jobYes").hidden = !yn; $("jobNo").hidden = !yn;
+          // a password question: the reply box masks what's typed (and the log never shows it)
+          $("jobInput").type = /pass(word|phrase)/i.test(last) ? "password" : "text";
+          if (open && /[:?]\s*$/.test(last) && document.activeElement !== $("jobInput") && !yn) $("jobInput").focus();
+        }
+        if (r.running) { wasRunning = true; setTimeout(tick, 1000); return; }
+        gen.job = null;
+        // it just finished: re-read the screen once (a service it started, a result it saved) - also when it was so
+        // quick that it had already ended by the first poll
+        if (wasRunning || gen.mine === id) { gen.mine = null; gen.load(gen.tab, { quiet: true, force: true, ended: true }); }
+      } catch (e) {
+        gen.job = null;
+        // a flash stops the router's services before it reboots: "signed out" mid-job means it's going down
+        if (e instanceof SignedOut && !wasRunning) return signedOut();
+        gen.reconnect();                  // wait for the router instead of giving up
+      }
+    };
+    tick();
+  },
+  // the router stopped answering mid-job (a firmware update reboots it): say so, ask every 5 s, reload once it's back
+  reconnect() {
+    const t0 = Date.now();
+    let sawDown = false;                  // "signed out" only counts as back once the router has actually gone away
+    banner({ tone: "info", text: "The router isn't answering - it may be restarting (a firmware update takes about 5 minutes). This page reconnects when it's back." });
+    const st = $("jobState"); if (st) { st.textContent = "WAITING"; st.className = "badge t-yellow"; }
+    if ($("jobAsk")) $("jobAsk").hidden = true;
+    const again = async () => {
+      try {
+        await rpc("get_features", {});
+        banner({ tone: "success", text: "The router is back" });
+        gen.load(gen.tab, { force: true });
+      } catch (e) {
+        if (e instanceof SignedOut && (sawDown || Date.now() - t0 > 8 * 60 * 1000)) {
+          return banner({ tone: "warning", text: "The router is back - sign in to the Admin Panel again (an update ends the old session)", link: { text: "Open the Admin Panel", href: "/" } });
+        }
+        if (!(e instanceof SignedOut)) sawDown = true;
+        if (Date.now() - t0 > 20 * 60 * 1000) return banner({ tone: "error", text: "The router hasn't come back in 20 minutes", fix: "Check its power and lights; if it doesn't answer, recover it with GL.iNet's U-Boot web recovery" });
+        setTimeout(again, 5000);
+      }
+    };
+    setTimeout(again, 5000);
+  },
+  startLive(sec) {
+    gen.liveTimer = setInterval(() => {
+      if (document.hidden || busy || OV) return;   // never redraw under an open overlay
+      gen.load(gen.tab, { quiet: true });
+    }, Math.max(1, sec) * 1000);
+  },
+  stopLive() { if (gen.liveTimer) { clearInterval(gen.liveTimer); gen.liveTimer = null; } }
+};
+
+// ===============================================================================================
+// Hardware Information - four tabs, as the menu screen's four pages. System Overview refreshes every
+// second like the menu screen (filesystems every 10th), only while it's the tab showing and the browser
+// tab is visible - an idle page must not load the router.
+// ===============================================================================================
+const TABS = [
+  { id: "overview", title: "System Overview" },
+  { id: "crypto", title: "Hardware Crypto Acceleration" },
+  { id: "network", title: "Network Interfaces" },
+  { id: "wireless", title: "Wireless Interfaces" }
+];
+let tab = "overview", revealed = false, liveTimer = null, liveBusy = false, tick = 0, prevCpu = null;
+
+function stopLive() { if (liveTimer) { clearInterval(liveTimer); liveTimer = null; } }
+function setKey(key, value, tone) {
+  document.querySelectorAll('[data-key="' + key + '"]').forEach((dd) => {
+    const fresh = valueNode(value, tone);
+    dd.replaceChildren(...fresh.childNodes);
+  });
+}
+// CPU usage = the change between two readings - the menu screen's formula
+function cpuUsage(counters) {
+  const [total, idle] = String(counters).split(" ").map(Number);
+  let pct = null;
+  if (prevCpu && total > prevCpu.total) pct = Math.floor(((total - prevCpu.total) - (idle - prevCpu.idle)) * 100 / (total - prevCpu.total));
+  prevCpu = { total, idle };
+  return pct === null ? "-" : pct + "%";
+}
+function fsTable(fs) {
+  const rows = list(fs);
+  if (!rows.length) return null;
+  return tableBlock(list(rows[0]), rows.slice(1).map((r) => list(r)));
+}
+function applyLive(v) {
+  if (!v || !v.mem) return;
+  setKey("uptime", v.uptime);
+  setKey("temp", v.temp, v.temp === "UNKNOWN" ? "yellow" : "fact");
+  if (v.fan) setKey("fan", v.fan);
+  setKey("cpu", cpuUsage(v.cpu));
+  setKey("load", v.load);
+  setKey("mem_free", v.mem.free); setKey("mem_used", v.mem.used);
+  setKey("mem_available", v.mem.available); setKey("mem_buffcache", v.mem.buffcache);
+  if (v.fs) { const box = $("fsBox"); const t = fsTable(v.fs); if (box && t) box.replaceChildren(t); }
+}
+function startLive() {
+  stopLive();
+  liveTimer = setInterval(async () => {
+    if (liveBusy || document.hidden || tab !== "overview" || SCREEN !== "hardware") return;
+    liveBusy = true;
+    tick++;
+    try { applyLive(await rpc("get_live", { fs: tick % 10 === 0 })); }
+    catch (e) { stopLive(); failed(e, "The live values stopped"); }
+    finally { liveBusy = false; }
+  }, 1000);
+}
+
+// the tabs: GL's Log page - they head one card; a screen with one tab has no strip
+function tabStrip(tabs, current, pick) {
+  const bar = $("tabs");
+  // a timed refresh (Fan, Hardware Information) redraws the screen with the same tabs: leave the strip as it is, so
+  // where you scrolled it stays put (rebuilding it scrolled it back to the start every few seconds)
+  const sig = JSON.stringify([current, tabs.map((t) => [t.id, t.title])]);
+  if (bar.dataset.sig === sig && bar.childElementCount) { tabArrows(); return; }
+  bar.dataset.sig = sig;
+  bar.replaceChildren();
+  if (tabs.length < 2) { $("tabwrap").hidden = true; $("panel").classList.remove("tabbed"); return; }
+  tabs.forEach((t) => {
+    const b = btn(t.title, "tab", () => { if (t.id !== current) pick(t.id); });
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", t.id === current ? "true" : "false");
+    bar.append(b);
+  });
+  $("tabwrap").hidden = false;
+  $("panel").classList.add("tabbed");
+  // on a narrow screen the strip scrolls: keep the chosen tab in sight
+  const on = bar.querySelector('[aria-selected="true"]');
+  if (on && bar.scrollWidth > bar.clientWidth) {
+    const l = on.offsetLeft - bar.offsetLeft, r = l + on.offsetWidth;
+    if (l < bar.scrollLeft || r > bar.scrollLeft + bar.clientWidth) bar.scrollLeft = Math.max(0, l - 48);
+  }
+  tabArrows();
+}
+// the chevrons show only while there are tabs out of sight on that side
+function tabArrows() {
+  const bar = $("tabs"), more = bar.scrollWidth - bar.clientWidth;
+  $("tabPrev").hidden = !(more > 2 && bar.scrollLeft > 2);
+  $("tabNext").hidden = !(more > 2 && bar.scrollLeft < more - 2);
+}
+$("tabs").addEventListener("scroll", tabArrows, { passive: true });
+window.addEventListener("resize", () => { if (!$("tabwrap").hidden) tabArrows(); });
+$("content").addEventListener("change", (e) => {
+  if (e.target.classList && e.target.classList.contains("pick")) {
+    if (e.target.type === "radio") (gen.picks = gen.picks || {})[e.target.name] = e.target.value;
+    gen.readAhead(); gen.syncNeeds();
+  }
+});
+// a pickable row (the firmware builds): a click anywhere on it ticks its radio
+$("content").addEventListener("click", (e) => {
+  const tr = e.target.closest("tr"); if (!tr) return;
+  if (e.target.matches("input.pick[type=radio]")) { (gen.picks = gen.picks || {})[e.target.name] = e.target.value; gen.syncNeeds(); return; }
+  if (e.target.closest("input,button,a")) return;
+  const r = tr.querySelector("input.pick"); if (!r) return;
+  if (r.type === "checkbox") r.checked = !r.checked;   // a tick box toggles
+  else if (r.checked) { (gen.picks = gen.picks || {})[r.name] = r.value; gen.syncNeeds(); return; }   // chosen by hand now
+  else r.checked = true;
+  r.dispatchEvent(new Event("change", { bubbles: true }));
+});
+$("tabPrev").addEventListener("click", () => $("tabs").scrollBy({ left: -Math.max(160, $("tabs").clientWidth * 0.7), behavior: "smooth" }));
+$("tabNext").addEventListener("click", () => $("tabs").scrollBy({ left: Math.max(160, $("tabs").clientWidth * 0.7), behavior: "smooth" }));
+function keepTab(id) {
+  try { const u = new URL(location.href); u.searchParams.set("t", id); history.replaceState(null, "", u); } catch (e) {}
+  try { sessionStorage.setItem("glu-tab", SCREEN + "|" + id); } catch (e) {}
+}
+// A browser refresh inside GL's Admin Panel reopens the tab you were on (Vincent 2026-10-16, a documented exception to
+// GL, whose pages reset): GL rebuilds this frame from its fixed address (/glu/?s=<screen>, no tab), so the tab is kept
+// for the browser session with the screen it belongs to. Restored ONLY when GL's page itself was just reloaded (its
+// navigation is a reload and began moments ago) and on the same screen - opening the screen from GL's menu later
+// still starts on the first tab, as GL does
+function reloadTab() {
+  try {
+    if (!embedded || URLP.get("t")) return "";
+    const nav = parent.performance.getEntriesByType("navigation")[0];
+    if (!nav || nav.type !== "reload" || parent.performance.now() > 20000) return "";
+    const [sc, id] = (sessionStorage.getItem("glu-tab") || "").split("|");
+    return sc === SCREEN ? id || "" : "";
+  } catch (e) { return ""; }
+}
+
+const hw = {
+  renderTabs() { tabStrip(TABS, tab, (id) => hw.show(id)); },
+  // System Information alone; CPU | Memory side by side (peers); Storage with the filesystems
+  overview(st) {
+    const out = [];
+    list(st.sections).forEach((s) => {
+      if (s.title === "Storage") return;
+      const opts = { half: s.title === "CPU" || s.title === "Memory" };
+      if (s.title === "System Information") opts.action = btn(revealed ? "Hide" : "Reveal", "small", () => { revealed = !revealed; hw.show("overview"); });
+      const c = card(s.title, opts);
+      c.body.append(rowsList(s.rows));
+      out.push(c);
+    });
+    const sto = list(st.sections).find((s) => s.title === "Storage");
+    const c = card("Storage");
+    if (sto) c.body.append(rowsList(sto.rows));
+    c.body.append(el("h3", "", "Filesystem Usage"));
+    const box = el("div"); box.id = "fsBox"; c.body.append(box);
+    out.push(c);
+    $("content").replaceChildren(...out);
+    prevCpu = null;
+    applyLive(st.live);
+    tick = 0; startLive();
+  },
+  crypto(st) {
+    const out = list(st.sections).map((s) => {
+      const c = card(s.title);
+      c.body.append(rowsList(s.rows));
+      if (st.features && s.title === "Hardware-Accelerated Algorithms") c.body.append(el("p", "note", "CPU features: " + st.features));
+      return c;
+    });
+    $("content").replaceChildren(...out);
+  },
+  network(st) {
+    const n = st.network || {}, out = [];
+    list(n.groups).forEach((g) => {
+      const c = card(g.label);
+      if (g.uplink) c.body.append(el("p", "note", "uplink " + g.uplink));
+      c.body.append(tableBlock(["Port", "Role", "Status", "Link", "Maps to"], list(g.ports).map((p) =>
+        [p.port, p.role, el("span", "badge t-" + p.tone, p.status), p.link, p.maps_to])));
+      out.push(c);
+    });
+    const rows = [];
+    if (n.wan) rows.push({ label: "WAN address", value: n.wan, tone: "fact" });
+    if (n.lan) rows.push({ label: "LAN bridge", value: n.lan, tone: "fact" });
+    if (rows.length) { const c = card("Addresses"); c.body.append(rowsList(rows)); out.push(c); }
+    $("content").replaceChildren(...out);
+  },
+  // one card, the radios as columns: they compare row by row, and any number of radios fits one card
+  wireless(st) {
+    const radios = list(st.radios), c = card("Radios");
+    if (!radios.length) c.body.append(el("p", "terminal-note", "No Wi-Fi radios on this router"));
+    else {
+      const labels = list(radios[0].rows).map((r) => r.label);
+      c.body.append(tableBlock([""].concat(radios.map((r) => r.radio)), labels.map((l) =>
+        [l].concat(radios.map((r) => { const x = list(r.rows).find((y) => y.label === l); return x ? x.value : "-"; })))));
+    }
+    $("content").replaceChildren(c);
+  },
+  async show(id) {
+    stopLive();
+    tab = id;
+    keepTab(id);
+    helpFor = { feature: "hardware", tab: id }; helpAhead();
+    hw.renderTabs();
+    $("content").replaceChildren();
+    loading(true, "Reading the hardware information");
+    try {
+      const st = await rpc("get_status", { feature: "hardware", tab: id, reveal: id === "overview" && revealed });
+      if (st.ok === false && st.message) { loading(false); return banner(st.message); }
+      if (tab !== id) return;            // another tab was chosen meanwhile
+      loading(false);
+      hw[id](st);
+    } catch (e) { failed(e); }
+  },
+  open() {
+    $("title").textContent = "Hardware Information";
+    const want = URLP.get("t") || reloadTab();
+    hw.show(TABS.some((t) => t.id === want) ? want : "overview");
+  }
+};
+document.addEventListener("visibilitychange", () => { if (!document.hidden) prevCpu = null; });
+
+// ---- start ---------------------------------------------------------------------------------------
+(async () => {
+  applyTheme();
+  try {
+    const f = await rpc("get_features", {});
+    if (f.toolkit && f.toolkit.version) $("ver").textContent = "Version " + f.toolkit.version;
+    TOOLKIT_BUILD = (f.toolkit && f.toolkit.build) || "";
+    SCREENS = list(f.features);
+  } catch (e) {
+    if (e instanceof SignedOut) return signedOut();
+    return failed(e);
+  }
+  if (!SCREENS.some((x) => x.id === SCREEN)) SCREEN = (SCREENS[0] || { id: "hardware" }).id;
+  const nav = $("screens");
+  SCREENS.forEach((sc) => {
+    const a = el("a", "", sc.title); a.href = "?s=" + sc.id;
+    if (sc.id === SCREEN) a.setAttribute("aria-current", "page");
+    nav.append(a);
+  });
+  (SCREEN === "hardware" ? hw : gen).open();
+})();
+</script>
+</body>
+</html>
+GLUPAGE
+}
+_webui_write_view() {   # one view per screen: each frames /glu/?s=<id>
+    local id
+    mkdir -p "$WEBUI_VIEW_DIR"
+    rm -f "$WEBUI_VIEW_DIR/gl-sdk4-ui-glutils.common.js.gz"    # the single view the first version wrote
+    for id in $(_webui_screen_ids); do
+        cat << 'GLUVIEW' | sed "s#@SCREEN@#$id#" | gzip -c > "$WEBUI_VIEW_DIR/gl-sdk4-ui-glutils-$id.common.js.gz"
+({
+  // GL.iNet Router Toolkit - one entry in the Admin Panel's "Router Toolkit" menu group. GL loads a view with
+  // eval(), so this file is one Vue component object: it shows the toolkit's page for this screen inside GL's
+  // own frame, as tall as the page says it is (the page posts its height; same origin only).
+  name: "GlutilsView",
+  data: function () { return { height: 480 }; },
+  mounted: function () {
+    var self = this;
+    this.onMessage = function (e) {
+      if (e.origin !== window.location.origin || !e.data || typeof e.data.glutilsHeight !== "number") return;
+      self.height = Math.max(240, Math.ceil(e.data.glutilsHeight));
+    };
+    window.addEventListener("message", this.onMessage);
+  },
+  beforeDestroy: function () { window.removeEventListener("message", this.onMessage); },
+  render: function (h) {
+    return h("div", { style: { width: "100%" } }, [
+      h("iframe", {
+        attrs: { src: "/glu/?s=@SCREEN@", title: "GL.iNet Router Toolkit" },
+        style: { width: "100%", height: this.height + "px", border: "0", display: "block", background: "transparent" }
+      })
+    ]);
+  }
+})
+GLUVIEW
+    done
+}
+# The "ROUTER TOOLKIT" group (a caret group like GL's own): one level-2 entry per screen sharing the parent
+# "glutils" - GL's sidebar titles the group from parent_title and orders it by parent_index. Every network mode.
+_webui_write_menu() {
+    local id title idx
+    mkdir -p "$WEBUI_MENU_DIR"
+    rm -f "$WEBUI_MENU_DIR/glutils.json"        # the single top-level entry the first version wrote
+    _webui_screens > "$WEBUI_MENU_DIR/.glutils.$$"
+    while IFS='|' read -r id title idx; do
+        printf '%s\n' '{' "    \"index\": $idx," "    \"view\": \"glutils-$id\"," "    \"title\": \"$title\"," '    "level": 2,' \
+            '    "parent": "glutils",' '    "parent_title": "Router Toolkit",' '    "parent_icon": "tools",' '    "parent_index": 95,' \
+            '    "show_mode": ["router", "wds", "relay", "mesh", "ap", "agent"]' '}' > "$WEBUI_MENU_DIR/glutils-$id.json"
+    done < "$WEBUI_MENU_DIR/.glutils.$$"
+    rm -f "$WEBUI_MENU_DIR/.glutils.$$"
+}
+# The live sampler: the toolkit's OWN live-value functions copied into a small file, so the page's 1-second
+# refresh costs milliseconds instead of a full toolkit start (1 s of CPU on a MIPS router). Copied from the
+# running toolkit, so the numbers are the menus' numbers; re-written whenever the page is.
+_webui_sampler_src() { echo "$SCRIPT_PATH"; }   # the running toolkit (the e2e points it at the build under test)
+_webui_write_sampler() {
+    local fns="get_cpu_temp get_fan_speed _mem_bucket get_mem_stats hw_uptime_text hw_cpu_counters hw_load_text hw_temp_text hw_fan_text hw_fs_rows hw_live_json"
+    mkdir -p "$(dirname "$WEBUI_LIVE")"
+    {
+        printf '#!/bin/sh\n# GL.iNet Router Toolkit - Hardware Information live values for the Admin Panel page.\n'
+        printf '# Written by glinet_utils from its own functions (do not edit - it is re-written with the page).\n'
+        awk -v want=" $fns " '
+            !inside && match($0, /^[a-z_][a-z0-9_]*\(\)/) {
+                n = substr($0, 1, RLENGTH - 2)
+                if (index(want, " " n " ")) { print; if ($0 ~ /\}[ \t]*(#.*)?$/) next; inside = 1; next }
+            }
+            inside { print; if ($0 ~ /^}/) inside = 0 }' "$(_webui_sampler_src)"
+        printf 'exec </dev/null\nhw_live_json "$1"\n'
+    } > "$WEBUI_LIVE"
+    chmod 755 "$WEBUI_LIVE"
+    sh "$WEBUI_LIVE" | grep -q '"uptime"'      # it works on this router, or the page isn't enabled
+}
+_webui_write_nginx() {   # GL serves .html as DENY-framing; the toolkit's page may be framed by the Admin Panel only
+    printf '%s\n' '# GL.iNet Router Toolkit (glinet_utils): its Admin Panel page, framed by the Admin Panel only.' \
+        'location ^~ /glu/ {' '    add_header X-Frame-Options SAMEORIGIN;' '    add_header Cache-Control "no-store";' '}' > "$WEBUI_NGINX"
+}
+# validate, then have GL's nginx (the one serving the Admin Panel) re-read its config and Lua modules
+_webui_nginx_reload() {
+    local p c hup=0
+    nginx -t >/dev/null 2>&1 || return 1
+    for p in /proc/[0-9]*; do
+        c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+        case "$c" in "nginx: master process"*"/etc/nginx/nginx.conf"*) kill -HUP "${p#/proc/}" 2>/dev/null && hup=1 ;; esac
+    done
+    [ "$hup" = 1 ] || /etc/init.d/nginx reload >/dev/null 2>&1
+    sleep 2
+}
+webui_enable() {   # write every file, reload, verify the page is served; 0 only when it is
+    local paths i=0
+    webui_supported && _webui_toolkit_ok || return 1
+    paths="\"$INSTALL_PATH\""
+    if [ "$SCRIPT_PATH" != "$INSTALL_PATH" ] && _is_toolkit_file "$SCRIPT_PATH"; then
+        case "$SCRIPT_PATH" in /tmp/*) ;; *) paths="$paths, \"$SCRIPT_PATH\"" ;; esac
+    fi
+    _webui_write_rpc "$paths" && _webui_write_page && _webui_write_sampler && _webui_write_view && _webui_write_menu && _webui_write_nginx || return 1
+    if ! _webui_nginx_reload; then rm -f "$WEBUI_NGINX"; return 1; fi
+    md5sum < "$(_webui_sampler_src)" | cut -c1-32 > "$WEBUI_BUILD"   # which toolkit wrote these files
+    # back after a firmware update too - when the toolkit itself is installed (the boot service runs that copy)
+    toolkit_is_installed && glpersist_enable webui >/dev/null 2>&1
+    # right after boot the Admin Panel's server may still be starting
+    until _webui_serving; do i=$((i + 1)); [ "$i" -ge 15 ] && return 1; sleep 2; done
+}
+webui_disable() {   # remove every file, reload; 0 once the page is gone
+    rm -f $(_webui_files)
+    rmdir "$(dirname "$WEBUI_PAGE")" "$(dirname "$WEBUI_LIVE")" 2>/dev/null
+    glpersist_is_on webui && glpersist_disable webui
+    _webui_nginx_reload
+    ! _webui_serving
+}
+# Toolkit Management item: Enable / Disable Admin Panel Page (the label follows the state)
+webui_toggle() {
+    case "$(webui_state)" in
+        ENABLED|SERVICE_DOWN)
+            if spin_run "Removing the toolkit from the Admin Panel" webui_disable; then
+                print_success "Admin Panel page disabled"
+            else
+                fail_report "The Admin Panel page could not be removed completely" "" "Retry, or reboot the router and retry"
+            fi ;;
+        DISABLED)
+            if ! _webui_toolkit_ok; then
+                print_error "The Admin Panel page needs a saved copy of the toolkit - install it first (item 1)"
+            elif spin_run "Adding the toolkit to the Admin Panel" webui_enable; then
+                print_success "Admin Panel page enabled"
+                print_info "Choose Router Toolkit in the Admin Panel menu, or open $(webui_url)"
+            else
+                fail_report "The Admin Panel page did not come up" "$(tail -3 /var/log/nginx/error.log 2>/dev/null)" \
+                    "Check that the Admin Panel itself loads, then retry"
+            fi ;;
+    esac
+    press_any_key
+}
+# The page's files are written FROM the toolkit, so a toolkit update leaves them behind until they're written
+# again: at startup, when the running toolkit isn't the one that wrote them, write them again (quietly - the
+# page simply shows the new version). Keyed on a checksum, so a same-version build counts too.
+_webui_refresh_if_stale() {
+    # present in ANY layout (the first version had one menu entry) counts - an older layout is stale too
+    [ -f "$WEBUI_RPC" ] && [ -f "$WEBUI_PAGE" ] && webui_supported && _webui_toolkit_ok || return 0
+    webui_installed && [ "$(cat "$WEBUI_BUILD" 2>/dev/null)" = "$(md5sum < "$(_webui_sampler_src)" | cut -c1-32)" ] && return 0
+    if spin_run "Updating the Admin Panel page" webui_enable; then return 0; fi
+    fail_report "The Admin Panel page could not be updated" "" "Turn it off and on again in Toolkit Management"
+}
+
+# One-time offer at startup (like the install prompt): "n" points to Toolkit Management and isn't asked
+# again until the next update - the answer lives in this file (WEBUI_PROMPTED), which an update replaces
+check_webui_prompt() {
+    local ans
+    [ "${WEBUI_PROMPTED:-0}" = 1 ] && return 0
+    webui_supported && _webui_toolkit_ok && ! webui_installed || return 0
+    print_info "The toolkit can add a Router Toolkit page to the GL.iNet Admin Panel menu"
+    printf "Add it to the Admin Panel? [Y/n]: "; read -r ans; printf "\n"
+    case "$ans" in
+        n|N)
+            # (the line carries a comment, so match the start - a "=0$" match never fired)
+            sed -i 's/^WEBUI_PROMPTED=0/WEBUI_PROMPTED=1/' "$SCRIPT_PATH"
+            print_info "Skipping. You can add it later via System Tweaks → Toolkit Management." ;;
+        *)
+            if spin_run "Adding the toolkit to the Admin Panel" webui_enable; then
+                print_success "Admin Panel page enabled - choose Router Toolkit in the Admin Panel menu"
+            else
+                fail_report "The Admin Panel page did not come up" "$(tail -3 /var/log/nginx/error.log 2>/dev/null)" \
+                    "Add it later via System Tweaks → Toolkit Management"
+            fi ;;
+    esac
 }
 
 # =============================================================================
@@ -11432,6 +14297,52 @@ _mtu_rec_now() {   # <iface> <endpoint> <overhead> [outfile]
     if [ -n "${4:-}" ]; then printf '%s' "$r" > "$4"; else printf '%s' "$r"; fi
 }
 
+# one tunnel's MTU picture (the menu page and the Admin Panel card): <mtu_detect line> -> type role iface endpoint
+# overhead family cur underlay underlay_mtu rec vline vplain rec_display source_label sec _st stcol _m_opt _m_keys
+_mtu_state() {
+    local line="$1" _c v
+    oldifs=$IFS; IFS='|'; set -- $line; IFS=$oldifs
+    type="$1"; role="$2"; iface="$3"; endpoint="$4"; overhead="$5"; family="$6"
+
+    cur=$(mtu_get "$iface")
+    _c=$(_mtu_calc "$endpoint" "$overhead"); underlay=${_c%%|*}; _c=${_c#*|}; underlay_mtu=${_c%%|*}; rec=${_c#*|}
+    # A fresh probe-verified value outranks the calculation - it measured the
+    # actual path. mtu_v_get reports STALE when the link or endpoint changed
+    # since the probe, and the display drops back to Calculated.
+    vline=""; v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+    case "$v" in
+        "OK|"*)
+            rec=$(printf '%s' "$v" | cut -d'|' -f2)
+            vkind=$(printf '%s' "$v" | cut -d'|' -f3)
+            vtgt=$(printf '%s' "$v" | cut -d'|' -f4)
+            vdate=$(printf '%s' "$v" | cut -d'|' -f5)
+            vplain="VERIFIED (${vdate}, ${vkind} probe to ${vtgt})"; vline="${GREEN}VERIFIED${RESET} (${vdate}, ${vkind} probe to ${vtgt})" ;;
+        "STALE|"*)
+            vplain="STALE (link changed since the last probe)"; vline="${YELLOW}STALE${RESET} (link changed since the last probe)" ;;
+        *)
+            vplain="CALCULATED (from the link MTU, not probed)"; vline="${GREY}CALCULATED${RESET} (from the link MTU, not probed)" ;;
+    esac
+    if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then
+        rec_display="${GREEN}${rec}${RESET}   (optimal)"
+    elif [ -n "$rec" ]; then
+        if [ "${cur:-0}" -lt "$rec" ] 2>/dev/null; then rec_display="${YELLOW}${rec}${RESET}   (can raise)"; else rec_display="${YELLOW}${rec}${RESET}   (should lower)"; fi
+    else
+        rec_display="${YELLOW}UNKNOWN${RESET} (endpoint not resolved)"
+    fi
+    sec=$(mtu_gl_targets "$iface" "$type" | head -1); source_label=""
+    if [ -n "$sec" ]; then
+        if uci -q get "$sec.mtu" >/dev/null 2>&1; then source_label="   (override)"; else source_label="   (default)"; fi
+    fi
+    # Role-aware interface state: connected/disconnected for a client, up/down
+    # for a server, with the WireGuard handshake age carried through.
+    _st=$(vpn_state_label "$iface" "$type" "$role")
+    case "$_st" in CONNECTED*|UP*) stcol="$GREEN" ;; *) stcol="$RED" ;; esac
+    # Divider is drawn to the WIDEST rendered line (identity / Basis / nav footer),
+    # measured from each line's plain text so colour codes don't count.
+    _idp="$type $role: $iface     Status: $_st"
+    _m_opt=1; _m_keys="1/2/3"; { [ -z "$rec" ] || [ "$cur" = "$rec" ]; } && _m_opt=0
+    [ "$source_label" = "   (override)" ] && _m_keys="1/2/3/4"
+}
 manage_mtu() {
     local tf count pg pv nx line oldifs type role iface endpoint overhead family
     local cur underlay underlay_mtu rec rec_display source_label sec vline vplain v vkind vtgt vdate
@@ -11451,47 +14362,7 @@ manage_mtu() {
 
         # The tunnel on this page.
         line=$(sed -n "${pg}p" "$tf")
-        oldifs=$IFS; IFS='|'; set -- $line; IFS=$oldifs
-        type="$1"; role="$2"; iface="$3"; endpoint="$4"; overhead="$5"; family="$6"
-
-        cur=$(mtu_get "$iface")
-        _c=$(_mtu_calc "$endpoint" "$overhead"); underlay=${_c%%|*}; _c=${_c#*|}; underlay_mtu=${_c%%|*}; rec=${_c#*|}
-        # A fresh probe-verified value outranks the calculation - it measured the
-        # actual path. mtu_v_get reports STALE when the link or endpoint changed
-        # since the probe, and the display drops back to Calculated.
-        vline=""; v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
-        case "$v" in
-            "OK|"*)
-                rec=$(printf '%s' "$v" | cut -d'|' -f2)
-                vkind=$(printf '%s' "$v" | cut -d'|' -f3)
-                vtgt=$(printf '%s' "$v" | cut -d'|' -f4)
-                vdate=$(printf '%s' "$v" | cut -d'|' -f5)
-                vplain="VERIFIED (${vdate}, ${vkind} probe to ${vtgt})"; vline="${GREEN}VERIFIED${RESET} (${vdate}, ${vkind} probe to ${vtgt})" ;;
-            "STALE|"*)
-                vplain="STALE (link changed since the last probe)"; vline="${YELLOW}STALE${RESET} (link changed since the last probe)" ;;
-            *)
-                vplain="CALCULATED (from the link MTU, not probed)"; vline="${GREY}CALCULATED${RESET} (from the link MTU, not probed)" ;;
-        esac
-        if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then
-            rec_display="${GREEN}${rec}${RESET}   (optimal)"
-        elif [ -n "$rec" ]; then
-            if [ "${cur:-0}" -lt "$rec" ] 2>/dev/null; then rec_display="${YELLOW}${rec}${RESET}   (can raise)"; else rec_display="${YELLOW}${rec}${RESET}   (should lower)"; fi
-        else
-            rec_display="${YELLOW}UNKNOWN${RESET} (endpoint not resolved)"
-        fi
-        sec=$(mtu_gl_targets "$iface" "$type" | head -1); source_label=""
-        if [ -n "$sec" ]; then
-            if uci -q get "$sec.mtu" >/dev/null 2>&1; then source_label="   (override)"; else source_label="   (default)"; fi
-        fi
-        # Role-aware interface state: connected/disconnected for a client, up/down
-        # for a server, with the WireGuard handshake age carried through.
-        _st=$(vpn_state_label "$iface" "$type" "$role")
-        case "$_st" in CONNECTED*|UP*) stcol="$GREEN" ;; *) stcol="$RED" ;; esac
-        # Divider is drawn to the WIDEST rendered line (identity / Basis / nav footer),
-        # measured from each line's plain text so colour codes don't count.
-        _idp="$type $role: $iface     Status: $_st"
-        local _m_opt=1 _m_keys="1/2/3"; { [ -z "$rec" ] || [ "$cur" = "$rec" ]; } && _m_opt=0
-        [ "$source_label" = "   (override)" ] && _m_keys="1/2/3/4"
+        _mtu_state "$line"
         _navp="[P] Previous   Page $pg of $count   [N] Next   [$_m_keys]   [0] Back   [?] Help"
         _w=$(( 17 + ${#vplain} ))
         [ $(( ${#_idp} + 1 )) -gt "$_w" ] && _w=$(( ${#_idp} + 1 ))
@@ -12945,7 +15816,7 @@ rla_do_lever3() {
 # tunnel scan, and sets the remote LAN ONLY when the answer is a single eligible
 # subnet. No countdown, no prompts, no "press any key" - it just flows into the
 # screen. The ambiguous, multi-result and manual cases are left for the explicit
-# [2] "Detect or set the remote LAN subnet" action, which stays interactive.
+# [2] "Detect or Set the Remote LAN" action, which stays interactive.
 rla_autodetect() {
     rla_ctx "$1" "$2" "$3"; _ad_if="$A_IF"
     _ad_v=$(d_config "$_ad_if" "$A_TY" 2>/dev/null)
@@ -12996,7 +15867,7 @@ rla_do_detect() {
     fi
     if [ -n "$_known" ]; then
         print_success "Remote LAN is $_known  (from $_kdisp)"
-        printf 'Keep this? [Y/n]: '; read -r _a; printf '\n'
+        printf 'Keep this? [Y/n]: '; read_ans RLA_ANS_KEEP; _a=$REPLY; printf '\n'
         case "$_a" in
             n|N) _known="" ;;
             *)   if [ -n "$_ktok" ] && ! d_store "$ifc" "$_known" "$_ktok" >/dev/null 2>&1; then
@@ -13024,7 +15895,7 @@ rla_do_detect() {
         if [ -z "$_hits" ]; then
             print_warning "No remote LAN answered on the common subnets"
             printf 'Run a full scan (every private /24, ~30s)? [y/N]: '
-            read -r _a; printf '\n'
+            read_ans RLA_ANS_FULL; _a=$REPLY; printf '\n'
             case "$_a" in
                 y|Y)
                     command -v fping >/dev/null 2>&1 || spin_run "Installing fping" install_package fping
@@ -13068,21 +15939,27 @@ rla_do_detect() {
     #    just scanned and came up empty, say so first, so the manual prompt has a
     #    reason (the pick-list "type one" path has hits, so it stays silent).
     [ "$_scanned" = 1 ] && [ -z "$_hits" ] && print_warning "No remote LAN found automatically"
+    if [ -n "${GLU_JOB:-}" ]; then   # the Admin Panel: its form's Subnet box is the manual entry
+        [ -n "$_hits" ] && print_info "Enter the right one in Remote LAN subnet and run Detect or Set again"
+        print_info "Left unknown - routing to the remote LAN needs a subnet first"; return
+    fi
     printf 'Enter the remote LAN subnet manually (e.g. 192.168.2.0/24), or press Enter to leave it unknown: '
     read -r _in; printf '\n'
-    if [ -n "$_in" ]; then
-        case "$_in" in */*) ;; *) print_error "Needs a prefix length, e.g. 192.168.2.0/24"; press_any_key; return ;; esac
-        if guard_overlap "$A_LAN" "$_in"; then
-            print_error "Refused: $_in overlaps this router's LAN $A_LAN"
-            print_info "Remote LAN access cannot work between two identical subnets"
-            press_any_key; return
-        fi
-        if d_store "$ifc" "$_in" manual; then print_success "Remote LAN set to $_in"
-        else print_error "Could not store that subnet"; fi
-    else
-        print_info "Left unknown - routing to the remote LAN needs a subnet first"
-    fi
+    if [ -n "$_in" ]; then rla_set_remote_lan "$ifc" "$_in"
+    else print_info "Left unknown - routing to the remote LAN needs a subnet first"; fi
     press_any_key
+}
+# The remote LAN typed by hand (the menu's manual entry and the Admin Panel form's Subnet box), checked first.
+# Needs rla_ctx (A_LAN).
+rla_set_remote_lan() {   # <ifc> <subnet>
+    case "$2" in */*) ;; *) print_error "Needs a prefix length, e.g. 192.168.2.0/24"; return 1 ;; esac
+    if guard_overlap "$A_LAN" "$2"; then
+        print_error "Refused: $2 overlaps this router's LAN $A_LAN"
+        print_info "Remote LAN access cannot work between two identical subnets"
+        return 1
+    fi
+    if d_store "$1" "$2" manual; then print_success "Remote LAN set to $2"
+    else print_error "Could not store that subnet"; return 1; fi
 }
 
 # ---- Remote LAN Access screen ------------------------------------------------
@@ -13156,15 +16033,15 @@ rla_rows() {                            # status|from|as|to|change
                 continue
             else _to="$_rlan"; _sm="$tr"; _sr="$lr"; fi
             if [ "$_masq" = on ]; then
-                echo "$(rla_stat "$_sm")|$_lo|$_tun|$_to|Opt 3 stops masquerading"
-                echo "$(rla_stat "$_sm")|$_lanip|$_tun|$_to|Opt 3 stops masquerading"
-                echo "$(rla_stat "$_sr")|$_lo|$_lo|$_to|Masquerading is on - opt 3"
-                echo "$(rla_stat "$_sr")|$_lanip|$_lanip|$_to|Masquerading is on - opt 3"
+                echo "$(rla_stat "$_sm")|$_lo|$_tun|$_to|Opt 3 shows real addresses"
+                echo "$(rla_stat "$_sm")|$_lanip|$_tun|$_to|Opt 3 shows real addresses"
+                echo "$(rla_stat "$_sr")|$_lo|$_lo|$_to|IP Masquerading is on - opt 3"
+                echo "$(rla_stat "$_sr")|$_lanip|$_lanip|$_to|IP Masquerading is on - opt 3"
             else
-                echo "$(rla_stat "$_sm")|$_lo|$_tun|$_to|Masquerading is off - opt 3"
-                echo "$(rla_stat "$_sm")|$_lanip|$_tun|$_to|Masquerading is off - opt 3"
-                echo "$(rla_stat "$_sr")|$_lo|$_lo|$_to|Opt 2 hides devices behind $_tun"
-                echo "$(rla_stat "$_sr")|$_lanip|$_lanip|$_to|Opt 2 hides devices behind $_tun"
+                echo "$(rla_stat "$_sm")|$_lo|$_tun|$_to|IP Masquerading is off - opt 3"
+                echo "$(rla_stat "$_sm")|$_lanip|$_tun|$_to|IP Masquerading is off - opt 3"
+                echo "$(rla_stat "$_sr")|$_lo|$_lo|$_to|Opt 3 hides devices behind $_tun"
+                echo "$(rla_stat "$_sr")|$_lanip|$_lanip|$_to|Opt 3 hides devices behind $_tun"
             fi
         done
         echo "$(rla_stat "$tp")|$_tun|$_tun|$_peer|this router to the tunnel peer"
@@ -13189,7 +16066,7 @@ rla_rows() {                            # status|from|as|to|change
             for _s in "${_rbase%.*}.2-254$_sfx" "${_rbase%.*}.1$_sfx"; do
                 echo "$_ai|$_s|$_peer|$_tun|$_ah"
                 echo "$_ai|$_s|$_peer|$_lan|$_ah"
-                echo "REMOTE|$_s|$_s|$_tun|Remote must stop masquerading"
+                echo "REMOTE|$_s|$_s|$_tun|Remote must turn IP Masquerading off"
                 echo "REMOTE|$_s|$_s|$_lan|Remote must route your LAN"
             done
         fi
@@ -13312,25 +16189,29 @@ manage_remote_lan_access() {
         # is outbound-only.
         if [ "$dir" = out ]; then
             if [ "$rlan" != unknown ] && rla_routes_via "${rlan%†}" "$iface" 2>/dev/null
-            then _o1="[1] Disable routing to the remote LAN"
-            else _o1="[1] Enable routing to the remote LAN"; fi
+            then _o1="[1] Disable Routing to the Remote LAN"
+            else _o1="[1] Enable Routing to the Remote LAN"; fi
             if [ "$(rla_masq "$(rla_zone "$iface")")" = on ]
-            then _o3="[3] Disable masquerade (show my devices' real addresses)"
-            else _o3="[3] Enable masquerade (hide my devices behind $tun)"; fi
+            then _o3="[3] Disable IP Masquerading (show my devices' real addresses)"
+            else _o3="[3] Enable IP Masquerading (hide my devices behind $tun)"; fi
             printf ' %s\n' "$_o1"
-            printf ' %s\n' "[2] Detect or set the remote LAN subnet"
+            printf ' %s\n' "[2] Detect or Set the Remote LAN"
             printf ' %s\n' "$_o3"
             _opts="1-3"
         else
             if [ "$(rla_access "$(rla_zone "$iface")")" = on ]
-            then _o1="[1] Disable inbound access from the remote LAN"
-            else _o1="[1] Enable inbound access from the remote LAN"; fi
+            then _o1="[1] Disable Inbound Access from the Remote LAN"
+            else _o1="[1] Enable Inbound Access from the Remote LAN"; fi
             printf ' %s\n' "$_o1"
-            printf ' %s\n' "[2] Detect or set the remote LAN subnet"
+            printf ' %s\n' "[2] Detect or Set the Remote LAN"
             _opts="1-2"
         fi
         case "$_opts" in 1-3) _keys="1/2/3" ;; *) _keys="1/2" ;; esac
         printf '\n [P] Previous   Page %s of %s   [N] Next   [%s]   [0] Back   [?] Help  ' "$pg" "$np" "$_keys"
+        if [ -n "${GLU_JOB:-}" ]; then
+            [ "$pg" -ge "$np" ] && { rm -f /tmp/rla_pages.$$ "$RLA_MCACHE".*; return; }
+            pg=$nx; printf '\n'; continue
+        fi
         c=$(read_single_char); printf '\n\n'
         case "$c" in
             1) rla_do_lever2 "$iface" "$type" "$role" "$dir"
@@ -13448,12 +16329,13 @@ The actions
 ───────────
 Status is measured live on entry and re-checked after any change, so there is no
 separate "test" step. The toggles state what pressing them will do right now:
-  • Enable / Disable routing to the remote LAN    - outbound.
-  • Enable / Disable masquerade                    - outbound; hide your devices
-                        behind the tunnel address, or show their real addresses.
-  • Enable / Disable inbound access                - let the remote LAN reach you.
-  • Detect or set the remote LAN subnet            - refuses one that overlaps
-                        your own LAN.
+  • Enable / Disable Routing to the Remote LAN    - outbound.
+  • Enable / Disable IP Masquerading               - outbound; hide your devices
+                        behind the tunnel address, or show their real addresses
+                        (GL.iNet's "IP Masquerading" VPN setting).
+  • Enable / Disable Inbound Access                - let the remote LAN reach you.
+  • Detect or Set the Remote LAN                   - its subnet; refuses one that
+                        overlaps your own LAN.
 
 Notes
 ─────
@@ -13606,6 +16488,12 @@ pkg_db_restore() {
     print_warning "This overwrites the current installed database with the backup from $(bk_date "$ts_sel")."
     printf "Restore this backup? [y/N]: "; read -r yn; printf "\n"
     case "$yn" in y|Y) ;; *) print_info "Restore cancelled"; press_any_key; return ;; esac
+    pkg_db_restore_ts "$ts_sel"
+    press_any_key
+}
+# Put one database backup back, then check opkg parses it (the menu's Restore and the Admin Panel page's)
+pkg_db_restore_ts() {   # <ts>
+    local _db _ns ts_sel="$1"; _db="$(pkg_db_path)"; _ns="$(pkg_db_ns)"
     if bk_restore "$_ns" "$ts_sel" "$_db"; then
         spin_run "Verifying the package index" pkg_update
         if tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
@@ -13615,9 +16503,8 @@ pkg_db_restore() {
         fi
         rm -f "$SPIN_LOG" 2>/dev/null
     else
-        print_error "Could not restore the selected backup"
+        print_error "Could not restore the selected backup"; return 1
     fi
-    press_any_key
 }
 
 # Multi-select cleanup, mirroring the AdGuardHome Backup Cleanup (delete_agh_backups): a persistent
@@ -13791,7 +16678,7 @@ _pkg_db_repair_flow() {
         printf "   restored from read-only firmware. This gets opkg working again, but resets its record of\n"
         printf "   installed packages to the factory set - anything you added stays on disk, but opkg no longer\n"
         printf "   tracks it (reinstall to re-register). Your data, settings and configs are untouched.\n\n"
-        printf "Restore the factory package database now? [y/N]: "; local _r; read -r _r; printf "\n"
+        printf "Restore the factory package database now? [y/N]: "; local _r; read_ans PKG_ANS_FACTORY; _r=$REPLY; printf "\n"
         case "$_r" in
             y|Y) cp "$(pkg_db_rom)" "$_db" 2>/dev/null
                  spin_run "Verifying the package index" pkg_update
@@ -13829,7 +16716,7 @@ _pkg_db_repair_apk() {
     printf "\n"
     print_info "If the package database is still misbehaving, the factory copy can be restored from"
     printf "   read-only firmware - lossy: apk forgets post-factory package records, but the files stay.\n\n"
-    printf "Restore the factory package database from /rom now? [y/N]: "; local _r; read -r _r; printf "\n"
+    printf "Restore the factory package database from /rom now? [y/N]: "; local _r; read_ans PKG_ANS_FACTORY; _r=$REPLY; printf "\n"
     case "$_r" in
         y|Y) cp "$(pkg_db_rom)" "$(pkg_db_path)" 2>/dev/null
              spin_run "Refreshing the package index" pkg_update
@@ -13871,7 +16758,7 @@ pkg_repair_now() {   # offered only when STATUS shows a problem (healthy -> the 
     printf "\n"
     print_warning "The cache was rebuilt but the installed database still can't be parsed"
     printf "   A safe end-of-file repair is tried first, before anything drastic.\n\n"
-    printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
+    printf "Repair the installed database now? [y/N]: "; read_ans PKG_ANS_REPAIR; yn=$REPLY; printf "\n"
     case "$yn" in
         y|Y) _pkg_db_repair_flow ;;
         *) print_info "Database left unchanged" ;;
@@ -13901,7 +16788,7 @@ pkg_db_repair_action() {
     if [ ! -f "$_db" ]; then print_error "No installed database found at $_db"; press_any_key; return; fi
     print_warning "This repairs the installed package database ($_db)"
     printf "   A safe end-of-file repair is tried first, before anything drastic.\n\n"
-    printf "Repair the installed database now? [y/N]: "; read -r yn; printf "\n"
+    printf "Repair the installed database now? [y/N]: "; read_ans PKG_ANS_REPAIR; yn=$REPLY; printf "\n"
     case "$yn" in
         y|Y) _pkg_db_repair_flow ;;
         *) print_info "Database left unchanged" ;;
@@ -14099,21 +16986,37 @@ _fw_catalog() {
     return $got
 }
 _fw_field() { printf '%s' "$1" | cut -d'|' -f"$2"; }   # <row> <n>
+# What installing a build means, as the build pickers label it (menu + Admin Panel): UPDATE / DOWNGRADE within the
+# installed channel, SAME for the installed build, INSTALL for another channel - up or down depends on your point of view
+# there (Stable -> OpenWrt 25), so it isn't called either. The install's downgrade warning still follows _fw_direction.
+_fw_plan() { printf '0|%s\n' "$1" | _fw_table_rows | cut -d'|' -f2; }   # <row> -> UPDATE / DOWNGRADE / INSTALL / SAME
 # dotted-version compare: prints -1 / 0 / 1 for $1 vs $2
 _fw_vercmp() { awk -v a="$1" -v b="$2" 'BEGIN{na=split(a,x,".");nb=split(b,y,".");n=na>nb?na:nb
     for(i=1;i<=n;i++){p=x[i]+0;q=y[i]+0;if(p>q){print 1;exit}if(p<q){print -1;exit}}print 0}'; }
-# Where a target build sits relative to the installed one: UPGRADE / DOWNGRADE / SAME.
-_fw_direction() {   # <row>
-    local v b c; v=$(_fw_field "$1" 10); b=$(_fw_field "$1" 8); c=$(_fw_vercmp "$v" "${FW_CUR_VER%%-op*}")
-    case "$c" in 1) echo UPGRADE; return ;; -1) echo DOWNGRADE; return ;; esac
-    if [ "${b:-0}" -gt 0 ] && [ "${FW_CUR_BUILD:-0}" -gt 0 ]; then
-        [ "$b" -gt "$FW_CUR_BUILD" ] && { echo UPGRADE; return; }
-        [ "$b" -lt "$FW_CUR_BUILD" ] && { echo DOWNGRADE; return; }
-        [ "$(_fw_field "$1" 1)" = "$FW_CUR_CHAN" ] && { echo SAME; return; }
-    fi
-    [ "$(_fw_field "$1" 2)" = "$FW_CUR_LABEL" ] && [ "$(_fw_field "$1" 1)" = "$FW_CUR_CHAN" ] && { echo SAME; return; }
-    echo UPGRADE
+# Where builds sit relative to the installed one - the ONE place the rules live (the menu's picker, the page's table, the
+# install's warnings all read it): direction UPGRADE / DOWNGRADE / SAME by version, then build number, then label; the
+# plan (what a picker calls it) UPDATE / DOWNGRADE in your channel, INSTALL for another, SAME for the installed build.
+# One awk pass for a whole list (the page's table took a cut / awk per field per build: 0.7 s on MIPS).
+# < "idx|<row>" lines -> idx|PLAN|channel|label|released|MB|DIRECTION
+_fw_table_rows() {
+    awk -F'|' -v cv="${FW_CUR_VER%%-op*}" -v cb="${FW_CUR_BUILD:-0}" -v cc="$FW_CUR_CHAN" -v cl="$FW_CUR_LABEL" '
+        function vercmp(a, b,   x, y, na, nb, n, i, p, q) { na = split(a, x, "."); nb = split(b, y, "."); n = na > nb ? na : nb
+            for (i = 1; i <= n; i++) { p = x[i] + 0; q = y[i] + 0; if (p > q) return 1; if (p < q) return -1 }
+            return 0 }
+        { ch = $2; lb = $3; bd = $9; d = ""; c = vercmp($11, cv)
+          if (c == 1) d = "UPGRADE"
+          else if (c == -1) d = "DOWNGRADE"
+          else {
+              if (bd ~ /^[0-9]+$/ && bd + 0 > 0 && cb ~ /^[0-9]+$/ && cb + 0 > 0) {
+                  if (bd + 0 > cb + 0) d = "UPGRADE"; else if (bd + 0 < cb + 0) d = "DOWNGRADE"; else if (ch == cc) d = "SAME"
+              }
+              if (d == "" && lb == cl && ch == cc) d = "SAME"
+              if (d == "") d = "UPGRADE"
+          }
+          if (d == "SAME") p = "SAME"; else if (ch != cc) p = "INSTALL"; else if (d == "DOWNGRADE") p = "DOWNGRADE"; else p = "UPDATE"
+          printf "%s|%s|%s|%s|%s|%d|%s\n", $1, p, ch, lb, $10, int(($7 + 524288) / 1048576), d }'
 }
+_fw_direction() { printf '0|%s\n' "$1" | _fw_table_rows | cut -d'|' -f7; }   # <row> -> UPGRADE / DOWNGRADE / SAME
 # Update state for the INSTALLED channel: FW_UPD = AVAILABLE / UPTODATE / UNKNOWN, FW_UPD_ROW = the newest build.
 _fw_update_state() {
     FW_UPD=UNKNOWN; FW_UPD_ROW=""
@@ -14122,10 +17025,14 @@ _fw_update_state() {
     [ -n "$FW_UPD_ROW" ] || return 0
     [ "$(_fw_direction "$FW_UPD_ROW")" = UPGRADE ] && FW_UPD=AVAILABLE || FW_UPD=UPTODATE
 }
+# When GL.iNet's catalogue was read: the Update status is as of then (the page keeps it up to an hour; Check for
+# Updates reads it again) - so it says so, instead of an UP TO DATE that could be an hour old
+_fw_checked() { [ -s "$FW_TMP/cat" ] && date -r "$FW_TMP/cat" '+%Y-%m-%d %H:%M' 2>/dev/null; }
 _fw_upd_disp() {
+    local ck; ck=$(_fw_checked)
     case "$FW_UPD" in
-        AVAILABLE) printf '%bAVAILABLE%b (%s)' "$YELLOW" "$RESET" "$(_fw_field "$FW_UPD_ROW" 2 | sed 's/ (/ /; s/)$//')" ;;
-        UPTODATE)  printf '%bUP TO DATE%b' "$GREEN" "$RESET" ;;
+        AVAILABLE) printf '%bAVAILABLE%b (%s%s)' "$YELLOW" "$RESET" "$(_fw_field "$FW_UPD_ROW" 2 | sed 's/ (/ /; s/)$//')" "${ck:+, checked $ck}" ;;
+        UPTODATE)  printf '%bUP TO DATE%b%s' "$GREEN" "$RESET" "${ck:+ (checked $ck)}" ;;
         *)         printf '%bUNKNOWN%b (offline)' "$GREY" "$RESET" ;;
     esac
 }
@@ -14268,6 +17175,23 @@ _fw_st_set() {                                                                  
 _fw_log()   { [ -n "${FW_LOG:-}" ] && printf '%s\n' "$*" >> "$FW_LOG"; }
 _fw_uptime() { awk '{print int($1)}' /proc/uptime 2>/dev/null || echo 99999; }
 _fw_hist_latest() { ls -1 "$FW_HIST"/*.state 2>/dev/null | sort | tail -1; }   # newest state file
+# The update history for the page's reader - the SAME logs the menu's View Update History pages, newest first. Each
+# attempt opens with "## <when> · <from> -> <to>|<RESULT>|<tone>" (the page draws the result as a badge, so the log's
+# own "Result:" line and its title line are dropped); the rest is the log as written
+_fw_history_text() {
+    local s w st fr to word tone
+    for s in $(ls -1 "$FW_HIST"/*.state 2>/dev/null | sort -r); do
+        w=$(_fw_st "$s" when | cut -c1-16); st=$(_fw_st "$s" status); fr=$(_fw_st "$s" from); to=$(_fw_st "$s" to)
+        case "$st" in   # the Last Update row's words (_fw_status_disp)
+            ok) word=OK; tone=green ;; issues) word=ISSUES; tone=yellow ;; pending) word=PENDING; tone=yellow ;;
+            failed) word=FAILED; tone=red ;; flashing) word="NOT CHECKED"; tone=yellow ;; cancelled) word=CANCELLED; tone=grey ;;
+            *) word=$(printf '%s' "$st" | tr 'a-z' 'A-Z'); tone=grey ;;
+        esac
+        printf '## %s · %s → %s|%s|%s\n' "$w" "${fr:--}" "${to:--}" "${word:-UNKNOWN}" "$tone"
+        [ -f "${s%.state}.log" ] && sed '1d' "${s%.state}.log" | grep -v '^Result:'
+        echo
+    done
+}
 _fw_hist_init() {
     mkdir -p "$FW_HIST"
     grep -qxF "$FW_HIST/" "$FW_KEEPCONF" 2>/dev/null || printf '%s/\n' "$FW_HIST" >> "$FW_KEEPCONF"
@@ -14350,13 +17274,24 @@ _fw_begin() {   # <row> <keep|wipe> <risk-file>
 #    56 MB            -12               6 MB            flashed, responsive
 #    47 MB            -21               0 MB            flashed, responsive - the edge
 #    43 MB            -25               OOM KILL        flashed, but a process was killed
-# Without swap the kernel reclaims cache first and fails with a clean kill, not a thrash. So ONE red line
-# for both: available below image + kept - a measured cushion of ~6 MB with zram, ~21 MB without. No extra
-# reserve (an unmeasured 8 MB one was tried and flagged the healthy trials above as "won't fit").
-# (GL.iNet's own rule for the Mango 2 is tmpfs AND free swap > image + 12 MB; its browser upload streams
-# the image once - no double copy.)
-FW_MEM_RESERVE_KB="${FW_MEM_RESERVE_KB:-}"
-_fw_mem_reserve_kb() { echo "${FW_MEM_RESERVE_KB:-0}"; }   # measured: none needed, with or without zram
+# Without swap the kernel reclaims cache first and fails with a clean kill, not a thrash - no reserve there.
+# WITH zram the first 6 trials above were too few. 2026-10-17, 60+ flashes on the Mango 2 (Tailscale + DoH running,
+# GL.iNet's own updater and its web path, memory held the same way), headroom = available - (image + kept):
+#   headroom 0-2 MB    16 flashes   5 rebooted WITHOUT installing (thrash, zram full, then the flash step gives up)
+#   headroom 4+ MB     17 flashes   all fine
+#   0-2 MB, Tailscale stopped BEFORE the download (frees 3-10 MB): 22 flashes, all fine
+# Stopping services AFTER the download is too late: the download itself thrashed, and Tailscale's own stop script
+# then hung loading tailscaled --cleanup. MemAvailable also moves 4 MB either way between the reading and the
+# flash, and one reading just before flashing doesn't predict the outcome. So with swap (Vincent 2026-10-17):
+# under 6 MB of headroom is tight - services are stopped BEFORE the download; under 4 MB won't fit - stop them,
+# and if it's still under 4 the update is refused. Tight after stopping goes ahead (4+ measured fine) - except
+# when Tailscale couldn't be stopped because this session comes through it: then it asks.
+# (GL.iNet's own rule for the Mango 2 is tmpfs AND free swap > image + 12 MB, but free swap barely tracks RAM
+# and its gate refused at 12 and passed at 7.5; its browser upload streams the image once - no double copy.)
+FW_MEM_RESERVE_KB="${FW_MEM_RESERVE_KB:-}"; FW_MEM_FLOOR_KB="${FW_MEM_FLOOR_KB:-}"
+_fw_mem_swap() { awk '/^SwapTotal:/{print ($2 > 0) ? 1 : 0}' "${FW_MEMINFO:-/proc/meminfo}" 2>/dev/null; }
+_fw_mem_reserve_kb() { [ "$(_fw_mem_swap)" = 1 ] && echo "${FW_MEM_RESERVE_KB:-6144}" || echo "${FW_MEM_RESERVE_KB:-0}"; }   # tight below this
+_fw_mem_floor_kb()   { [ "$(_fw_mem_swap)" = 1 ] && echo "${FW_MEM_FLOOR_KB:-4096}" || echo "${FW_MEM_FLOOR_KB:-0}"; }       # won't fit below this
 _fw_mem_free_kb() {
     local t m; t=$(space_free_kb /tmp); m=$(awk '/^MemAvailable:/{print $2}' "${FW_MEMINFO:-/proc/meminfo}" 2>/dev/null)
     case "$m" in ''|*[!0-9]*) m=$t ;; esac; [ "$m" -lt "$t" ] && t=$m; echo "$t"
@@ -14413,13 +17348,15 @@ _fw_arch_kb() {   # the measured size of what persists NOW: remembered, the back
 }
 _fw_mb() { echo $(( (${1:-0} + 1023) / 1024 )); }
 # _fw_mem_meter <image KB> <kept KB> - the Update Memory meter (the AdGuardHome meter's 20 cells: green,
-# then yellow from 15, red from 19). Returns 0 fits, 1 close (still fits - no word), 2 won't fit. Sets FW_MEM_NEED / FW_MEM_FREE.
+# then yellow from 15, red from 19). Returns 0 fits, 1 close (still fits - no word), 3 tight (stop services first),
+# 2 won't fit. "Needed" includes the reserve. Sets FW_MEM_NEED / FW_MEM_FREE / FW_MEM_HARD.
 _fw_mem_meter() {   # <image KB> <kept KB> [note]
-    local free need fill i bar st="" rc=0 rsv
-    free=$(_fw_mem_free_kb); rsv=$(_fw_mem_reserve_kb); need=$(( ${1:-0} + ${2:-0} + rsv ))
-    FW_MEM_FREE=$free; FW_MEM_NEED=$need
+    local free need hard fill i bar st="" rc=0
+    free=$(_fw_mem_free_kb); need=$(( ${1:-0} + ${2:-0} + $(_fw_mem_reserve_kb) )); hard=$(( ${1:-0} + ${2:-0} + $(_fw_mem_floor_kb) ))
+    FW_MEM_FREE=$free; FW_MEM_NEED=$need; FW_MEM_HARD=$hard
     if [ "$free" -gt 0 ]; then fill=$(( (need * 20 + free - 1) / free )); else fill=99; fi
-    if [ "$fill" -gt 20 ]; then rc=2; st="  ${RED}(won't fit)${RESET}"
+    if [ "$free" -lt "$hard" ]; then rc=2; st="  ${RED}(won't fit)${RESET}"
+    elif [ "$free" -lt "$need" ]; then rc=3; st="  ${YELLOW}(tight)${RESET}"
     elif [ "$fill" -gt 14 ]; then rc=1; fi   # close, but measured to work: the bar's amber cells say so - no word
     bar=""; i=1
     while [ "$i" -le 20 ]; do
@@ -14441,11 +17378,16 @@ _fw_mem_hogs() {
         init=${e%%:*}; lbl=${e#*:}; proc=${lbl#*:}; lbl=${lbl%%:*}
         [ -x "/etc/init.d/$init" ] || continue
         [ "$init" = tailscale ] && case "${SSH_CLIENT:-}" in 100.*) continue ;; esac
-        kb=0; for pid in $(_proc_pids "$proc"); do kb=$(( kb + $(awk '/^VmRSS:/{print $2}' "/proc/$pid/status" 2>/dev/null || echo 0) )); done
+        # RssAnon = what stopping it really frees (VmRSS also counts the program file's own pages, which the kernel
+        # can reclaim anyway: AdGuardHome 63 vs 45 MB on .8.1); VmRSS only where a kernel has no RssAnon
+        kb=0; for pid in $(_proc_pids "$proc"); do
+            kb=$(( kb + $(awk '/^RssAnon:/{a=$2} /^VmRSS:/{v=$2} END{print (a != "" ? a : v) + 0}' "/proc/$pid/status" 2>/dev/null || echo 0) ))
+        done
         [ "$kb" -gt 1024 ] && printf '%s|%s|%s|%s\n' "$kb" "$init" "$lbl" "$kb"
     done | sort -rn | cut -d'|' -f2-          # annotate-sort-strip: busybox sort -t -k is a no-op
 }
 FW_STOPPED=""
+_fw_ts_session() { case "${SSH_CLIENT:-}" in 100.*) pidof tailscaled >/dev/null 2>&1 ;; *) return 1 ;; esac; }   # Tailscale carries this session
 # Runs under spin_run (a background subshell), so results go to files: $1.stopped (init names) and
 # $1.running (labels left running because the router needs them to reach GL.iNet).
 _fw_stop_hogs() {   # <hogs file> <download host>
@@ -14669,6 +17611,12 @@ _fw_in_ttyd() {
 # Open the Package & Persistence Manager from Firmware Update: what the update would remove comes staged as
 # "Enable Persistence"; with an image size the manager also shows the Update Memory meter.
 _fw_open_persistence() {   # [image KB]
+    local t
+    if [ -n "${GLU_JOB:-}" ]; then   # the Admin Panel: what the update would remove, set to persist through
+        t=$( { sed 's/^/F:/; s/$/=1/' "$FW_TMP/risk.keys"; sed 's/$/=1:1/' "$FW_TMP/pk.lost"; } 2>/dev/null | grep -v '^F:=1$\|^=1:1$')
+        [ -n "$t" ] && printf 'y\n' | PM_TARGETS="$t" manage_packages     # the Package Manager's own Confirm
+        _fw_arch_bg_start; return
+    fi
     PM_FW_STAGE=1; PM_FW_IMAGE_KB="${1:-}"
     manage_packages
     unset PM_FW_STAGE PM_FW_IMAGE_KB
@@ -14724,6 +17672,8 @@ _fw_summary() {   # <row> - the From / To lines under the Firmware Update title:
 }
 _fw_countdown() {   # 10 s to read what's on screen; Enter starts now, any other key cancels. 1 = cancelled.
     local i=10 k rc tty=""
+    # from the Admin Panel (a job): one line, then the 10 s - its Stop button is the cancel
+    if [ -n "${GLU_JOB:-}" ]; then printf '%s\n' "Flashing in 10 s - Stop cancels it"; sleep 10; return 0; fi
     # no echo while counting: an echoed Enter moved the cursor down and left the countdown line behind
     [ -t 0 ] && tty=$(stty -g 2>/dev/null) && stty -echo 2>/dev/null
     while [ "$i" -gt 0 ]; do
@@ -14742,12 +17692,13 @@ _fw_countdown() {   # 10 s to read what's on screen; Enter starts now, any other
 _fw_install() {   # <row> [reinstall]
     local row="$1" mode="${2:-}" chan lbl size dir keep=keep ans sig_rc parts log lan tl
     chan=$(_fw_field "$row" 1); lbl=$(_fw_field "$row" 2); size=$(_fw_field "$row" 6); dir=$(_fw_direction "$row")
-    FW_STATE=""; FW_LOG=""
+    FW_STATE=""; FW_LOG=""; FW_FLASHING=""
     clear; print_centered_header "Firmware Update"; _fw_summary "$row"
     case "$dir" in
         SAME)      if [ "$mode" = reinstall ]; then print_info "This reinstalls $lbl, the build already on the router"
                    else print_info "$lbl is already installed"; press_any_key; return; fi ;;
-        DOWNGRADE) print_warning "This is a downgrade - settings made on newer firmware may not carry back" ;;
+        DOWNGRADE) if [ "$chan" = "$FW_CUR_CHAN" ]; then print_warning "This is a downgrade - settings made on newer firmware may not carry back"
+                   else print_warning "This build is older than the installed firmware - settings made since may not carry back"; fi ;;
     esac
     [ "$chan" != "$FW_CUR_CHAN" ] && print_info "This moves the router to the $chan channel"
     # the Web-UI Terminal is killed by the flash like any shell, and only returns if ttyd persists
@@ -14765,21 +17716,21 @@ _fw_install() {   # <row> [reinstall]
         case "$ans" in y|Y) ;; *) return ;; esac
     fi
     # Keep settings is the default; wiping takes a second, explicit confirmation.
-    printf "Keep settings? [Y/n]: "; read -r ans; printf "\n"
+    printf "Keep settings? [Y/n]: "; read_ans FW_ANS_KEEP; ans=$REPLY; printf "\n"
     case "$ans" in
         n|N) keep=wipe
              _fw_at_risk wipe > "$FW_TMP/risk"
              print_warning "Wiping returns the router to GL.iNet's first-time setup and erases:"
              _fw_risk_rows "$FW_TMP/risk"; printf "\n"
              print_info "To get the toolkit back afterwards, run on the router:\nwget -O glinet_utils.sh https://raw.githubusercontent.com/phantasm22/GL-iNet_utils/main/glinet_utils.sh && sh glinet_utils.sh"
-             printf "Wipe all settings? This can't be undone [y/N]: "; read -r ans; printf "\n"
+             printf "Wipe all settings? This can't be undone [y/N]: "; read_ans FW_ANS_WIPE; ans=$REPLY; printf "\n"
              case "$ans" in y|Y) ;; *) return ;; esac ;;
         *)   spin_run "Checking what persists" _fw_risk_scan keep; cp "$FW_TMP/risk.keep" "$FW_TMP/risk"
              if [ -s "$FW_TMP/risk" ]; then
                  print_warning "These aren't set to persist and may not survive the update:"
                  _fw_risk_rows "$FW_TMP/risk"; printf "\n"
                  # the fix, not just the warning: the Package & Persistence Manager with these staged
-                 printf "Persist them across the update? [Y/n]: "; read -r ans; printf "\n"
+                 printf "Persist them across the update? [Y/n]: "; read_ans FW_ANS_PERSIST; ans=$REPLY; printf "\n"
                  case "$ans" in
                      n|N) : ;;
                      *) _fw_open_persistence "$(( (size + 1023) / 1024 ))"
@@ -14804,20 +17755,22 @@ _fw_install() {   # <row> [reinstall]
     [ "$keep" = keep ] && { spin_run "Measuring what persists" _fw_arch_kb; kept_kb=$(tr -dc '0-9' < "$SPIN_LOG"); }
     _fw_record_commit                       # measured - now the attempt's record can join the (kept) history
     printf "\n"; _fw_mem_meter "$img_kb" "${kept_kb:-0}"; mrc=$?; printf "\n"
-    # tight is PROVEN to work (see the table above _fw_mem_reserve_kb) - only "won't fit" offers to stop services
-    if [ "$mrc" = 2 ]; then
+    # tight or won't fit stops services BEFORE the download (see the table above _fw_mem_reserve_kb). Not asked
+    # (Vincent 2026-10-14): it's safe - they start again with the reboot, or straight away if the update ends early
+    # (_fw_end; Ctrl-C or the page's Stop via _session_cleanup), and one the router needs to reach GL.iNet keeps running
+    if [ "$mrc" = 2 ] || [ "$mrc" = 3 ]; then
         _fw_mem_hogs > "$FW_TMP/hogs"
         if [ -s "$FW_TMP/hogs" ]; then
-            print_info "These free memory for the update and start again when the router restarts:\n$(awk -F'|' '{printf "%s%s (%d MB)", (NR>1 ? "\\n" : ""), $2, ($3 + 1023) / 1024}' "$FW_TMP/hogs")"
-            printf "Stop them for the update? [Y/n]: "; read -r ans; printf "\n"
-            case "$ans" in n|N) : ;;
-                *) host=$(_fw_field "$row" 4 | sed 's|^[a-z]*://||; s|/.*||')
-                   spin_run "Stopping them for the update" _fw_stop_hogs "$FW_TMP/hogs" "$host"
-                   FW_STOPPED=$(tr '\n' ' ' < "$FW_TMP/hogs.stopped" 2>/dev/null)
-                   [ -s "$FW_TMP/hogs.running" ] && print_info "Left running (the router needs it to reach GL.iNet): $(awk '{printf "%s%s", (NR>1 ? ", " : ""), $0}' "$FW_TMP/hogs.running")"
-                   _fw_log "  stopped for the update:$FW_STOPPED"
-                   printf "\n"; _fw_mem_meter "$img_kb" "${kept_kb:-0}"; mrc=$?; printf "\n" ;;
-            esac
+            local hl; hl=$(awk -F'|' '{printf "%s%s (%d MB)", (NR>1 ? ", " : ""), $2, ($3 + 1023) / 1024}' "$FW_TMP/hogs")
+            host=$(_fw_field "$row" 4 | sed 's|^[a-z]*://||; s|/.*||')
+            # a job on the page has no terminal traps: Stop (TERM) must still start them again
+            [ -n "${__GL_HEADLESS:-}" ] && { trap '_session_cleanup; exit 143' TERM; trap '_session_cleanup; exit 130' INT; }
+            spin_run "Stopping $hl to free memory - $([ "$(grep -c . "$FW_TMP/hogs")" -gt 1 ] && echo "they start" || echo "it starts") again after the update" \
+                _fw_stop_hogs "$FW_TMP/hogs" "$host"
+            FW_STOPPED=$(tr '\n' ' ' < "$FW_TMP/hogs.stopped" 2>/dev/null)
+            [ -s "$FW_TMP/hogs.running" ] && print_info "Left running (the router needs it to reach GL.iNet): $(awk '{printf "%s%s", (NR>1 ? ", " : ""), $0}' "$FW_TMP/hogs.running")"
+            _fw_log "  stopped for the update:$FW_STOPPED"
+            printf "\n"; _fw_mem_meter "$img_kb" "${kept_kb:-0}"; mrc=$?; printf "\n"
         fi
     fi
     _fw_log "  memory: $(_fw_mb "$FW_MEM_NEED") MB needed of $(_fw_mb "$FW_MEM_FREE") MB free (image $(_fw_mb "$img_kb") + kept $(_fw_mb "${kept_kb:-0}"))"
@@ -14827,7 +17780,13 @@ _fw_install() {   # <row> [reinstall]
             "Restart the router and update before starting other services, or set large items\n(backups, AdGuardHome) not to persist in the Package & Persistence Manager"
         press_any_key; return
     fi
-    _fw_log "  [OK] free memory for the update"
+    # still tight: measured to work - unless Tailscale was left running because this session comes through it
+    if [ "$mrc" = 3 ] && _fw_ts_session; then
+        print_warning "Memory is tight and Tailscale stays running, because this session comes through it\nThe update could reboot without installing - nothing is lost, the router keeps its current firmware"
+        printf "Update anyway? [y/N]: "; read_ans FW_ANS_TIGHT; ans=$REPLY; printf "\n"
+        case "$ans" in y|Y) ;; *) _fw_end cancelled "[CANCELLED] memory tight with Tailscale left running (this session)"; press_any_key; return ;; esac
+    fi
+    _fw_log "  [OK] free memory for the update$([ "$mrc" = 3 ] && echo " (tight)")"
     if ! _fw_download "$(_fw_field "$row" 4)" "$size"; then
         rm -f "$FW_IMG"; _fw_end failed "[FAILED] download incomplete (curl rc ${FW_DL_RC:-?}) from $(_fw_field "$row" 4)"
         fail_report "The firmware didn't download completely, so nothing was changed" "" "Check the router's internet connection, then retry"
@@ -14869,15 +17828,20 @@ _fw_install() {   # <row> [reinstall]
     # what happens next - on screen BEFORE the prompt, so nothing depends on the session surviving
     printf "\n"
     lan=$(uci -q get network.lan.ipaddr 2>/dev/null)
-    if [ "$keep" = keep ]; then
+    if [ -n "${GLU_JOB:-}" ] && [ "$keep" = keep ]; then
+        print_info "What happens next:\n1. The router flashes $lbl and reboots - about 5 minutes, keep the power on\n2. This page waits for the router and reconnects when it's back\n3. Sign in again - the update's result shows here"
+    elif [ -n "${GLU_JOB:-}" ]; then
+        print_info "What happens next:\n1. The router flashes $lbl and reboots - about 5 minutes, keep the power on\n2. Every setting is gone - GL.iNet's first-time setup opens at 192.168.8.1"
+    elif [ "$keep" = keep ]; then
         print_info "What happens next:\n1. The router flashes $lbl and reboots - about 5 minutes, keep the power on\n2. This session closes; reconnect to ${lan:-the router} when it's back\n3. Start the toolkit again - it checks the update and reports anything that didn't come back"
     else
         print_info "What happens next:\n1. The router flashes $lbl and reboots - about 5 minutes, keep the power on\n2. This session closes; every setting is gone - browse to GL.iNet's default address\n   (usually 192.168.8.1) and complete the first-time setup"
     fi
-    printf "Flash the firmware now? [y/N]: "; read -r ans; printf "\n"
+    printf "Flash the firmware now? [y/N]: "; read_ans FW_ANS_GO; ans=$REPLY; printf "\n"
     case "$ans" in y|Y) ;; *) rm -f "$FW_IMG"; _fw_end cancelled "[CANCELLED] at the final confirmation"; return ;; esac
     if ! _fw_countdown; then rm -f "$FW_IMG"; _fw_end cancelled "[CANCELLED] during the countdown"; return; fi
     _fw_st_set "$FW_STATE" status flashing; _fw_st_set "$FW_STATE" flashed "$(_fw_now)"; _fw_st_set "$FW_STATE" flashed_at "$(date +%s)"
+    FW_FLASHING=1   # from here the reboot starts any stopped services; leaving the toolkit mustn't start them mid-flash
     _fw_log "  flash started $(_fw_now)"
     [ "$keep" = keep ] && [ -n "$parts" ] && printf '%s\n' "$parts" | while read -r p; do [ -n "$p" ] && rm -f "$p"; done
     uci -q set upgrade.general.prompt='1'; uci -q commit upgrade
@@ -14928,6 +17892,14 @@ _fw_pick_head() {   # <channel> - its section heading: one word (a table L2 head
     case "$1" in STABLE) echo Stable ;; BETA) echo Beta ;; NIGHTLY) echo Nightly ;; RC) echo RC ;;
                  "OPENWRT 25") echo OpenWrt25 ;; "OPENWRT 24") echo OpenWrt24 ;; *) echo "$1" | tr -d ' ' ;; esac
 }
+# the builds Choose a Build offers (the menu's picker and the Admin Panel's table): "n|<catalogue row>", ten per
+# channel, the channels in this order
+_fw_build_list() {
+    local chan
+    for chan in STABLE BETA NIGHTLY RC "OPENWRT 25" "OPENWRT 24"; do
+        awk -F'|' -v c="$chan" '$1==c' "$FW_TMP/cat" | head -10
+    done | awk '{print NR "|" $0}'
+}
 _fw_pick() {
     local map="$FW_TMP/pick" per=12 page=1 pages total start end sel="" inst="" reinst=0 ans row idx chan lastc
     local lbl dir box act acol div foot vw
@@ -14935,9 +17907,7 @@ _fw_pick() {
         spin_run "Checking GL.iNet's firmware catalogue" _fw_catalog; _fw_update_state
         [ -s "$FW_TMP/cat" ] || { fail_report "Couldn't reach GL.iNet's firmware server" "" "Check the router's internet connection, then retry"; press_any_key; return; }
     fi
-    for chan in STABLE BETA NIGHTLY RC "OPENWRT 25" "OPENWRT 24"; do
-        awk -F'|' -v c="$chan" '$1==c' "$FW_TMP/cat" | head -10
-    done | awk '{print NR "|" $0}' > "$map"
+    _fw_build_list > "$map"
     total=$(grep -c . "$map"); : "${total:=0}"
     [ "$total" -gt 0 ] || { print_info "GL.iNet publishes no builds for this model"; press_any_key; return; }
     while IFS='|' read -r idx row; do
@@ -14968,8 +17938,7 @@ _fw_pick() {
             if [ "$idx" = "$sel" ]; then
                 if [ "$idx" = "$inst" ]; then [ "$reinst" = 1 ] && { act="> Reinstall"; acol="$GREEN"; }
                 else
-                    dir=$(_fw_direction "$row")
-                    case "$dir" in DOWNGRADE) act="> Downgrade"; acol="$YELLOW" ;; *) act="> Update"; acol="$GREEN" ;; esac
+                    case "$(_fw_plan "$row")" in DOWNGRADE) act="> Downgrade"; acol="$YELLOW" ;; INSTALL) act="> Install"; acol="$GREEN" ;; *) act="> Update"; acol="$GREEN" ;; esac
                 fi
             fi
             printf " %-5s %s %-${vw}s %b%-11s %-8s%b %b%s%b\n" "$idx." "$box" "$lbl$hn" "$BLUE" "$(_fw_field "$row" 9)" \
@@ -15103,7 +18072,8 @@ The status block
   • Channel - the firmware track the router is on: STABLE, BETA, NIGHTLY,
     RC, OPENWRT 25 or OPENWRT 24. Version and Update belong to it.
   • Update - UP TO DATE, AVAILABLE (with the build), or UNKNOWN when GL.iNet's
-    server can't be reached.
+    server can't be reached, with when GL.iNet's list was checked (the page
+    keeps it up to an hour; Check for Updates reads it again).
   • Not Persisted - what an update would remove, measured from the router's
     own keep list: the toolkit, its features and settings (Web Terminal, fan,
     switch indicator, limits, OpenSpeedTest, AdGuardHome, SSH keys, backups)
@@ -15118,10 +18088,13 @@ Actions
     channel, or a fresh check when there's nothing newer.
   • Choose a Build - every build GL.iNet offers this router in one list,
     grouped by channel (newest first, up to 10 each). The installed build starts
-    selected and its Planned Action says Installed; [#] picks another (an older
-    one is a downgrade) and [R] shows the selected build's release notes. Picking
-    the installed build again makes it Reinstall - a re-flash of the same build,
-    for a damaged firmware partition.
+    selected and its Planned Action says Installed; [#] picks another and [R]
+    shows the selected build's release notes. In your own channel a newer build
+    is an Update and an older one a Downgrade; a build in another channel is an
+    Install (up or down depends on your point of view - an older version still
+    warns that newer settings may not carry back). Picking the installed build
+    again makes it Reinstall - a re-flash of the same build, for a damaged
+    firmware partition.
   • Manage Persistence - the Package & Persistence Manager, with everything
     an update would remove staged to persist, and the Update Memory meter.
   • View Update History - every update attempt, newest first: what was
@@ -15135,11 +18108,14 @@ next. First what the update would remove, with the choice to persist it (the
 Package & Persistence Manager, pre-staged). Then memory: the image and the
 persisted files both sit in RAM during the flash, and running services count
 against it - the Update Memory meter shows the fit. Amber cells mean it's
-close, which is still fine (measured on real flashes). When it says "won't
-fit", it offers to stop services such as Tailscale or AdGuardHome (they start
-again with the reboot, or straight away if the update doesn't happen); if it
-still won't fit, the update is stopped. Then the download, GL.iNet's checksum,
-GL.iNet's signature, and OpenWrt's own image test (right board; settings compatible).
+close, which is still fine (measured on real flashes). When it says "tight"
+or "won't fit", it first stops services such as Tailscale or AdGuardHome,
+naming each with the memory it frees (they start again with the reboot, or
+straight away if the update doesn't happen). Tight then goes ahead; if it
+still won't fit, the update is stopped. If Tailscale has to keep running
+because you're connected through it, a tight update asks first.
+Then the download, GL.iNet's checksum, GL.iNet's signature, and OpenWrt's
+own image test (right board; settings compatible).
 Only then does it say what happens next and ask to flash, followed by a
 10-second countdown (Enter starts now, any other key cancels). The router reboots and is unreachable for
 about 5 minutes - keep the power on. In the Web-UI Terminal it warns first:
@@ -15699,6 +18675,502 @@ bench_render_mem() {
           if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
 }
 
+# ---- the benchmarks, one function each: the menu (System Benchmarks) and the Admin Panel page (as a job) run the same code
+bench_cpu_stress() {
+    clear
+    print_centered_header "CPU Thermal Stress Test"
+    
+    # one stress tool - the backend follows the kernel (stress below 6.6, stress-ng from 6.6)
+    if ! _stress_installed; then
+        if ! _stress_install; then
+            if _stressng_unsafe; then
+                print_error "Could not install 'stress' (stress-ng isn't used on this kernel - it can crash kernels before 6.6)"
+            else
+                print_error "Could not install a CPU stress tool"
+            fi
+            press_any_key
+            return 1
+        fi
+    fi
+
+    get_temp() {
+        local raw_temp
+        raw_temp=$(get_cpu_temp)
+        if [ "$raw_temp" != "unknown" ]; then
+            local celsius=$(awk "BEGIN {printf \"%.2f\", $raw_temp}")
+            local fahrenheit=$(awk "BEGIN {printf \"%.2f\", ($raw_temp * 1.8) + 32}")
+            printf "%s°C (%s°F)" "$celsius" "$fahrenheit"
+        else
+            printf "N/A"
+        fi
+    }
+    
+    # stress loads every logical CPU; the label names cores vs threads so a
+    # multithreaded chip (MT7621: 2 cores / 4 threads) reads honestly.
+    _cc=$(cpu_counts); cpu_logical=${_cc% *}; cpu_phys=${_cc#* }
+    [ "$cpu_phys" -eq 1 ] && _cw=core || _cw=cores
+    if [ "$cpu_phys" -lt "$cpu_logical" ]; then
+        stress_what="$cpu_logical threads ($cpu_phys $_cw)"
+    else
+        [ "$cpu_logical" -eq 1 ] && _cw=core || _cw=cores
+        stress_what="$cpu_logical $_cw"
+    fi
+    
+    printf "\nHow many seconds to run stress test? [default: 60]: "
+    read -r duration
+    [ -z "$duration" ] && duration=60
+    
+    case "$duration" in
+        ''|*[!0-9]*) duration=60 ;;
+    esac
+
+    raw_start=$(get_cpu_temp)
+    start_temp_str=$(get_temp)
+    start_fan_str=$(get_fan_speed)
+    
+    printf "\n"
+    countdown_run "Stress testing $stress_what" "$duration" "$(_stress_cmd)" --cpu "$cpu_logical" --timeout "${duration}s"
+
+    raw_end=$(get_cpu_temp)
+    end_temp_str=$(get_temp)
+    end_fan_str=$(get_fan_speed)
+    # Settle before the "after cooling" reading. Same fallback as the
+    # other usleep call sites - sleep 3, not 1, so the cooldown is
+    # still 3s on a build without the applet; a shorter pause would
+    # silently change what this measures.
+    usleep 3000000 2>/dev/null || sleep 3
+    raw_post=$(get_cpu_temp)
+    post_temp_str=$(get_temp)
+    post_fan_str=$(get_fan_speed)
+    
+    printf "\n"
+    print_success "Stress test completed"
+    printf "\n"
+    if [ "$raw_start" != "unknown" ] && [ "$raw_end" != "unknown" ]; then
+        diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_end - $raw_start}")
+        diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_end - $raw_start) * 1.8}")
+        post_diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_post - $raw_start}")
+        post_diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_post - $raw_start) * 1.8}")
+        
+        # Fan % Changes
+        if [ "$start_fan_str" = "N/A" ] || [ "$start_fan_str" -eq 0 ] 2>/dev/null; then
+            fan_p="+0.0"
+            fan_post_p="+0.0"
+        else
+            fan_p=$(awk "BEGIN {printf \"%+.1f\", (($end_fan_str - $start_fan_str) / $start_fan_str) * 100}")
+            fan_post_p=$(awk "BEGIN {printf \"%+.1f\", (($post_fan_str - $start_fan_str) / $start_fan_str) * 100}")
+        fi
+
+        # --- TABLE RENDER ---
+        # Left-justified: exactly 3 fixed rows about ONE test run
+        # (a status report, not an open-ended comparison list), so
+        # this fails the "genuinely comparing many values" test -
+        # same category as the leaderboards, not DNS Benchmark.
+        # printf's %Ns counts UTF-8 BYTES, not characters, on this
+        # platform (confirmed: ${#}/wc -m/wc -c/awk length() ALL
+        # miscount multi-byte glyphs like ° identically - there is
+        # no reliable char-counting tool here). ljust() sidesteps
+        # this: it never measures a string containing a multi-byte
+        # char - the caller supplies the true length, computed from
+        # ASCII-only numeric substrings + a known-constant offset
+        # for the fixed °C/°F skeleton around them.
+        ljust() {
+            local width="$1" s="$2" true_len="$3" pad="" i=0
+            while [ "$i" -lt "$((width - true_len))" ]; do pad="${pad} "; i=$((i + 1)); done
+            printf '%s%s' "$s" "$pad"
+        }
+
+        c_start=$(awk "BEGIN {printf \"%.2f\", $raw_start}")
+        f_start=$(awk "BEGIN {printf \"%.2f\", ($raw_start * 1.8) + 32}")
+        c_end=$(awk "BEGIN {printf \"%.2f\", $raw_end}")
+        f_end=$(awk "BEGIN {printf \"%.2f\", ($raw_end * 1.8) + 32}")
+        c_post=$(awk "BEGIN {printf \"%.2f\", $raw_post}")
+        f_post=$(awk "BEGIN {printf \"%.2f\", ($raw_post * 1.8) + 32}")
+        # "°C (°F)" skeleton = 7 real characters around the two ASCII numbers
+        temp_len_start=$((${#c_start} + ${#f_start} + 7))
+        temp_len_end=$((${#c_end} + ${#f_end} + 7))
+        temp_len_post=$((${#c_post} + ${#f_post} + 7))
+
+        delta_end="${diff_c}°C (${diff_f}°F)"
+        delta_post="${post_diff_c}°C (${post_diff_f}°F)"
+        delta_len_end=$((${#diff_c} + ${#diff_f} + 7))
+        delta_len_post=$((${#post_diff_c} + ${#post_diff_f} + 7))
+
+        fan_start="${start_fan_str} RPM"
+        fan_end="${end_fan_str} RPM (${fan_p}%)"
+        fan_post="${post_fan_str} RPM (${fan_post_p}%)"
+
+        printf "%-10s %s %s %s\n" "PHASE" "$(ljust 22 "TEMPERATURE" 11)" "$(ljust 18 "Δ CHANGE" 8)" "$(ljust 18 "FAN SPEED (Δ%)" 14)"
+        printf "%s\n" "───────────────────────────────────────────────────────────────────────"
+        printf "%-10s %s %s %-18s\n" "Start" "$(ljust 22 "$start_temp_str" "$temp_len_start")" "       ---        " "$fan_start"
+        printf "%-10s %s %s %-18s\n" "End" "$(ljust 22 "$end_temp_str" "$temp_len_end")" "$(ljust 18 "$delta_end" "$delta_len_end")" "$fan_end"
+        printf "%-10s %s %s %-18s\n" "End + 3s" "$(ljust 22 "$post_temp_str" "$temp_len_post")" "$(ljust 18 "$delta_post" "$delta_len_post")" "$fan_post"
+    fi         
+    press_any_key
+}
+bench_crypto() {
+    clear
+    print_centered_header "VPN & Crypto Benchmark"
+
+    if ! require_cmd openssl openssl-util "OpenSSL command-line tools"; then
+        print_error "OpenSSL is required for the crypto benchmark and could not be installed"
+        press_any_key
+        return 1
+    fi
+
+    # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
+    # device by appending one line in the same column order:
+    # id|label|cpu|aes64|aes1420|aes16k|cha64|cha1420|cha16k|rsa_sign|rsa_verify
+    bench_ref='be14000|Flint 4|MT7988a|342047|662912|715487|116011|214298|259237|163.5|6140.7
+mt3600be|Beryl 7|MT7987a|267728|621208|721917|126357|258082|323188|182.9|6850.8
+be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5
+mt6000|Flint 2|MT7986a|35969|403625|784938|128188|285938|336125|186.4|6906.5
+mt3000|Beryl AX|MT7981|174738|403199|465470|84051|166484|209360|118.7|4446.3
+mt5000|Brume 3|MT7987a|268078|621323|723411|126278|257233|323477|181.8|6816.4
+be9300|Flint 3|IPQ5332|186703|533571|639020|84930|216067|250916|139.7|5180.6
+mt1300|Beryl|MT7621|5522|5944|5759|21915|27148|27613|10.4|397.6
+mg1300|Mango 2|MT7621|5754|5947|5969|22320|27500|28326|10.5|411.1'
+
+    my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
+    [ -z "$my_id" ] && my_id="thisdevice"
+    my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
+    my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
+    [ -z "$my_label" ] && my_label="$my_id"
+    [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
+
+    print_info "Measuring this device - stop VPN, SQM and heavy traffic for accurate, comparable numbers"
+    printf "\n"
+
+    bench_measure aes-256-gcm 64;          a64=$BENCH_RESULT
+    bench_measure aes-256-gcm 1420;        a1420=$BENCH_RESULT
+    bench_measure aes-256-gcm 16384;       a16k=$BENCH_RESULT
+    bench_measure chacha20-poly1305 64;    c64=$BENCH_RESULT
+    bench_measure chacha20-poly1305 1420;  c1420=$BENCH_RESULT
+    bench_measure chacha20-poly1305 16384; c16k=$BENCH_RESULT
+    spin_run "Measuring RSA-2048 (connection setup)" openssl speed rsa2048
+    rs=$(bench_rsa_col sign/s); rv=$(bench_rsa_col verify/s)
+    rm -f "$SPIN_LOG" 2>/dev/null
+
+    bench_data="/tmp/.glnet-bench.$$"
+    {
+        printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" \
+            "${a64:-0}" "${a1420:-0}" "${a16k:-0}" "${c64:-0}" "${c1420:-0}" "${c16k:-0}" "${rs:-0}" "${rv:-0}"
+        printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=11 && $1!=id'
+    } > "$bench_data"
+
+    bench_page=1
+    while true; do
+        clear
+        print_centered_header "VPN & Crypto Benchmark"
+        case "$bench_page" in
+            1)
+                bench_render_cipher "WireGuard · ChaCha20-Poly1305" 7 8 9 "$bench_data" "$my_id"
+                printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
+                printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
+                printf '\n %bNote: each device uses its own OpenSSL build. WireGuard runs kernel ChaCha20, so that%b\n' "$GREY" "$RESET"
+                printf ' %bcolumn is a proxy; OpenVPN/IPsec uses OpenSSL directly.%b\n' "$GREY" "$RESET"
+                ;;
+            2)
+                bench_render_cipher "OpenVPN / IPsec · AES-256-GCM" 4 5 6 "$bench_data" "$my_id"
+                printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
+                printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
+                ;;
+            3)
+                bench_render_rsa "$bench_data" "$my_id"
+                ;;
+        esac
+        # as an Admin Panel job there are no page keys: the three pages print one after another
+        if [ -n "${GLU_JOB:-}" ]; then
+            [ "$bench_page" -ge 3 ] && break
+            bench_page=$((bench_page + 1)); printf '\n'; continue
+        fi
+        printf " ──────────────────────────────────────────────────────────────────────────────\n"
+        printf " [P] Previous   "
+        bpi=1
+        while [ $bpi -le 3 ]; do
+            if [ $bpi -eq $bench_page ]; then
+                printf "%b[%d]%b " "${BOLD}" "$bpi" "${RESET}"
+            else
+                printf "%b[%d]%b " "${GREY}" "$bpi" "${RESET}"
+            fi
+            bpi=$((bpi + 1))
+        done
+        printf "  [N] Next   [0] Back  "
+        bp=$(read_single_char)
+        printf '\n'
+        case "$bp" in
+            p|P|b|B) [ "$bench_page" -gt 1 ] && bench_page=$((bench_page - 1)) ;;
+            n|N) [ "$bench_page" -lt 3 ] && bench_page=$((bench_page + 1)) ;;
+            1|2|3) bench_page="$bp" ;;
+            0) break ;;
+        esac
+    done
+    [ -n "${GLU_JOB_DIR:-}" ] && cp "$bench_data" "$GLU_JOB_DIR/data" 2>/dev/null   # the Admin Panel draws its results from it
+    rm -f "$bench_data"
+}
+bench_disk_io() {
+    clear
+    print_centered_header "Disk I/O Benchmark"
+
+    available_kb=$(df -Pk . | awk 'NR==2 {print $4}')
+
+    if [ "$available_kb" -ge 1024000 ]; then test_size=1000; test_name="1GB"
+    elif [ "$available_kb" -ge 512000 ]; then test_size=500; test_name="500MB"
+    elif [ "$available_kb" -ge 256000 ]; then test_size=250; test_name="250MB"
+    elif [ "$available_kb" -ge 128000 ]; then test_size=125; test_name="125MB"
+    elif [ "$available_kb" -ge 64000 ]; then test_size=64; test_name="64MB"
+    elif [ "$available_kb" -ge 32000 ]; then test_size=32; test_name="32MB"
+    else test_size=16; test_name="16MB"; fi
+
+    printf "Test size: %b%s%b\n\n" "${BLUE}" "$test_name" "${RESET}"
+
+    get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
+
+    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    w_start=$(get_ms)
+    spin_run "Running write test ($test_name)" dd if=/dev/zero of=./testfile bs=1M count=$test_size conv=fsync
+    w_end=$(get_ms)
+
+    sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    r_start=$(get_ms)
+    spin_run "Running read test ($test_name)" dd if=./testfile of=/dev/null bs=1M
+    r_end=$(get_ms)
+    rm -f ./testfile
+
+    w_ms=$((w_end - w_start)); [ "$w_ms" -le 0 ] && w_ms=1
+    r_ms=$((r_end - r_start)); [ "$r_ms" -le 0 ] && r_ms=1
+    write_speed=$(awk -v sz="$test_size" -v ms="$w_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
+    read_speed=$(awk -v sz="$test_size" -v ms="$r_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
+
+    # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
+    # device by appending one line: id|label|cpu|write_mbs|read_mbs
+    bench_ref='be14000|Flint 4|MT7988a|149.48|165.29
+mt3600be|Beryl 7|MT7987a|124.70|11.00
+be3600|Slate 7|IPQ5332|75.72|51.50
+mt6000|Flint 2|MT7986a|52.72|154.00
+mt3000|Beryl AX|MT7981|82.78|16.21
+mt5000|Brume 3|MT7987a|38.93|42.32
+be9300|Flint 3|IPQ5332|13.72|81.70
+mt1300|Beryl|MT7621|0.24|12.54
+mg1300|Mango 2|MT7621|22.07|4.80'
+
+    my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
+    [ -z "$my_id" ] && my_id="thisdevice"
+    my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
+    my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
+    [ -z "$my_label" ] && my_label="$my_id"
+    [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
+
+    bench_data="/tmp/.glnet-bench.$$"
+    {
+        printf '%s|%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" "$write_speed" "$read_speed"
+        printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=5 && $1!=id'
+    } > "$bench_data"
+
+    bench_render_disk "$bench_data" "$my_id"
+    printf "\n %bWrite is the reliable cross-device metric. Read may reflect the storage%b\n" "$GREY" "$RESET"
+    printf " %bcontroller's own onboard cache (notably on eMMC), which OS cache-drop can't%b\n" "$GREY" "$RESET"
+    printf " %breach - treat Read as indicative, not absolute. Test size scales with free%b\n" "$GREY" "$RESET"
+    printf " %bdisk space, so it can differ between devices.%b\n" "$GREY" "$RESET"
+    [ -n "${GLU_JOB_DIR:-}" ] && cp "$bench_data" "$GLU_JOB_DIR/data" 2>/dev/null   # the Admin Panel draws its results from it
+    rm -f "$bench_data"
+
+    printf "\n"
+    print_success "Disk benchmark completed"
+    press_any_key
+}
+bench_memory_io() {
+    clear
+    print_centered_header "Memory I/O Benchmark"
+
+    # Use the SAME RAM figure as Hardware Info screen 1 (get_mem_stats -> mem_rounded),
+    # never a second calc. A 128 MB device reads MemTotal ~124 MB; the old inline
+    # "est = MemTotal+30, then ceil-to-128" over-rounded that to 256. get_mem_stats
+    # buckets MemTotal to the nearest common size (124 -> 128), matching the GL UI.
+    get_mem_stats
+    total_mem=$mem_rounded
+    [ "${mem_total:-0}" -gt 0 ] || total_mem=512   # /proc/meminfo unreadable: old default
+
+    # Determine test size (100k blocks of 1M = 100GB of throughput)
+    # We want a large enough test to bypass L1/L2 cache saturation
+    if [ "$total_mem" -ge 960 ]; then test_size=100000; test_name="100GB"
+    elif [ "$total_mem" -ge 460 ]; then test_size=50000; test_name="50GB"
+    else test_size=4000; test_name="4GB"; fi
+
+    printf "System RAM: %b%s MB%b\n" "${BLUE}" "$total_mem" "${RESET}"
+    printf "Test throughput: %b%s%b\n\n" "${BLUE}" "$test_name" "${RESET}"
+
+    get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
+
+    m_start=$(get_ms)
+    spin_run "Measuring memory controller throughput" dd if=/dev/zero of=/dev/null bs=1M count=$test_size
+    m_end=$(get_ms)
+
+    m_ms=$((m_end - m_start)); [ "$m_ms" -le 0 ] && m_ms=1
+    mem_speed=$(awk -v sz="$test_size" -v ms="$m_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
+
+    # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
+    # device by appending one line: id|label|cpu|mem_mbs
+    bench_ref='be14000|Flint 4|MT7988a|5271.48
+mt3600be|Beryl 7|MT7987a|4361.12
+be3600|Slate 7|IPQ5332|3006.13
+mt6000|Flint 2|MT7986a|5401.50
+mt3000|Beryl AX|MT7981|2983.29
+mt5000|Brume 3|MT7987a|4492.36
+be9300|Flint 3|IPQ5332|4277.16
+mt1300|Beryl|MT7621|179.39
+mg1300|Mango 2|MT7621|465.66'
+
+    my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
+    [ -z "$my_id" ] && my_id="thisdevice"
+    my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
+    my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
+    [ -z "$my_label" ] && my_label="$my_id"
+    [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
+
+    bench_data="/tmp/.glnet-bench.$$"
+    {
+        printf '%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" "$mem_speed"
+        printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=4 && $1!=id'
+    } > "$bench_data"
+
+    bench_render_mem "$bench_data" "$my_id"
+    printf "\n %bMeasures raw memcpy-style throughput via dd, not a full memory-latency%b\n" "$GREY" "$RESET"
+    printf " %bbenchmark; test size scales with device RAM to avoid cache saturation.%b\n" "$GREY" "$RESET"
+    [ -n "${GLU_JOB_DIR:-}" ] && cp "$bench_data" "$GLU_JOB_DIR/data" 2>/dev/null   # the Admin Panel draws its results from it
+    rm -f "$bench_data"
+
+    printf "\n"
+    print_success "Memory benchmark completed"
+    press_any_key
+}
+bench_dns_latency() {
+    clear
+    print_centered_header "DNS Benchmark"
+
+    # Pre-check: can we resolve anything at all?
+    if ! spin_run "Checking DNS resolution" nslookup google.com; then
+        print_error "DNS is not responding - check your internet connection or DNS settings"
+        press_any_key
+        return 1
+    fi
+    printf "\n"
+
+    # Check for Hijacking
+    is_proxied=0
+    if nslookup "detect${RANDOM}.com" 1.2.3.4 >/dev/null 2>&1; then
+        is_proxied=1
+        print_warning "DNS Interception Active: Traffic is being redirected locally"
+        printf "\n"
+    fi
+    
+    # Servers to test
+    SERVERS="127.0.0.1 1.1.1.1 8.8.8.8 9.9.9.9"
+    SAMPLES=20  # Number of tests per server
+    
+    printf " %-22s %8s %8s %8s\n" "DNS Server" "Min" "Avg" "Max"
+    printf " ────────────────────────────────────────────────────\n"
+
+    for server in $SERVERS; do
+        case $server in
+            "127.0.0.1") label="Local (AdGuard/Cache)" ;;
+            "1.1.1.1")   label="Cloudflare" ;;
+            "8.8.8.8")   label="Google" ;;
+            "9.9.9.9")   label="Quad9" ;;
+        esac
+
+        total=0; min=9999; max=0; BURST=5
+
+        for i in $(seq 1 10); do
+            test_domain="bench${RANDOM}.net"
+
+            read ut _ < /proc/uptime
+            start_t=$ut
+            
+            # Execute a burst of lookups to exceed the 10ms clock tick
+            for b in $(seq 1 $BURST); do
+                nslookup "$test_domain" "$server" >/dev/null 2>&1
+            done
+            
+            read ut _ < /proc/uptime
+            end_t=$ut
+            
+            # Calculate per-query msec: ((end - start) * 1000) / BURST
+            msec=$(awk -v s="$start_t" -v e="$end_t" -v b="$BURST" \
+                  'BEGIN { printf "%.2f", ((e - s) * 1000) / b }')
+
+            # Update stats
+            min=$(awk -v m="$msec" -v cur="$min" 'BEGIN { print (m < cur ? m : cur) }')
+            max=$(awk -v m="$msec" -v cur="$max" 'BEGIN { print (m > cur ? m : cur) }')
+            total=$(awk -v m="$msec" -v t="$total" 'BEGIN { print t + m }')
+        done
+
+        avg=$(awk -v t="$total" 'BEGIN { printf "%.2f", t / 10 }')
+
+        # measured facts about this router -> blue (T-A); the old <15 ms green / else
+        # cyan grading was a fixed threshold, not a health judgement, and cyan = links
+        printf " %-22s %b%8s %8s %8s ms%b\n" "$label" "$BLUE" "$min" "$avg" "$max" "$RESET"
+    done
+    
+    printf "\n"
+    print_success "DNS Benchmark completed"
+    press_any_key
+}
+bench_speedtest() {
+    clear
+    print_centered_header "Ookla Network Speedtest"
+    # Ookla ships no MIPS binary, so MIPS routers run speedtest-go instead:
+    # same speedtest.net servers, a real WAN-to-internet measurement. Both
+    # installers explain, wait, then return non-zero if the binary can't be
+    # had (no build, or no internet), so "|| return 1" goes back to the menu
+    # instead of "running" a missing binary that no-ops and claims success.
+    _stdiv="──────────────────────────────────────────────────────────────────────────────────────────"
+    case "$(uname -m)" in
+        mips*)
+            install_speedtest_go || return 1
+            printf "\n"; print_action "Running the Internet speed test (speedtest.net)"
+            printf "%s\n" "$_stdiv"
+            if "$STGO_BIN"; then
+                printf "\n%s\n" "$_stdiv"
+                print_success "Speedtest completed"
+            else
+                printf "\n%s\n" "$_stdiv"
+                print_error "Speedtest didn't complete - check your internet connection"
+            fi
+            press_any_key
+            ;;
+        *)
+            install_ookla_speedtest ondemand || return 1
+            printf "\n"; print_action "Running the Ookla speed test"
+            printf "%s\n" "$_stdiv"
+            "$OOKLA_BIN" -a --accept-license --accept-gdpr 2>/dev/null
+            printf "\n%s\n" "$_stdiv"
+            print_success "Ookla Speedtest completed"
+            press_any_key
+            ;;
+    esac
+}
+bench_iperf_server() {
+    lan_ipaddr=$(get_lan_ip)
+    clear
+    print_centered_header "iperf3 Network Speed Test Server"
+    
+    if ! command -v iperf3 >/dev/null 2>&1; then
+        install_package iperf3 || { press_any_key; return 1; }
+    fi
+    
+    print_action "Starting the iperf3 server on port 5201"; printf "\n"
+    print_info "Client usage:"
+    printf "   Download:  %biperf3 -c %s -P 6 -R -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
+    printf "   Upload:    %biperf3 -c %s -P 4 -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
+    
+    printf "\n"; print_info "Press Ctrl+C to stop the server and return to the menu"
+    trap 'printf "\n%s\n" "──────────────────────────────────────────────────────────────────────"' INT
+    iperf3 -s
+    trap - INT
+    print_success "iperf3 Server stopped"
+    press_any_key
+}
 benchmark_system() {
     while true; do
         clear
@@ -15719,494 +19191,14 @@ benchmark_system() {
         printf "\n"
         
         case $bench_choice in
-            1)
-                clear
-                print_centered_header "CPU Thermal Stress Test"
-                
-                # one stress tool - the backend follows the kernel (stress below 6.6, stress-ng from 6.6)
-                if ! _stress_installed; then
-                    if ! _stress_install; then
-                        if _stressng_unsafe; then
-                            print_error "Could not install 'stress' (stress-ng isn't used on this kernel - it can crash kernels before 6.6)"
-                        else
-                            print_error "Could not install a CPU stress tool"
-                        fi
-                        press_any_key
-                        continue
-                    fi
-                fi
-
-                get_temp() {
-                    local raw_temp
-                    raw_temp=$(get_cpu_temp)
-                    if [ "$raw_temp" != "unknown" ]; then
-                        local celsius=$(awk "BEGIN {printf \"%.2f\", $raw_temp}")
-                        local fahrenheit=$(awk "BEGIN {printf \"%.2f\", ($raw_temp * 1.8) + 32}")
-                        printf "%s°C (%s°F)" "$celsius" "$fahrenheit"
-                    else
-                        printf "N/A"
-                    fi
-                }
-                
-                # stress loads every logical CPU; the label names cores vs threads so a
-                # multithreaded chip (MT7621: 2 cores / 4 threads) reads honestly.
-                _cc=$(cpu_counts); cpu_logical=${_cc% *}; cpu_phys=${_cc#* }
-                [ "$cpu_phys" -eq 1 ] && _cw=core || _cw=cores
-                if [ "$cpu_phys" -lt "$cpu_logical" ]; then
-                    stress_what="$cpu_logical threads ($cpu_phys $_cw)"
-                else
-                    [ "$cpu_logical" -eq 1 ] && _cw=core || _cw=cores
-                    stress_what="$cpu_logical $_cw"
-                fi
-                
-                printf "\nHow many seconds to run stress test? [default: 60]: "
-                read -r duration
-                [ -z "$duration" ] && duration=60
-                
-                case "$duration" in
-                    ''|*[!0-9]*) duration=60 ;;
-                esac
-
-                raw_start=$(get_cpu_temp)
-                start_temp_str=$(get_temp)
-                start_fan_str=$(get_fan_speed)
-                
-                printf "\n"
-                countdown_run "Stress testing $stress_what" "$duration" "$(_stress_cmd)" --cpu "$cpu_logical" --timeout "${duration}s"
-
-                raw_end=$(get_cpu_temp)
-                end_temp_str=$(get_temp)
-                end_fan_str=$(get_fan_speed)
-                # Settle before the "after cooling" reading. Same fallback as the
-                # other usleep call sites - sleep 3, not 1, so the cooldown is
-                # still 3s on a build without the applet; a shorter pause would
-                # silently change what this measures.
-                usleep 3000000 2>/dev/null || sleep 3
-                raw_post=$(get_cpu_temp)
-                post_temp_str=$(get_temp)
-                post_fan_str=$(get_fan_speed)
-                
-                printf "\n"
-                print_success "Stress test completed"
-                printf "\n"
-                if [ "$raw_start" != "unknown" ] && [ "$raw_end" != "unknown" ]; then
-                    diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_end - $raw_start}")
-                    diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_end - $raw_start) * 1.8}")
-                    post_diff_c=$(awk "BEGIN {printf \"%+.2f\", $raw_post - $raw_start}")
-                    post_diff_f=$(awk "BEGIN {printf \"%+.1f\", ($raw_post - $raw_start) * 1.8}")
-                    
-                    # Fan % Changes
-                    if [ "$start_fan_str" = "N/A" ] || [ "$start_fan_str" -eq 0 ] 2>/dev/null; then
-                        fan_p="+0.0"
-                        fan_post_p="+0.0"
-                    else
-                        fan_p=$(awk "BEGIN {printf \"%+.1f\", (($end_fan_str - $start_fan_str) / $start_fan_str) * 100}")
-                        fan_post_p=$(awk "BEGIN {printf \"%+.1f\", (($post_fan_str - $start_fan_str) / $start_fan_str) * 100}")
-                    fi
-
-                    # --- TABLE RENDER ---
-                    # Left-justified: exactly 3 fixed rows about ONE test run
-                    # (a status report, not an open-ended comparison list), so
-                    # this fails the "genuinely comparing many values" test -
-                    # same category as the leaderboards, not DNS Benchmark.
-                    # printf's %Ns counts UTF-8 BYTES, not characters, on this
-                    # platform (confirmed: ${#}/wc -m/wc -c/awk length() ALL
-                    # miscount multi-byte glyphs like ° identically - there is
-                    # no reliable char-counting tool here). ljust() sidesteps
-                    # this: it never measures a string containing a multi-byte
-                    # char - the caller supplies the true length, computed from
-                    # ASCII-only numeric substrings + a known-constant offset
-                    # for the fixed °C/°F skeleton around them.
-                    ljust() {
-                        local width="$1" s="$2" true_len="$3" pad="" i=0
-                        while [ "$i" -lt "$((width - true_len))" ]; do pad="${pad} "; i=$((i + 1)); done
-                        printf '%s%s' "$s" "$pad"
-                    }
-
-                    c_start=$(awk "BEGIN {printf \"%.2f\", $raw_start}")
-                    f_start=$(awk "BEGIN {printf \"%.2f\", ($raw_start * 1.8) + 32}")
-                    c_end=$(awk "BEGIN {printf \"%.2f\", $raw_end}")
-                    f_end=$(awk "BEGIN {printf \"%.2f\", ($raw_end * 1.8) + 32}")
-                    c_post=$(awk "BEGIN {printf \"%.2f\", $raw_post}")
-                    f_post=$(awk "BEGIN {printf \"%.2f\", ($raw_post * 1.8) + 32}")
-                    # "°C (°F)" skeleton = 7 real characters around the two ASCII numbers
-                    temp_len_start=$((${#c_start} + ${#f_start} + 7))
-                    temp_len_end=$((${#c_end} + ${#f_end} + 7))
-                    temp_len_post=$((${#c_post} + ${#f_post} + 7))
-
-                    delta_end="${diff_c}°C (${diff_f}°F)"
-                    delta_post="${post_diff_c}°C (${post_diff_f}°F)"
-                    delta_len_end=$((${#diff_c} + ${#diff_f} + 7))
-                    delta_len_post=$((${#post_diff_c} + ${#post_diff_f} + 7))
-
-                    fan_start="${start_fan_str} RPM"
-                    fan_end="${end_fan_str} RPM (${fan_p}%)"
-                    fan_post="${post_fan_str} RPM (${fan_post_p}%)"
-
-                    printf "%-10s %s %s %s\n" "PHASE" "$(ljust 22 "TEMPERATURE" 11)" "$(ljust 18 "Δ CHANGE" 8)" "$(ljust 18 "FAN SPEED (Δ%)" 14)"
-                    printf "%s\n" "───────────────────────────────────────────────────────────────────────"
-                    printf "%-10s %s %s %-18s\n" "Start" "$(ljust 22 "$start_temp_str" "$temp_len_start")" "       ---        " "$fan_start"
-                    printf "%-10s %s %s %-18s\n" "End" "$(ljust 22 "$end_temp_str" "$temp_len_end")" "$(ljust 18 "$delta_end" "$delta_len_end")" "$fan_end"
-                    printf "%-10s %s %s %-18s\n" "End + 3s" "$(ljust 22 "$post_temp_str" "$temp_len_post")" "$(ljust 18 "$delta_post" "$delta_len_post")" "$fan_post"
-                fi         
-                press_any_key
-                ;;
-            2)
-                clear
-                print_centered_header "VPN & Crypto Benchmark"
-
-                if ! require_cmd openssl openssl-util "OpenSSL command-line tools"; then
-                    print_error "OpenSSL is required for the crypto benchmark and could not be installed"
-                    press_any_key
-                    continue
-                fi
-
-                # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
-                # device by appending one line in the same column order:
-                # id|label|cpu|aes64|aes1420|aes16k|cha64|cha1420|cha16k|rsa_sign|rsa_verify
-                bench_ref='be14000|Flint 4|MT7988a|342047|662912|715487|116011|214298|259237|163.5|6140.7
-mt3600be|Beryl 7|MT7987a|267728|621208|721917|126357|258082|323188|182.9|6850.8
-be3600|Slate 7|IPQ5332|148704|390262|469676|68462|158269|185704|103.4|3908.5
-mt6000|Flint 2|MT7986a|35969|403625|784938|128188|285938|336125|186.4|6906.5
-mt3000|Beryl AX|MT7981|174738|403199|465470|84051|166484|209360|118.7|4446.3
-mt5000|Brume 3|MT7987a|268078|621323|723411|126278|257233|323477|181.8|6816.4
-be9300|Flint 3|IPQ5332|186703|533571|639020|84930|216067|250916|139.7|5180.6
-mt1300|Beryl|MT7621|5522|5944|5759|21915|27148|27613|10.4|397.6
-mg1300|Mango 2|MT7621|5754|5947|5969|22320|27500|28326|10.5|411.1'
-
-                my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
-                [ -z "$my_id" ] && my_id="thisdevice"
-                my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
-                my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
-                [ -z "$my_label" ] && my_label="$my_id"
-                [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
-
-                print_info "Measuring this device - stop VPN, SQM and heavy traffic for accurate, comparable numbers"
-                printf "\n"
-
-                bench_measure aes-256-gcm 64;          a64=$BENCH_RESULT
-                bench_measure aes-256-gcm 1420;        a1420=$BENCH_RESULT
-                bench_measure aes-256-gcm 16384;       a16k=$BENCH_RESULT
-                bench_measure chacha20-poly1305 64;    c64=$BENCH_RESULT
-                bench_measure chacha20-poly1305 1420;  c1420=$BENCH_RESULT
-                bench_measure chacha20-poly1305 16384; c16k=$BENCH_RESULT
-                spin_run "Measuring RSA-2048 (connection setup)" openssl speed rsa2048
-                rs=$(bench_rsa_col sign/s); rv=$(bench_rsa_col verify/s)
-                rm -f "$SPIN_LOG" 2>/dev/null
-
-                bench_data="/tmp/.glnet-bench.$$"
-                {
-                    printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" \
-                        "${a64:-0}" "${a1420:-0}" "${a16k:-0}" "${c64:-0}" "${c1420:-0}" "${c16k:-0}" "${rs:-0}" "${rv:-0}"
-                    printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=11 && $1!=id'
-                } > "$bench_data"
-
-                bench_page=1
-                while true; do
-                    clear
-                    print_centered_header "VPN & Crypto Benchmark"
-                    case "$bench_page" in
-                        1)
-                            bench_render_cipher "WireGuard · ChaCha20-Poly1305" 7 8 9 "$bench_data" "$my_id"
-                            printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
-                            printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
-                            printf '\n %bNote: each device uses its own OpenSSL build. WireGuard runs kernel ChaCha20, so that%b\n' "$GREY" "$RESET"
-                            printf ' %bcolumn is a proxy; OpenVPN/IPsec uses OpenSSL directly.%b\n' "$GREY" "$RESET"
-                            ;;
-                        2)
-                            bench_render_cipher "OpenVPN / IPsec · AES-256-GCM" 4 5 6 "$bench_data" "$my_id"
-                            printf '\n %b64 B = small packets (VoIP/gaming/DNS)      1420 B = VPN throughput (downloads/streaming)%b\n' "$GREY" "$RESET"
-                            printf ' %b16 K = raw cipher ceiling, larger than any VPN packet%b\n' "$GREY" "$RESET"
-                            ;;
-                        3)
-                            bench_render_rsa "$bench_data" "$my_id"
-                            ;;
-                    esac
-                    printf " ──────────────────────────────────────────────────────────────────────────────\n"
-                    printf " [P] Previous   "
-                    bpi=1
-                    while [ $bpi -le 3 ]; do
-                        if [ $bpi -eq $bench_page ]; then
-                            printf "%b[%d]%b " "${BOLD}" "$bpi" "${RESET}"
-                        else
-                            printf "%b[%d]%b " "${GREY}" "$bpi" "${RESET}"
-                        fi
-                        bpi=$((bpi + 1))
-                    done
-                    printf "  [N] Next   [0] Back  "
-                    bp=$(read_single_char)
-                    printf '\n'
-                    case "$bp" in
-                        p|P|b|B) [ "$bench_page" -gt 1 ] && bench_page=$((bench_page - 1)) ;;
-                        n|N) [ "$bench_page" -lt 3 ] && bench_page=$((bench_page + 1)) ;;
-                        1|2|3) bench_page="$bp" ;;
-                        0) break ;;
-                    esac
-                done
-                rm -f "$bench_data"
-                ;;
-            3)
-                clear
-                print_centered_header "Disk I/O Benchmark"
-
-                available_kb=$(df -Pk . | awk 'NR==2 {print $4}')
-
-                if [ "$available_kb" -ge 1024000 ]; then test_size=1000; test_name="1GB"
-                elif [ "$available_kb" -ge 512000 ]; then test_size=500; test_name="500MB"
-                elif [ "$available_kb" -ge 256000 ]; then test_size=250; test_name="250MB"
-                elif [ "$available_kb" -ge 128000 ]; then test_size=125; test_name="125MB"
-                elif [ "$available_kb" -ge 64000 ]; then test_size=64; test_name="64MB"
-                elif [ "$available_kb" -ge 32000 ]; then test_size=32; test_name="32MB"
-                else test_size=16; test_name="16MB"; fi
-
-                printf "Test size: %b%s%b\n\n" "${BLUE}" "$test_name" "${RESET}"
-
-                get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
-
-                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-                w_start=$(get_ms)
-                spin_run "Running write test ($test_name)" dd if=/dev/zero of=./testfile bs=1M count=$test_size conv=fsync
-                w_end=$(get_ms)
-
-                sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
-                r_start=$(get_ms)
-                spin_run "Running read test ($test_name)" dd if=./testfile of=/dev/null bs=1M
-                r_end=$(get_ms)
-                rm -f ./testfile
-
-                w_ms=$((w_end - w_start)); [ "$w_ms" -le 0 ] && w_ms=1
-                r_ms=$((r_end - r_start)); [ "$r_ms" -le 0 ] && r_ms=1
-                write_speed=$(awk -v sz="$test_size" -v ms="$w_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
-                read_speed=$(awk -v sz="$test_size" -v ms="$r_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
-
-                # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
-                # device by appending one line: id|label|cpu|write_mbs|read_mbs
-                bench_ref='be14000|Flint 4|MT7988a|149.48|165.29
-mt3600be|Beryl 7|MT7987a|124.70|11.00
-be3600|Slate 7|IPQ5332|75.72|51.50
-mt6000|Flint 2|MT7986a|52.72|154.00
-mt3000|Beryl AX|MT7981|82.78|16.21
-mt5000|Brume 3|MT7987a|38.93|42.32
-be9300|Flint 3|IPQ5332|13.72|81.70
-mt1300|Beryl|MT7621|0.24|12.54
-mg1300|Mango 2|MT7621|22.07|4.80'
-
-                my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
-                [ -z "$my_id" ] && my_id="thisdevice"
-                my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
-                my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
-                [ -z "$my_label" ] && my_label="$my_id"
-                [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
-
-                bench_data="/tmp/.glnet-bench.$$"
-                {
-                    printf '%s|%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" "$write_speed" "$read_speed"
-                    printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=5 && $1!=id'
-                } > "$bench_data"
-
-                bench_render_disk "$bench_data" "$my_id"
-                printf "\n %bWrite is the reliable cross-device metric. Read may reflect the storage%b\n" "$GREY" "$RESET"
-                printf " %bcontroller's own onboard cache (notably on eMMC), which OS cache-drop can't%b\n" "$GREY" "$RESET"
-                printf " %breach - treat Read as indicative, not absolute. Test size scales with free%b\n" "$GREY" "$RESET"
-                printf " %bdisk space, so it can differ between devices.%b\n" "$GREY" "$RESET"
-                rm -f "$bench_data"
-
-                printf "\n"
-                print_success "Disk benchmark completed"
-                press_any_key
-                ;;
-            4)
-                clear
-                print_centered_header "Memory I/O Benchmark"
-
-                # Use the SAME RAM figure as Hardware Info screen 1 (get_mem_stats -> mem_rounded),
-                # never a second calc. A 128 MB device reads MemTotal ~124 MB; the old inline
-                # "est = MemTotal+30, then ceil-to-128" over-rounded that to 256. get_mem_stats
-                # buckets MemTotal to the nearest common size (124 -> 128), matching the GL UI.
-                get_mem_stats
-                total_mem=$mem_rounded
-                [ "${mem_total:-0}" -gt 0 ] || total_mem=512   # /proc/meminfo unreadable: old default
-
-                # Determine test size (100k blocks of 1M = 100GB of throughput)
-                # We want a large enough test to bypass L1/L2 cache saturation
-                if [ "$total_mem" -ge 960 ]; then test_size=100000; test_name="100GB"
-                elif [ "$total_mem" -ge 460 ]; then test_size=50000; test_name="50GB"
-                else test_size=4000; test_name="4GB"; fi
-
-                printf "System RAM: %b%s MB%b\n" "${BLUE}" "$total_mem" "${RESET}"
-                printf "Test throughput: %b%s%b\n\n" "${BLUE}" "$test_name" "${RESET}"
-
-                get_ms() { read ut _ < /proc/uptime; awk -v t="$ut" 'BEGIN {print int(t * 1000)}'; }
-
-                m_start=$(get_ms)
-                spin_run "Measuring memory controller throughput" dd if=/dev/zero of=/dev/null bs=1M count=$test_size
-                m_end=$(get_ms)
-
-                m_ms=$((m_end - m_start)); [ "$m_ms" -le 0 ] && m_ms=1
-                mem_speed=$(awk -v sz="$test_size" -v ms="$m_ms" 'BEGIN{printf "%.2f", (sz*1000)/ms}')
-
-                # Reference results, keyed on /proc/gl-hw-info/model. Add a tested
-                # device by appending one line: id|label|cpu|mem_mbs
-                bench_ref='be14000|Flint 4|MT7988a|5271.48
-mt3600be|Beryl 7|MT7987a|4361.12
-be3600|Slate 7|IPQ5332|3006.13
-mt6000|Flint 2|MT7986a|5401.50
-mt3000|Beryl AX|MT7981|2983.29
-mt5000|Brume 3|MT7987a|4492.36
-be9300|Flint 3|IPQ5332|4277.16
-mt1300|Beryl|MT7621|179.39
-mg1300|Mango 2|MT7621|465.66'
-
-                my_id=$(cat /proc/gl-hw-info/model 2>/dev/null)
-                [ -z "$my_id" ] && my_id="thisdevice"
-                my_label=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $2; exit}')
-                my_cpu=$(printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" '$1==id{print $3; exit}')
-                [ -z "$my_label" ] && my_label="$my_id"
-                [ -z "$my_cpu" ] && my_cpu=$(get_cpu_vendor_model | awk '{print $NF}')
-
-                bench_data="/tmp/.glnet-bench.$$"
-                {
-                    printf '%s|%s|%s|%s\n' "$my_id" "$my_label" "$my_cpu" "$mem_speed"
-                    printf '%s\n' "$bench_ref" | awk -F'|' -v id="$my_id" 'NF>=4 && $1!=id'
-                } > "$bench_data"
-
-                bench_render_mem "$bench_data" "$my_id"
-                printf "\n %bMeasures raw memcpy-style throughput via dd, not a full memory-latency%b\n" "$GREY" "$RESET"
-                printf " %bbenchmark; test size scales with device RAM to avoid cache saturation.%b\n" "$GREY" "$RESET"
-                rm -f "$bench_data"
-
-                printf "\n"
-                print_success "Memory benchmark completed"
-                press_any_key
-                ;;
-            5)
-                clear
-                print_centered_header "DNS Benchmark"
-
-                # Pre-check: can we resolve anything at all?
-                if ! spin_run "Checking DNS resolution" nslookup google.com; then
-                    print_error "DNS is not responding - check your internet connection or DNS settings"
-                    press_any_key
-                    continue
-                fi
-                printf "\n"
-
-                # Check for Hijacking
-                is_proxied=0
-                if nslookup "detect${RANDOM}.com" 1.2.3.4 >/dev/null 2>&1; then
-                    is_proxied=1
-                    print_warning "DNS Interception Active: Traffic is being redirected locally"
-                    printf "\n"
-                fi
-                
-                # Servers to test
-                SERVERS="127.0.0.1 1.1.1.1 8.8.8.8 9.9.9.9"
-                SAMPLES=20  # Number of tests per server
-                
-                printf " %-22s %8s %8s %8s\n" "DNS Server" "Min" "Avg" "Max"
-                printf " ────────────────────────────────────────────────────\n"
-
-                for server in $SERVERS; do
-                    case $server in
-                        "127.0.0.1") label="Local (AdGuard/Cache)" ;;
-                        "1.1.1.1")   label="Cloudflare" ;;
-                        "8.8.8.8")   label="Google" ;;
-                        "9.9.9.9")   label="Quad9" ;;
-                    esac
-
-                    total=0; min=9999; max=0; BURST=5
-
-                    for i in $(seq 1 10); do
-                        test_domain="bench${RANDOM}.net"
-
-                        read ut _ < /proc/uptime
-                        start_t=$ut
-                        
-                        # Execute a burst of lookups to exceed the 10ms clock tick
-                        for b in $(seq 1 $BURST); do
-                            nslookup "$test_domain" "$server" >/dev/null 2>&1
-                        done
-                        
-                        read ut _ < /proc/uptime
-                        end_t=$ut
-                        
-                        # Calculate per-query msec: ((end - start) * 1000) / BURST
-                        msec=$(awk -v s="$start_t" -v e="$end_t" -v b="$BURST" \
-                              'BEGIN { printf "%.2f", ((e - s) * 1000) / b }')
-
-                        # Update stats
-                        min=$(awk -v m="$msec" -v cur="$min" 'BEGIN { print (m < cur ? m : cur) }')
-                        max=$(awk -v m="$msec" -v cur="$max" 'BEGIN { print (m > cur ? m : cur) }')
-                        total=$(awk -v m="$msec" -v t="$total" 'BEGIN { print t + m }')
-                    done
-
-                    avg=$(awk -v t="$total" 'BEGIN { printf "%.2f", t / 10 }')
-
-                    # measured facts about this router -> blue (T-A); the old <15 ms green / else
-                    # cyan grading was a fixed threshold, not a health judgement, and cyan = links
-                    printf " %-22s %b%8s %8s %8s ms%b\n" "$label" "$BLUE" "$min" "$avg" "$max" "$RESET"
-                done
-                
-                printf "\n"
-                print_success "DNS Benchmark completed"
-                press_any_key
-                ;;
-            6)
-                clear
-                print_centered_header "Ookla Network Speedtest"
-                # Ookla ships no MIPS binary, so MIPS routers run speedtest-go instead:
-                # same speedtest.net servers, a real WAN-to-internet measurement. Both
-                # installers explain, wait, then return non-zero if the binary can't be
-                # had (no build, or no internet), so "|| continue" goes back to the menu
-                # instead of "running" a missing binary that no-ops and claims success.
-                _stdiv="──────────────────────────────────────────────────────────────────────────────────────────"
-                case "$(uname -m)" in
-                    mips*)
-                        install_speedtest_go || continue
-                        printf "\n"; print_action "Running the Internet speed test (speedtest.net)"
-                        printf "%s\n" "$_stdiv"
-                        if "$STGO_BIN"; then
-                            printf "\n%s\n" "$_stdiv"
-                            print_success "Speedtest completed"
-                        else
-                            printf "\n%s\n" "$_stdiv"
-                            print_error "Speedtest didn't complete - check your internet connection"
-                        fi
-                        press_any_key
-                        ;;
-                    *)
-                        install_ookla_speedtest ondemand || continue
-                        printf "\n"; print_action "Running the Ookla speed test"
-                        printf "%s\n" "$_stdiv"
-                        "$OOKLA_BIN" -a --accept-license --accept-gdpr 2>/dev/null
-                        printf "\n%s\n" "$_stdiv"
-                        print_success "Ookla Speedtest completed"
-                        press_any_key
-                        ;;
-                esac
-                ;;
+            1) bench_cpu_stress ;;
+            2) bench_crypto ;;
+            3) bench_disk_io ;;
+            4) bench_memory_io ;;
+            5) bench_dns_latency ;;
+            6) bench_speedtest ;;
             7)  manage_librespeed ;;
-            8)  
-                lan_ipaddr=$(get_lan_ip)
-                clear
-                print_centered_header "iperf3 Network Speed Test Server"
-                
-                if ! command -v iperf3 >/dev/null 2>&1; then
-                    install_package iperf3 || { press_any_key; continue; }
-                fi
-                
-                print_action "Starting the iperf3 server on port 5201"; printf "\n"
-                print_info "Client usage:"
-                printf "   Download:  %biperf3 -c %s -P 6 -R -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
-                printf "   Upload:    %biperf3 -c %s -P 4 -t 60%b\n" "${CYAN}" "$lan_ipaddr" "${RESET}"
-                
-                printf "\n"; print_info "Press Ctrl+C to stop the server and return to the menu"
-                trap 'printf "\n%s\n" "──────────────────────────────────────────────────────────────────────"' INT
-                iperf3 -s
-                trap - INT
-                print_success "iperf3 Server stopped"
-                press_any_key
-                ;;
+            8) bench_iperf_server ;;
             9)  manage_openspeedtest ;;
             0)
                 return
@@ -16254,7 +19246,7 @@ HELPEOF
 }
 
 _uci_view_wireless() {
-    local all_ifaces iface ssid key encryption disabled hidden device mode band htmode channel band_name mlo_ifaces five_ifaces two_ifaces
+    local all_ifaces iface ssid key encryption disabled hidden device mode band htmode channel band_name mlo_ifaces five_ifaces two_ifaces mesh
     all_ifaces=""
     for iface in $(uci show wireless 2>/dev/null | grep "wifi-iface" | cut -d'.' -f2 | cut -d'=' -f1 | sort -u); do
         ssid=$(uci get wireless.${iface}.ssid 2>/dev/null)
@@ -16283,6 +19275,14 @@ _uci_view_wireless() {
         case "$band" in 2g) band_name="2.4GHz" ;; 5g) band_name="5GHz" ;; 6g) band_name="6GHz" ;; *) band_name="Unknown" ;; esac
         uci get wireless.${iface}.mlo 2>/dev/null | grep -q "1" && band_name="MLO (Multi-Link)"
         printf "%bInterface:%b %s (%s)\n" "${CYAN}" "${RESET}" "$iface" "$band_name"
+        # GL's EasyMesh interfaces, created ahead of time (a placeholder SSID like "gl-mesh-bh-", off until mesh is
+        # set up): multi_ap 1 = the mesh's own link (an AP: the backhaul; a client: a satellite's uplink). 2 = a main
+        # network that also onboards new nodes - an ordinary network, so no label.
+        mesh=$(uci -q get wireless.${iface}.multi_ap)
+        case "$mesh:$mode" in
+            1:sta) printf "  Role: %bMesh uplink%b (a satellite's link to its parent node)\n" "$BLUE" "$RESET" ;;
+            1:*)   printf "  Role: %bMesh backhaul%b (links mesh nodes - used only when mesh is set up)\n" "$BLUE" "$RESET" ;;
+        esac
         printf "  SSID: %b%s%b\n" "${BLUE}" "$ssid" "${RESET}"
         [ -n "$key" ] && printf "  Password: %b%s%b\n" "$BLUE" "$key" "$RESET"
         [ -n "$encryption" ] && printf "  Encryption: %b%s%b\n" "$BLUE" "$encryption" "$RESET"
@@ -16298,7 +19298,7 @@ _uci_view_wireless() {
 }
 
 _uci_view_network() {
-    local name proto ip nm gw dns start limit lease ignore sec hn mac hip tgt rgw rdev domain upstream nhosts nroutes
+    local name proto ip nm gw dns lease sec hn mac hip tgt rgw rdev domain upstream nhosts nroutes pon psub prng
     printf "%b\n" "${CYAN}Interfaces:${RESET}"
     for name in $(uci show network 2>/dev/null | sed -n 's/^network\.\([A-Za-z0-9_]*\)=interface$/\1/p'); do
         proto=$(uci get network.${name}.proto 2>/dev/null)
@@ -16313,13 +19313,11 @@ _uci_view_network() {
     done
 
     printf "\n%b\n" "${CYAN}DHCP Pools:${RESET}"
-    for name in $(uci show dhcp 2>/dev/null | sed -n 's/^dhcp\.\([A-Za-z0-9_]*\)=dhcp$/\1/p'); do
-        ignore=$(uci get dhcp.${name}.ignore 2>/dev/null)
-        start=$(uci get dhcp.${name}.start 2>/dev/null)
-        limit=$(uci get dhcp.${name}.limit 2>/dev/null)
-        lease=$(uci get dhcp.${name}.leasetime 2>/dev/null)
-        if [ "$ignore" = "1" ]; then printf "  %-10s %bOFF%b\n" "$name" "${GREY}" "${RESET}"
-        else printf "  %-10s start=%b%s%b limit=%b%s%b lease=%b%s%b\n" "$name" "$BLUE" "${start:-—}" "$RESET" "$BLUE" "${limit:-—}" "$RESET" "$BLUE" "${lease:-default}" "$RESET"; fi
+    # the same records as the Admin Panel page (uci_dhcp_pools): subnet + the addresses each pool hands out
+    uci_dhcp_pools | while IFS='|' read -r name pon psub prng lease; do
+        [ -n "$name" ] || continue
+        if [ "$pon" = OFF ]; then printf "  %-10s %bOFF%b%s\n" "$name" "$GREY" "$RESET" "$([ "$psub" != - ] && printf '   %s' "$psub")"
+        else printf "  %-10s %b%-18s%b %b%-33s%b lease %b%s%b\n" "$name" "$BLUE" "$psub" "$RESET" "$BLUE" "$prng" "$RESET" "$BLUE" "$lease" "$RESET"; fi
     done
 
     nhosts=$(uci show dhcp 2>/dev/null | grep -c '=host$')
@@ -16755,12 +19753,16 @@ EOF
 # Dependencies - install ONLY if the command is missing (require_cmd -> apk/opkg-aware installer), so
 # untested firmware without them preinstalled still works. On a FRESH nginx install, disable the stock
 # nginx service + drop its default vhost so it can't clash with our port-$OST_PORT instance.
+# A freshly installed nginx package comes enabled, with a default site: stop + disable that stock service and
+# drop the site so it can't clash with our port-$OST_PORT instance. Only ever after installing nginx where the
+# firmware had none - on firmware whose admin panel runs on nginx this would take the panel down (the e2e
+# stubs it for exactly that reason).
+_stock_nginx_off() { { /etc/init.d/nginx stop; /etc/init.d/nginx disable; } >/dev/null 2>&1; rm -f /etc/nginx/conf.d/default.conf; }
 _ost_deps() {
     if ! command -v nginx >/dev/null 2>&1; then
         install_package nginx-ssl "NGINX web server" || { print_error "Failed to install NGINX (nginx-ssl)"; return 1; }
         command -v nginx >/dev/null 2>&1 || { print_error "NGINX still not available after install"; return 1; }
-        /etc/init.d/nginx stop >/dev/null 2>&1; /etc/init.d/nginx disable >/dev/null 2>&1
-        [ -f /etc/nginx/conf.d/default.conf ] && rm -f /etc/nginx/conf.d/default.conf
+        _stock_nginx_off
     fi
     require_cmd unzip unzip "unzip" || { print_error "Failed to install unzip"; return 1; }
     require_cmd wget  wget  "wget"  || { print_error "Failed to install wget"; return 1; }
@@ -16999,10 +20001,10 @@ Actions by state:
   • Reinstall: the fix for SERVICE DOWN - re-downloads the app, rewrites the config
     and service, and restarts. (Shown only when SERVICE DOWN.)
   • Uninstall: stops the service and removes the app, config, and service script.
-  • Diagnostics: reports whether the service is running and the port is listening,
-    and shows the URL to open.
   • Enable/Disable Persistence: keep OpenSpeedTest across a firmware upgrade (adds
     its files to the sysupgrade backup). Off by default to save space.
+  • Diagnostics: reports whether the service is running and the port is listening,
+    and shows the URL to open.
 
 Space needed
 ────────────
@@ -17048,15 +20050,16 @@ manage_openspeedtest() {
             n=$((n + 1)); eval "OST_ACT_${n}=\"$a\""
             printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$(_lc_label "$a")"
         done
-        # Feature-specific extra: Diagnostics (only meaningful once something is installed).
+        n=$((n + 1)); OST_PERSIST_N=$n
+        if _ost_persisted; then a="Disable Persistence"; else a="Enable Persistence"; fi
+        printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
+        # Feature-specific extra LAST (the feature-lifecycle order: lifecycle, Persistence, then extras - as the page
+        # lists them): Diagnostics, only meaningful once something is installed, so it's the item that drops
         OST_DIAG_N=0
         if [ "$state" != NOT_INSTALLED ]; then
             n=$((n + 1)); OST_DIAG_N=$n
             printf "%s%sDiagnostics\n" "$(_lc_num "$n")" "$NSEP"
         fi
-        n=$((n + 1)); OST_PERSIST_N=$n
-        if _ost_persisted; then a="Disable Persistence"; else a="Enable Persistence"; fi
-        printf "%s%s%s\n" "$(_lc_num "$n")" "$NSEP" "$a"
         printf "%s%sBack\n" "$N0" "$NSEP"
         printf "%s Help\n" "$NQ"
         printf "\nChoose [1-%s/0/?]: " "$n"
@@ -17089,6 +20092,2228 @@ manage_openspeedtest() {
 }
 
 # -----------------------------
+# Web UI API   glinet_utils --api <features | status <id> | help <id> | action <id> <action> [--confirmed]>
+# -----------------------------
+# The Web UI's only way in: one JSON object on stdout, nothing else. It reads and acts through the SAME
+# functions as the menus (get_agh_stats, agh_rows, agh_primary_action, agh_action_text, agh_do), so a
+# word changed for one interface changes on both. Fixed verbs and ids only. An action is refused unless
+# it is the one the screen offers right now (never act on a stale page) and, when the menus ask first,
+# unless the page confirmed it. Results are only reported as done once agh_do verified them.
+_json_str() {   # <text> -> a JSON string (backslash, quote, tab escaped; lines joined with \n)
+    printf '%s' "$1" | tr -d '\033\r' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e "s/$(printf '\t')/\\\\t/g" \
+        | awk 'BEGIN { printf "\"" } { if (NR > 1) printf "\\n"; printf "%s", $0 } END { printf "\"" }'
+}
+_json_lines() {   # <text> -> a JSON array, one string per non-empty line
+    local l first=1 oifs=$IFS; printf '['
+    IFS='
+'
+    for l in $1; do IFS=$oifs; [ -n "$l" ] || continue; [ "$first" = 1 ] || printf ','; first=0; _json_str "$l"; done
+    IFS=$oifs; printf ']'
+}
+_api_row() {   # "label|value|tone|note" -> one JSON object with those four keys
+    local r="$1" l v t n; l=${r%%|*}; r=${r#*|}; v=${r%%|*}; r=${r#*|}; t=${r%%|*}; n=${r#*|}
+    printf '{"label":%s,"value":%s,"tone":%s,"note":%s}' "$(_json_str "$l")" "$(_json_str "$v")" "$(_json_str "$t")" "$(_json_str "$n")"
+}
+_api_message() {   # <tone> <text> [details] [fix] -> one JSON object (details = an array of lines)
+    printf '{"tone":%s,"text":%s,"details":%s,"fix":%s}' "$(_json_str "$1")" "$(_json_str "$2")" "$(_json_lines "$3")" "$(_json_str "$4")"
+}
+_api_action() {   # <action id> -> its words (agh_action_text) as one object
+    agh_action_text "$1" || return 1
+    local web=true why=""; [ "$A_WEB" = 1 ] || { web=false; why=$A_WEB; }
+    printf '{"id":%s,"label":%s,"warning":%s,"ask":%s,"progress":%s,"web":%s,"terminal_reason":%s}' \
+        "$(_json_str "$1")" "$(_json_str "$A_LABEL")" "$(_json_str "$A_WARN")" "$(_json_str "$A_ASK")" \
+        "$(_json_str "$A_PROG")" "$web" "$(_json_str "$why")"
+}
+_api_agh_status() {   # -> the Control Center's state: STATUS rows, the item-1 action, a screen message
+    local p act="" msg=null rows r first=1 oifs=$IFS
+    p=$(agh_presence)
+    if [ "$p" = supported ]; then
+        get_agh_stats >/dev/null 2>&1
+        rows=$(agh_rows); act=$(agh_primary_action)
+    else
+        agh_life "$p"; rows="AdGuardHome|$AGH_WORD|$AGH_TONE|$AGH_NOTE"
+        [ "$p" = missing ] && act=factory_reset
+        msg=$(_api_message warning "$(agh_presence_msg "$p")")
+    fi
+    printf '{"feature":"agh","title":"AdGuardHome Control Center","presence":%s,"rows":[' "$(_json_str "$p")"
+    IFS='
+'
+    for r in $rows; do IFS=$oifs; [ "$first" = 1 ] || printf ','; first=0; _api_row "$r"; done
+    IFS=$oifs
+    printf '],"actions":['; [ -n "$act" ] && _api_action "$act"
+    printf '],"message":%s}' "$msg"
+}
+_api_agh_action() {   # <action> <confirmed 0|1> -> ok + message + the status re-read AFTER acting
+    local want="$1" ok=false msg p cur
+    p=$(agh_presence)
+    if [ "$p" != supported ]; then
+        msg=$(_api_message warning "$(agh_presence_msg "$p")")
+    else
+        get_agh_stats >/dev/null 2>&1; cur=$(agh_primary_action)
+        if [ "$want" != "$cur" ]; then
+            msg=$(_api_message info "AdGuardHome changed since this page loaded - this is its current state")
+        elif ! agh_action_text "$want" || [ "$A_WEB" != 1 ]; then
+            msg=$(_api_message info "$A_LABEL runs from the toolkit's menus in a terminal - $A_WEB")
+        elif [ -n "$A_ASK" ] && [ "$2" != 1 ]; then
+            msg=$(_api_message error "$A_LABEL needs confirming first")
+        elif agh_do "$want" >/dev/null 2>&1; then
+            ok=true; msg=$(_api_message success "$A_DONE")
+        else
+            msg=$(_api_message error "$A_FAIL" "$(logread 2>/dev/null | grep -i adguard | tail -3)" "$A_FIX")
+        fi
+    fi
+    printf '{"ok":%s,"message":%s,"status":%s}' "$ok" "$msg" "$(_api_agh_status)"
+}
+# Hardware Information for the page: one tab's content as JSON (the same data the menu screen draws)
+_api_hw_row() {   # <label> <value> <tone> [key] - key = which live value updates this row
+    printf '{"label":%s,"value":%s,"tone":"%s","key":"%s"}' "$(_json_str "$1")" "$(_json_str "$2")" "$3" "${4:-}"
+}
+_api_hw_status() {   # <overview|crypto|network|wireless> [--reveal]
+    local tab="${1:-overview}" rv=0 m sn dd sep fw r first sec hsec lbl val tone radio iface band wgen proto htmode mimo ch
+    [ "$2" = --reveal ] && rv=1
+    printf '{"feature":"hardware","title":"Hardware Information","tab":"%s",' "$tab"
+    case "$tab" in
+        overview)
+            hw_collect_static >/dev/null 2>&1
+            m=$mac; sn=$sn; dd=$ddns
+            [ "$rv" = 1 ] || { m=$(mask_mac "$mac"); sn=$(mask_keep_tail "$sn"); dd=$(mask_keep_tail "$ddns"); }
+            fw=$(cat /etc/glversion 2>/dev/null)
+            printf '"revealed":%s,"sections":[' "$([ "$rv" = 1 ] && echo true || echo false)"
+            printf '{"title":"System Information","rows":['
+            sep=""
+            for r in "Model|$hostname|fact|" "Firmware|$fw|fact|" "Uptime|$(hw_uptime_text)|fact|uptime" "Device MAC|$m|fact|" "Device SN|$sn|fact|" "Device ID|$dd|fact|"; do
+                lbl=${r%%|*}; r=${r#*|}; val=${r%%|*}; r=${r#*|}; tone=${r%%|*}; r=${r#*|}
+                [ -n "$val" ] || continue; printf '%s' "$sep"; sep=","; _api_hw_row "$lbl" "$val" "$tone" "$r"
+            done
+            printf ']},{"title":"CPU","rows":['
+            sep=""
+            for r in "Vendor/Model|$cpu_vendor_model|fact|" "Cores|$cpu_cores|fact|" "Frequency|${cpu_freq:+$(printf '%.0f MHz' "$cpu_freq")}|fact|" \
+                     "CPU Temperature|$(hw_temp_text)|$([ "$(hw_temp_text)" = UNKNOWN ] && echo yellow || echo fact)|temp" "Fan Speed|$(hw_fan_text)|fact|fan" \
+                     "CPU Usage|-|fact|cpu" "Load Avg|$(hw_load_text)|fact|load"; do
+                lbl=${r%%|*}; r=${r#*|}; val=${r%%|*}; r=${r#*|}; tone=${r%%|*}; r=${r#*|}
+                [ -n "$val" ] || continue; printf '%s' "$sep"; sep=","; _api_hw_row "$lbl" "$val" "$tone" "$r"
+            done
+            get_mem_stats
+            printf ']},{"title":"Memory","rows":[%s,%s,%s,%s,%s,%s]}' \
+                "$(_api_hw_row "Soldered RAM" "$mem_rounded MB" fact)" "$(_api_hw_row "Free RAM" "$mem_free MB" fact mem_free)" \
+                "$(_api_hw_row "Total Usable" "$mem_total MB" fact)" "$(_api_hw_row "Used RAM" "$mem_used MB ($mem_p_whole.$mem_p_decimal%)" fact mem_used)" \
+                "$(_api_hw_row "Available RAM" "$mem_avail MB" fact mem_available)" "$(_api_hw_row "Buff/Cache" "$mem_buffcache MB" fact mem_buffcache)"
+            printf ',{"title":"Storage","rows":[%s]}]' "$(_api_hw_row "${storage_label:-Physical Storage}" "${storage_value:-UNKNOWN}" "${storage_tone:-yellow}")"
+            printf ',"live":%s' "$(hw_live_json fs)" ;;
+        crypto)
+            hw_crypto_rows > "/tmp/.glhwapi.$$"
+            printf '"features":%s,"sections":[' "$(_json_str "${cpu_features% }")"
+            hsec=""; first=1
+            while IFS='|' read -r sec lbl val tone; do
+                if [ "$sec" != "$hsec" ]; then
+                    [ -n "$hsec" ] && printf ']},'
+                    printf '{"title":%s,"rows":[' "$(_json_str "$sec")"; hsec=$sec; first=1
+                fi
+                [ "$first" = 1 ] || printf ','; first=0; _api_hw_row "$lbl" "$val" "$tone"
+            done < "/tmp/.glhwapi.$$"
+            [ -n "$hsec" ] && printf ']}'
+            printf ']'; rm -f "/tmp/.glhwapi.$$" ;;
+        network)
+            printf '"network":%s' "$(hwnet_json)" ;;
+        wireless)
+            hw_wireless_rows > "/tmp/.glhwapi.$$"
+            printf '"radios":['; first=1
+            while IFS='|' read -r radio iface band wgen proto htmode mimo ch; do
+                [ "$first" = 1 ] || printf ','; first=0
+                printf '{"radio":%s,"rows":[%s,%s,%s,%s,%s,%s]}' "$(_json_str "$radio")" "$(_api_hw_row Interface "$iface" fact)" \
+                    "$(_api_hw_row Band "$band${wgen:+  ($wgen)}" fact)" "$(_api_hw_row Protocol "$proto" fact)" "$(_api_hw_row "HT Mode" "$htmode" fact)" \
+                    "$(_api_hw_row MIMO "$mimo" fact)" "$(_api_hw_row Channel "$ch" fact)"
+            done < "/tmp/.glhwapi.$$"
+            printf ']'; rm -f "/tmp/.glhwapi.$$" ;;
+        *) printf '"error":"unknown tab"' ;;
+    esac
+    printf '}\n'
+}
+
+# =====================================================================================================
+# Admin Panel screens - the web side of every menu screen (2026-10-12).
+# A screen is a function that prints one line per item, the fields separated by TABs, through the ws_*
+# builders below; _ws_json turns the lines into the page's JSON. So a screen reads like the menu screen it
+# mirrors (title, STATUS rows, tables, the menu's actions) and draws from the same functions, and the page
+# needs no per-screen code. Line kinds:
+#   title <text>                      tab <id> <title> / tabsel <id>     msg <tone> <text> [fix] / detail <line>
+#   card <title> [half]  / endcard    row <label> <value> <tone> [key] [note]
+#   note <text>   pre <line>          th <h1> <h2> ...  /  tr <c1> <c2> ...   (a cell "~tone~text" is a coloured word)
+#   act <id> <label> <style> [ask] [warning] [mode]   - inside a card: its footer; before any card: the page's
+#                                       style primary|danger|""; ask = confirm first; mode run|job|terminal
+#   field <id> <label> <type> [value] [options] [help] - a form field of the act above (text|number|select|password|check)
+#   live <seconds>                    job <id> <title>   (show that job's log card)
+# Tones: green yellow red grey (the status-colour standard), fact (plain), link (a URL).
+# =====================================================================================================
+WS_T=$(printf '\t'); WS_NL='
+'
+WS_JOBS=/tmp/glutils/jobs
+ws() {   # <kind> <field>... -> one spec line (a TAB or newline inside a field can't break the line)
+    local out="" a
+    for a in "$@"; do
+        case "$a" in *"$WS_T"*|*"$WS_NL"*) a=$(printf '%s' "$a" | tr "$WS_T$WS_NL" ' \001') ;; esac
+        out="$out$a$WS_T"
+    done
+    printf '%s\n' "${out%"$WS_T"}"
+}
+ws_title() { ws title "$1"; }
+ws_msg()   { ws msg "$1" "$2" "${3:-}"; }           # <tone> <text> [fix]
+ws_detail(){ ws detail "$1"; }
+ws_card()  { ws card "$1" "${2:-}" "${3:-}"; }    # <title> [half] [aside - a note at the header's right]
+ws_end()   { ws endcard; }
+ws_row()   { ws row "$1" "$2" "${3:-fact}" "${4:-}" "${5:-}"; }   # <label> <value> [tone] [key] [note]
+ws_note()  { ws note "$1"; }
+ws_pre()   { printf '%s\n' "$1" | while IFS= read -r _wl; do ws pre "$_wl"; done; }
+ws_th()    { ws th "$@"; }
+ws_tr()    { ws tr "$@"; }
+ws_act()   { ws act "$1" "$2" "${3:-}" "${4:-}" "${5:-}" "${6:-run}"; }   # <id> <label> [style] [ask] [warning] [mode]
+ws_field() { ws field "$1" "$2" "${3:-text}" "${4:-}" "${5:-}" "${6:-}" "${7:-}"; } # <id> <label> [type] [value] [options] [help] [when]
+# [when] = the id of a check box the field belongs to: shown (and sent) only while it's ticked.
+# A password's [options] "match:<id>" = must equal that field (a Confirm Password)
+ws_live()  { ws live "$1"; }
+ws_change() { ws change; }   # after ws_act: a setting dialog (opens on current values) - its button waits for a change
+ws_reader() { ws reader "$1" "$2" "$3"; }   # <title> <notes|md> <text> - something to read, shown like the help
+ws_lc()    {   # <ALL-CAPS status word> -> its tone, by the status-colour standard
+    case "$1" in
+        ENABLED|ON|UP|ACTIVE|RUNNING|OK|YES|CONNECTED|INSTALLED|FULL|STABLE|AUTO|DYNAMIC) echo green ;;
+        DISABLED|OFF|DOWN|INACTIVE|NO|"NOT INSTALLED"|NONE|"NOT SET"|"NO CHANGE"|STOPPED) echo grey ;;
+        "SERVICE DOWN"|FAILED|ERROR|MISSING|BROKEN|UNKNOWN) echo red ;;
+        *) echo yellow ;;
+    esac
+}
+ws_args() {   # WS_ARGS (k=v lines from the page) -> the value of <key>
+    printf '%s\n' "$WS_ARGS" | sed -n "s/^$1=//p" | head -1
+}
+
+# the spec lines -> one JSON object for the page
+_ws_json() {   # <screen> <tab>
+    tr -d '\r' | sed "s/$(printf '\033')\\[[0-9;]*[A-Za-z]//g" | awk -F '\t' -v scr="$1" -v tsel="$2" '
+    function rep(s, ch, w,  n, p, i, o) { n = split(s, p, ch); o = p[1]; for (i = 2; i <= n; i++) o = o w p[i]; return o }
+    function e(s) { s = rep(s, "\\", "\\\\"); s = rep(s, "\"", "\\\""); s = rep(s, "\001", "\\n"); gsub(/[\002-\037]/, " ", s); return "\"" s "\"" }
+    function cell(s,  t) { if (s ~ /^~[a-z]+~/) { t = s; sub(/^~/, "", t); sub(/~.*/, "", t); sub(/^~[a-z]+~/, "", s); return "{\"text\":" e(s) ",\"tone\":" e(t) "}" } return e(s) }
+    function add(lst, x) { return lst == "" ? x : lst "," x }
+    function flushact() { if (ah == "") return; a = ah ",\"fields\":[" af "]}"; if (ascope == "card") cacts = add(cacts, a); else pacts = add(pacts, a); ah = ""; af = "" }
+    function flushcard() { flushact(); if (!incard) return
+        c = "{\"title\":" e(ct) ",\"half\":" (chalf ? "true" : "false") ",\"aside\":" e(caside) ",\"rows\":[" crows "],\"notes\":[" cnotes "],\"pre\":" e(cpre) ",\"headers\":[" cth "],\"table\":[" ctr "],\"actions\":[" cacts "]" \
+            (ced != "" ? ",\"editor\":" e(ced) ",\"kind\":" e(ckind) ",\"meter\":" (cmeter == "" ? "null" : cmeter) ",\"erows\":[" cerows "]" : "") \
+            (ctiles != "" ? ",\"tiles\":[" ctiles "]" : "") "}"
+        cards = add(cards, c); incard = 0; crows = cnotes = cth = ctr = cacts = cpre = ced = cmeter = cerows = ctiles = ""; cpn = 0 }
+    $1 == "title"  { title = $2 }
+    $1 == "tab"    { tabs = add(tabs, "{\"id\":" e($2) ",\"title\":" e($3) ",\"wait\":" e($4) "}") }
+    $1 == "tabsel" { tsel = $2 }
+    $1 == "msg"    { if (msg == "") { mt = $2; mx = $3; mf = $4; msg = 1 } }
+    $1 == "detail" { if (msg == 1 && !mdone) md = add(md, e($2)) }
+    $1 == "card"   { flushcard(); incard = 1; ct = $2; chalf = ($3 == "half"); caside = $4; if (msg == 1) mdone = 1 }
+    $1 == "endcard"{ flushcard() }
+    $1 == "row"    { crows = add(crows, "{\"label\":" e($2) ",\"value\":" e($3) ",\"tone\":" e($4 == "" ? "fact" : $4) ",\"key\":" e($5) ",\"note\":" e($6) "}") }
+    $1 == "note"   { cnotes = add(cnotes, e($2)) }
+    $1 == "pre"    { cpn++; cpre = (cpn == 1 ? $2 : cpre "\001" $2) }
+    $1 == "th"     { r = ""; for (i = 2; i <= NF; i++) r = add(r, e($i)); cth = r }
+    $1 == "tr"     { r = ""; for (i = 2; i <= NF; i++) r = add(r, cell($i)); ctr = add(ctr, "[" r "]") }
+    $1 == "act"    { flushact(); ascope = incard ? "card" : "page"
+                     ah = "{\"id\":" e($2) ",\"label\":" e($3) ",\"style\":" e($4) ",\"ask\":" e($5) ",\"warning\":" e($6) ",\"mode\":" e($7 == "" ? "run" : $7) }
+    $1 == "field"  { af = add(af, "{\"id\":" e($2) ",\"label\":" e($3) ",\"type\":" e($4 == "" ? "text" : $4) ",\"value\":" e($5) ",\"options\":" e($6) ",\"help\":" e($7) ",\"when\":" e($8) "}") }
+    $1 == "change" { if (ah != "") ah = ah ",\"change\":true" }
+    $1 == "live"   { live = $2 + 0 }
+    $1 == "editor" { ced = $2; ckind = ($3 == "" ? "agh" : $3) }
+    $1 == "tile"   { ctiles = add(ctiles, "{\"label\":" e($2) ",\"value\":" e($3) ",\"unit\":" e($4) ",\"note\":" e($5) "}") }
+    $1 == "emeter" { cmeter = "{\"mt\":" ($2 + 0) ",\"st\":" ($3 + 0) ",\"cap\":" ($4 + 0) "}" }
+    $1 == "erow"   { cerows = add(cerows, "{\"id\":" e($2) ",\"name\":" e($3) ",\"type\":" e($4) ",\"sec\":" e($5) ",\"oi\":" ($6 + 0) ",\"oe\":" ($7 + 0) ",\"ti\":" ($8 + 0) ",\"te\":" ($9 + 0) ",\"rules\":" ($10 + 0) ",\"est\":" ($11 + 0) "}") }
+    $1 == "job"    { job = "{\"id\":" e($2) ",\"title\":" e($3) "}" }
+    $1 == "reader" { reader = "{\"title\":" e($2) ",\"format\":" e($3) ",\"text\":" e($4) "}" }
+    END { flushcard(); flushact()
+        m = msg == 1 ? "{\"tone\":" e(mt) ",\"text\":" e(mx) ",\"details\":[" md "],\"fix\":" e(mf) "}" : "null"
+        printf "{\"ok\":true,\"screen\":%s,\"title\":%s,\"tab\":%s,\"tabs\":[%s],\"message\":%s,\"actions\":[%s],\"cards\":[%s],\"live\":%d,\"job\":%s,\"reader\":%s}\n", \
+            e(scr), e(title), e(tsel), tabs, m, pacts, cards, live, (job == "" ? "null" : job), (reader == "" ? "null" : reader) }'
+}
+
+# A menu screen's own coloured text -> cards: a heading at column 0 starts a card; a section whose lines are all
+# "Label: value" becomes rows (tone from the value's colour: grey/green/red/yellow by the status-colour
+# standard), any other section keeps its alignment as monospaced lines. For the read-only views (UCI, reports).
+_ws_text() {   # stdin: coloured text
+    awk -v E="$(printf '\033')" -v T="$(printf '\t')" '
+    function strip(s) { gsub(E "\\[[0-9;]*[A-Za-z]", "", s); return s }
+    function tone(raw,  v) { v = strip(raw)
+        if (raw ~ E "\\[(90|38;5;24[0-9])m") return "grey"; if (raw ~ E "\\[(32|92)m") return "green"
+        if (raw ~ E "\\[(31|91)m") return "red"; if (raw ~ E "\\[(33|93)m") return "yellow"
+        if (v ~ /^https?:\/\//) return "link"; return "fact" }
+    function flush(  i) { if (n == 0 && title == "") return
+        print "card" T title
+        for (i = 1; i <= n; i++) {
+            if (allrows) { l = strip(L[i]); sub(/^ +/, "", l); lab = l; sub(/:.*/, "", lab); r = L[i]; sub(/^[^:]*:[ ]*/, "", r); print "row" T lab T strip(r) T tone(r) }
+            else { l = strip(L[i]); sub(/^  /, "", l); print "pre" T l }
+        }
+        n = 0; title = ""; allrows = 1 }
+    BEGIN { allrows = 1 }
+    { line = $0 }
+    strip(line) ~ /^[ \t]*$/ { next }
+    line !~ /^ / && line !~ /^\t/ { flush(); title = strip(line); sub(/:[ ]*$/, "", title); next }
+    { n++; L[n] = line; if (strip(line) !~ /^  [A-Za-z][A-Za-z0-9 ()\/.-]*: /) allrows = 0 }
+    END { flush() }'
+}
+# ---- a menu screen as it is: its STATUS block and its numbered items, read from the screen itself ----------------
+# For the menus whose items are simple (an action, maybe a y/N question): the page shows the same STATUS rows and
+# one button per item, and a button runs that item in the menu's own code as a job (only the item's own output is
+# kept - not the screen redrawn around it). Items that need typed values get fields through an override.
+_ws_cli_keys() { N0='[0]'; N1='[1]'; N2='[2]'; N3='[3]'; N4='[4]'; N5='[5]'; N6='[6]'; N7='[7]'; N8='[8]'; N9='[9]'; NQ='[?]'; NCL='[CL]'; NSEP=' '; }
+_ws_cli_capture() { ( _ws_cli_keys; printf '0\n0\n0\n' | "$@" ) 2>&1 </dev/null; }
+_ws_cli_mirror() {   # <menu function> [override function: <n> <label> -> prints its own act/field lines, 1 = default]
+    local fn="$1" ov="${2:-}" n lab
+    _ws_cli_capture "$fn" | awk -v E="$(printf '\033')" -v T="$(printf '\t')" '
+        function strip(s) { gsub(E "\\[[0-9;?]*[A-Za-z]", "", s); gsub(/\r/, "", s); return s }
+        function tone(raw) { if (raw ~ E "\\[(90)m") return "grey"; if (raw ~ E "\\[(1;)?(32|92)m") return "green"
+            if (raw ~ E "\\[(1;)?(31|91)m") return "red"; if (raw ~ E "\\[(1;)?(33|93)m") return "yellow"; return "fact" }
+        function row(lab, raw,  v, note) { v = strip(raw); sub(/^ +/, "", v); sub(/ +$/, "", v); note = ""
+            if (v ~ /\)$/ && index(v, " (")) { note = substr(v, index(v, " (") + 2); sub(/\)$/, "", note); v = substr(v, 1, index(v, " (") - 1) }
+            if (v == "") return
+            tn = tone(raw); if (v ~ /^https?:\/\//) tn = "link"
+            out("row" T lab T v T tn T "" T note) }
+        function out(l) { O[++no] = l; if (l ~ /^card/) { nc++; if (nc == 2) c2 = no } }
+        { raw = $0; t = strip(raw) }
+        done { next }
+        t ~ /Choose \[/ { done = 1; next }
+        t ~ /^[ ]*\[(CL|[0-9])\][ ]/ { k = t; sub(/^[ ]*\[/, "", k); lb = k; sub(/\].*/, "", k); sub(/^[^]]*\][ ]+/, "", lb)
+            if (k != "0" && lb !~ /^Back$|^Help$|Main Menu/) items = items "item" T k T lb "\n"; next }
+        t ~ /^[ ]*\[\?\]/ { next }
+        t ~ /^[┌│└]/ || t ~ /^[ \t]*$/ { next }
+        t ~ /^ [A-Za-z\/][^:]*:?$/ && raw ~ E "\\[36m" { h = t; sub(/^ +/, "", h); sub(/:$/, "", h); if (h == toupper(h)) h = substr(h, 1, 1) tolower(substr(h, 2)); out("card" T h); next }
+        t ~ /^   +[A-Za-z][^:]*: / {
+            if (index(t, " | ")) { n = split(raw, P, / \| /); for (i = 1; i <= n; i++) { x = strip(P[i]); sub(/^ +/, "", x); lb = x; sub(/:.*/, "", lb); r = P[i]; sub(/^[^:]*:[ ]*/, "", r); row(lb, r) } ; next }
+            lb = t; sub(/^ +/, "", lb); sub(/:.*/, "", lb); r = raw; sub(/^[^:]*:[ ]*/, "", r); row(lb, r); next }
+        raw ~ E "\\[(1;)?33m" || raw ~ E "\\[(1;)?31m" { if (!m) { m = 1; x = t; sub(/^[^A-Za-z0-9]*/, "", x); mt = "warning"; if (raw ~ E "\\[(1;)?31m") mt = "error"; out("msg" T mt T x) } ; next }
+        t ~ /^ +[^ ]/ { x = t; sub(/^ +/, "", x); out("note" T x) }
+        END { if (nc == 0) { print "card" T "Status" }
+              for (i = 1; i <= no; i++) { if (i == c2) printf "%s", items; print O[i] }
+              if (c2 == 0) printf "%s", items }' | while IFS="$WS_T" read -r k n lab rest; do
+            if [ "$k" = item ]; then
+                if [ -n "$ov" ] && "$ov" "$n" "$lab"; then :; else ws_act "item_$(printf '%s' "$n" | tr 'A-Z' 'a-z')" "$lab" "" "" "" ijob; fi
+            else
+                printf '%s\t%s\t%s%s\n' "$k" "$n" "$lab" "${rest:+$WS_T$rest}"
+            fi
+        done
+}
+# One menu item as an INTERACTIVE job (never pre-fed answers - a pick list would read them as invalid input): the
+# menu runs as in a terminal; a watcher chooses the item when the menu first asks, marks where the item's own output
+# starts ($d/start), and once the menu redraws and asks again, marks where to cut ($d/end) and answers Back. The
+# output card shows just the item, and any question it asks is answered on the page.
+_ws_cli_one() {   # <menu function> <item>
+    : > "$GLU_JOB_DIR/mirror"
+    _ws_cli_watch "$GLU_JOB_DIR" "$2" &
+    _ws_cli_keys; "$1"
+}
+_ws_cli_watch() {   # <job dir> <item>
+    local d="$1" it="$2" h="" s=0 n=0 l E
+    E=$(printf '\033')
+    _wcl() { tail -c 400 "$d/log" 2>/dev/null | tail -n 1 | sed "s/$E\[[0-9;?]*[A-Za-z]//g"; }
+    while [ "$n" -lt 300 ]; do l=$(_wcl); case "$l" in *"Choose ["*"]: "*) break ;; esac; usleep 200000 2>/dev/null || sleep 1; n=$((n + 1)); done
+    case "$l" in *"Choose ["*) ;; *) return 0 ;; esac
+    h=$(sed "s/$E\[[0-9;?]*[A-Za-z]//g" "$d/log" | awk 'NF { sub(/^ +/, ""); print; exit }')   # the screen's first line
+    s=$(wc -c < "$d/log"); echo "$s" > "$d/start"
+    printf '%s\n' "$it" >> "$d/input"
+    while :; do
+        sleep 1; [ -f "$d/rc" ] && return 0
+        l=$(_wcl); case "$l" in *"Choose ["*"]: ") ;; *) continue ;; esac
+        # the menu drew itself again (its first line, after the item's output) and asks: the item is done
+        n=$(awk -v s="$s" -v h="$h" -v E="$E" '{ t = $0; gsub(E "\\[[0-9;?]*[A-Za-z]", "", t); sub(/^ +/, "", t)
+                if (o > s && t == h) e = o; o += length($0) + 1 } END { print e + 0 }' "$d/log")
+        [ "$n" -gt 0 ] || continue
+        echo "$n" > "$d/end"
+        printf '0\n0\n0\n' >> "$d/input"; return 0
+    done
+}
+# A finished job's output -> result cards: each table the menu printed (a header row over a ──── rule, rows until
+# a blank line) becomes a table, titled by the line above it; with no table, its "Label: value" lines become rows.
+# The "this router" marker rows keep their marker text. (The raw output stays below, in the log card.)
+_ws_job_results() {   # <job id>
+    sed 's/\r//g' "$WS_JOBS/$1/log" 2>/dev/null | awk -v T="$(printf '\t')" -v E="$(printf '\033')" '
+        function cols(s, a) { gsub(/^[ \t]+|[ \t]+$/, "", s); return split(s, a, /   */) }
+        function rule(s) { return (index(s, "────") || index(s, "--------") || index(s, "========")) && s !~ /[A-Za-z0-9]/ }
+        { cy[NR] = index($0, E "[36m") > 0; x = $0; gsub(E "\\[[0-9;?]*[A-Za-z]", "", x); L[NR] = x }
+        END {
+            found = 0
+            for (i = 1; i < NR; i++) {
+                if (!rule(L[i + 1]) || L[i] !~ /[A-Za-z]/ || rule(L[i])) continue
+                nh = cols(L[i], H); if (nh < 2) continue
+                title = "Results"
+                for (j = i - 1; j > 0; j--) if (L[j] ~ /[^ \t]/) { t = L[j]; gsub(/^[ \t]+|[ \t]+$/, "", t); if (cy[j] && t !~ /   / && length(t) < 60 && i - j <= 2 && !rule(L[j])) title = t; break }
+                print "card" T title; found = 1
+                line = "th"; for (k = 1; k <= nh; k++) line = line T H[k]; print line
+                for (r = i + 2; r <= NR && L[r] ~ /[^ \t]/ && !rule(L[r]); r++) {
+                    n = cols(L[r], C); line = "tr"; for (k = 1; k <= n; k++) line = line T C[k]; print line }
+                i = r
+            }
+            if (found) exit
+            for (i = 1; i <= NR; i++) if (L[i] ~ /^[ \t]+[A-Z][A-Za-z ()\/-]{1,30}:[ \t]+[^ \t]/) {
+                if (!rows) { print "card" T "Results"; rows = 1 }
+                lb = L[i]; sub(/^[ \t]+/, "", lb); v = lb; sub(/:.*/, "", lb); sub(/^[^:]*:[ \t]+/, "", v); sub(/[ \t]+$/, "", v)
+                print "row" T lb T v T "fact"
+            }
+        }'
+}
+_ws_known() { command -v "$1" >/dev/null 2>&1; }
+_ws_tabs() {   # <screen> -> "id<TAB>title" lines (one tab = no strip on the page)
+    if _ws_known "_wt_$1"; then "_wt_$1"; else printf '%s\t%s\n' main ""; fi
+}
+_ws_body() {   # <screen> <tab> -> spec lines for that screen; sets WS_TAB to the tab it drew
+    local s="$1" t="$2" tabs
+    tabs=$(_ws_tabs "$s")
+    printf '%s\n' "$tabs" | cut -f1 | grep -qx -- "$t" || t=$(printf '%s\n' "$tabs" | head -1 | cut -f1)
+    WS_TAB=$t
+    ws_title "$(_webui_screens | awk -F'|' -v s="$s" '$1 == s { print $2 }')"
+    [ "$(printf '%s\n' "$tabs" | grep -c .)" -gt 1 ] && printf '%s\n' "$tabs" | while IFS="$WS_T" read -r _i _n _h; do
+        ws tab "$_i" "$_n" "$(_ws_known "_wl_${s}_$_i" && "_wl_${s}_$_i")"; done
+    ws tabsel "$t"
+    WS_RESULTS=""
+    "_ws_${s}_${t}"
+    ws_end
+    # a benchmark's last run, the web way: its tables and readings as cards above the raw output
+    if [ -n "$WS_RESULTS" ] && [ "$(cat "$WS_JOBS/${s}_$t/rc" 2>/dev/null)" = 0 ]; then
+        {   if [ -s "$WS_JOBS/${s}_$t/data" ] && _ws_known "_ws_results_${s}_$t"; then "_ws_results_${s}_$t" "$WS_JOBS/${s}_$t/data"
+            elif _ws_known "_ws_resultslog_${s}_$t"; then "_ws_resultslog_${s}_$t" "$WS_JOBS/${s}_$t/log"
+            else _ws_job_results "${s}_$t"; fi
+        } | _ws_lastrun "$(_ws_job_ended "${s}_$t" | awk '{ print $1, substr($2, 1, 5), $3 }')"
+    fi
+    # the Log: this tab's job - not one left from an action that has since become a read action (no job any more)
+    if [ -d "$WS_JOBS/${s}_$t" ] && ! { _ws_known "_wr_${s}_$t" && "_wr_${s}_$t" | grep -qx -- "$(cat "$WS_JOBS/${s}_$t/action" 2>/dev/null)"; }; then
+        # a job that ended before its end time was recorded: take it from when it wrote its exit code
+        [ -f "$WS_JOBS/${s}_$t/rc" ] && [ ! -s "$WS_JOBS/${s}_$t/ended" ] \
+            && date -r "$WS_JOBS/${s}_$t/rc" '+%Y-%m-%d %H:%M:%S %Z' > "$WS_JOBS/${s}_$t/ended" 2>/dev/null
+        ws job "${s}_$t" "$(cat "$WS_JOBS/${s}_$t/title" 2>/dev/null)"
+    fi
+}
+_ws_ok_id() { case "$1" in ""|*[!a-z0-9_]*) return 1 ;; esac; [ ${#1} -le 32 ]; }
+_ws_screen_ok() { _ws_ok_id "$1" && _ws_known "_ws_${1}_$(_ws_tabs "$1" | head -1 | cut -f1)"; }
+_ws_render() {   # <screen> <tab>
+    _ws_screen_ok "$1" || { printf '{"ok":false,"message":%s}\n' "$(_api_message error "Unknown screen")"; return 2; }
+    _ws_ok_id "${2:-x}" || set -- "$1" ""
+    _ws_body "$1" "$2" | _ws_json "$1" "$2"
+}
+# the action must be one the screen offers RIGHT NOW (never act on a stale page), and a confirmed one when it asks
+_ws_offered() {   # <screen> <tab> <action> -> its act line ("" = not offered)
+    _ws_body "$1" "$2" | awk -F '\t' -v a="$3" '$1 == "act" && $2 == a { print; exit }'
+}
+_ws_act() {   # <screen> <tab> <action> <confirmed 0|1>
+    local s="$1" t="$2" a="$3" line ask mode
+    _ws_screen_ok "$s" && _ws_ok_id "$t" && _ws_ok_id "$a" || { printf '{"ok":false,"message":%s}\n' "$(_api_message error "Unknown action")"; return 2; }
+    # a read action (release notes, the change log) changes nothing, so it skips the "offered now" check - drawing the
+    # whole screen for that check was most of its wait (3 of 4 s on MIPS). A screen names them in _wr_<screen>_<tab>.
+    if _ws_known "_wr_${s}_$t" && "_wr_${s}_$t" | grep -qx -- "$a"; then "_wa_${s}_$t" "$a" | _ws_json "$s" "$t"; return; fi
+    line=$(_ws_offered "$s" "$t" "$a")
+    ask=$(printf '%s' "$line" | cut -f5); mode=$(printf '%s' "$line" | cut -f7)
+    if [ -z "$line" ] || ! _ws_known "_wa_${s}_$t"; then
+        { ws_msg warning "That action isn't available any more - the screen has been refreshed"; _ws_body "$s" "$t"; } | _ws_json "$s" "$t"; return 1
+    fi
+    if [ -n "$ask" ] && [ "$4" != 1 ]; then
+        { ws_msg warning "Confirm first: $ask"; _ws_body "$s" "$t"; } | _ws_json "$s" "$t"; return 1
+    fi
+    case "$mode" in
+        # something to read (release notes, the change log): only its text comes back - re-reading the whole screen
+        # for it was most of the wait (0.8 s of 1.4 s on a Flint 4, 6 s of 7.3 s on MIPS)
+        read) "_wa_${s}_$t" "$a" | _ws_json "$s" "$t"; return ;;
+        job)  _ws_job_start "$s" "$t" "$a" "$(printf '%s' "$line" | cut -f3)"; return ;;
+        ijob) WS_IJOB=1 _ws_job_start "$s" "$t" "$a" "$(printf '%s' "$line" | cut -f3)"; return ;;
+    esac
+    { "_wa_${s}_$t" "$a"; _ws_body "$s" "$t"; } | _ws_json "$s" "$t"
+}
+
+# ---- jobs: a long action (benchmark, server, install) runs detached; the page tails its log ------------------
+_ws_job_ended() {   # <job id> -> "2026-10-13 00:05:12 EDT" (router time; a job from before "ended" was kept: its rc file's)
+    if [ -s "$WS_JOBS/$1/ended" ]; then cat "$WS_JOBS/$1/ended"; else date -r "$WS_JOBS/$1/rc" '+%Y-%m-%d %H:%M:%S %Z' 2>/dev/null; fi
+}
+# a run's results carry when it ran: the first results card becomes "Last Run", its date at the header's right
+_ws_lastrun() {   # <date> < spec lines
+    awk -F '\t' -v OFS='\t' -v when="$1" '!done && $1 == "card" { if ($2 == "Results") $2 = "Last Run"; $3 = $3; $4 = when; done = 1 } { print }'
+}
+_ws_job_alive() { local p; p=$(cat "$WS_JOBS/$1/pid" 2>/dev/null); [ -n "$p" ] && [ -d "/proc/$p" ] && [ ! -f "$WS_JOBS/$1/rc" ]; }
+_ws_job_start() {   # <screen> <tab> <action> <label>
+    local id="${1}_$2" d
+    d="$WS_JOBS/$id"
+    if _ws_job_alive "$id"; then
+        { ws_msg warning "$(cat "$d/title" 2>/dev/null) is still running - stop it first"; _ws_body "$1" "$2"; } | _ws_json "$1" "$2"; return 1
+    fi
+    # one measurement at a time: two benchmarks running together skew each other's numbers
+    local o
+    case "$1_$2" in bench_cpu|bench_crypto|bench_disk|bench_memory|bench_dns|bench_speedtest)
+        for o in bench_cpu bench_crypto bench_disk bench_memory bench_dns bench_speedtest; do
+            [ "$o" != "$id" ] && _ws_job_alive "$o" && {
+                { ws_msg warning "Another benchmark is running ($(cat "$WS_JOBS/$o/title" 2>/dev/null) on the ${o#bench_} tab) - one at a time keeps the numbers honest"; _ws_body "$1" "$2"; } | _ws_json "$1" "$2"; return 1; }
+        done ;;
+    esac
+    rm -rf "$d"; mkdir -p "$d"
+    printf '%s' "$4" > "$d/title"; printf '%s' "$3" > "$d/action"; date +%s > "$d/started"
+    if [ -n "${WS_IJOB:-}" ]; then
+        # interactive: the menu's own questions show in the log and the page answers them - each answer is a
+        # line appended to $d/input, which `tail -f` feeds to the job's stdin through a fifo
+        : > "$d/input"; mkfifo "$d/fifo" 2>/dev/null; : > "$d/interactive"
+        ( tail -f "$d/input" > "$d/fifo" 2>/dev/null & tp=$!
+          __GL_HEADLESS=1 GLU_JOB=1 GLU_JOB_DIR="$d" WS_ARGS="$WS_ARGS" sh "$WS_SELF" --api jobrun "$1" "$2" "$3" < "$d/fifo"
+          echo $? > "$d/rc.t"; date '+%Y-%m-%d %H:%M:%S %Z' > "$d/ended"; mv "$d/rc.t" "$d/rc"; kill "$tp" 2>/dev/null ) </dev/null >>"$d/log" 2>&1 &   # append: answers are echoed in
+    else
+    ( __GL_HEADLESS=1 GLU_JOB=1 GLU_JOB_DIR="$d" WS_ARGS="$WS_ARGS" sh "$WS_SELF" --api jobrun "$1" "$2" "$3"
+      echo $? > "$d/rc.t"; date '+%Y-%m-%d %H:%M:%S %Z' > "$d/ended"; mv "$d/rc.t" "$d/rc" ) </dev/null >>"$d/log" 2>&1 &   # append: Stop adds its line too
+    fi
+    echo $! > "$d/pid"
+    _ws_body "$1" "$2" | _ws_json "$1" "$2"   # no "Running" banner: the Log card says it (RUNNING, its latest line)
+}
+_ws_kill_tree() {   # <pid> - the job and everything it started (an iperf3 server, a stress worker)
+    local c
+    for c in $(awk -v p="$1" '$4 == p { print $1 }' /proc/[0-9]*/stat 2>/dev/null); do _ws_kill_tree "$c"; done
+    kill -TERM "$1" 2>/dev/null
+}
+_ws_job_stop() {   # <job id>
+    local d="$WS_JOBS/$1" p
+    _ws_ok_id "$1" && [ -d "$d" ] || { printf '{"ok":false,"message":%s}\n' "$(_api_message error "No such job")"; return 2; }
+    p=$(cat "$d/pid" 2>/dev/null)
+    if _ws_job_alive "$1"; then
+        # you stopped it: say so whatever it exits with - a program that catches the stop and shuts down cleanly
+        # (iperf3) exits 1, which read as FAILED
+        : > "$d/stopped"
+        date '+%Y-%m-%d %H:%M:%S %Z' > "$d/ended"   # when you stopped it - the page may read it before the job is gone
+        printf '\n[stopped]\n' >> "$d/log"   # before the stop: the page reads the log until the job's exit code appears
+        _ws_kill_tree "$p"; sleep 1
+        _ws_job_alive "$1" && { for c in $(awk -v p="$p" '$4 == p { print $1 }' /proc/[0-9]*/stat 2>/dev/null); do kill -KILL "$c" 2>/dev/null; done; kill -KILL "$p" 2>/dev/null; }
+        [ -f "$d/rc" ] || echo 143 > "$d/rc"
+    fi
+    "_wj_stopped_${1}" 2>/dev/null   # a job that left a service behind tidies it here
+    printf '{"ok":true,"message":%s}\n' "$(_api_message success "Stopped")"
+}
+_ws_jobrun() {   # <screen> <tab> <action> - inside the detached job: the menus' helpers, quiet and line by line
+    spin_run() { local l="$1"; shift; printf '%s%s\n' "$_S_ACT" "$l"; "$@" </dev/null >"${SPIN_LOG:-/dev/null}" 2>&1; }
+    countdown_run() { local l="$1" n="$2"; shift 2; printf '%s%s (about %ss)\n' "$_S_TIME" "$l" "$n"; "$@" </dev/null >"${SPIN_LOG:-/dev/null}" 2>&1; }
+    press_any_key() { :; }; clear() { :; }
+    print_centered_header() { :; }      # the page's card already names it
+    _ws_known "_wj_${1}_$2" || { echo "No such job"; return 2; }
+    "_wj_${1}_$2" "$3"
+}
+
+# ---- help: each tab shows its menu screen's own [?] Help (show_paged becomes a plain read) --------------------
+_ws_help() {   # <screen> <tab> -> the help object (title + text)
+    local fn t title
+    fn=$(_ws_tabs "$1" | awk -F'\t' -v t="$2" 'NR == 1 { f = $3 } $1 == t { f = $3 } END { print f }')
+    t=$(_ws_tabs "$1" | awk -F'\t' -v t="$2" 'NR == 1 { n = $2 } $1 == t { n = $2 } END { print n }')
+    title=$(_webui_screens | awk -F'|' -v s="$1" '$1 == s { print $2 }')
+    [ -n "$t" ] && [ "$t" != "$title" ] && title="$title - $t"
+    if [ -n "$fn" ] && _ws_known "$fn"; then
+        printf '{"feature":%s,"title":%s,"text":%s}\n' "$(_json_str "$1")" "$(_json_str "$title - Help")" \
+            "$(_json_str "$( show_paged() { cat; }; "$fn" 2>/dev/null | _help_for web)")"
+    else
+        printf '{"feature":%s,"title":%s,"text":""}\n' "$(_json_str "$1")" "$(_json_str "$title - Help")"
+    fi
+}
+
+# =====================================================================================================
+# The screens. _wt_<screen>: its tabs ("id<TAB>title<TAB>help function"), in the menu's item order.
+# _ws_<screen>_<tab>: draws it. _wa_<screen>_<tab> <action>: does an action (prints its msg). _wj_*: a job.
+# =====================================================================================================
+
+# ---- System Configuration (UCI): the six read-only views, as cards --------------------------------------
+_wt_uci() {
+    printf '%s\t%s\t%s\n' wireless "Wireless Networks" show_uci_help network "Network Configuration" show_uci_help \
+        firewall Firewall show_uci_help vpn "VPN Configuration" show_uci_help system "System Settings" show_uci_help \
+        cloud "Cloud Services" show_uci_help
+}
+_ws_uci_view() {   # <emitter> - the same text the menu pages, keys masked the same way
+    "$1" 2>/dev/null | sed 's#[A-Za-z0-9+/]\{43\}=#<key hidden>#g' | _ws_text
+}
+_ws_uci_wireless() { _ws_uci_view _uci_view_wireless; }
+# Network / Firewall / VPN as the web's own cards, rows and tables (Wireless and System read well from the menu's
+# text; these four are lists of records, so they are drawn from uci directly - one `uci show` each, cheap on MIPS)
+_uci_rows() {   # <config> -> "section<TAB>option<TAB>value" lines; a section's own line has option "=" (value = type)
+    uci -q show "$1" 2>/dev/null | awk -v T="$(printf '\t')" '
+        { eq = index($0, "="); l = substr($0, 1, eq - 1); v = substr($0, eq + 1)
+          n = split(l, p, "."); sec = p[2]
+          if (n < 3) { print sec T "=" T v; next }
+          gsub(/^\047|\047$/, "", v); gsub(/\047 \047/, ", ", v); print sec T p[3] T v }'
+}
+# DHCP pools as what they hand out - the menu (System Configuration > Network) and the Admin Panel page print
+# these same records: the subnet of the pool's interface, and start / limit as real addresses (dnsmasq counts start
+# from the first address of the subnet; a VLAN has its own subnet, so "start=100 limit=150" alone said little)
+uci_dhcp_pools() {   # -> "interface|ON or OFF|subnet|first - last|lease" per pool ("-" where there is none)
+    { _uci_rows network; _uci_rows dhcp | sed 's/^/dhcp:/'; } | awk -F '\t' -v lanip="$(get_lan_ip)" '
+        function num(a,  o) { split(a, o, "."); return ((o[1] * 256 + o[2]) * 256 + o[3]) * 256 + o[4] }
+        function dot(x,  a, b, c) { a = int(x / 16777216); x -= a * 16777216; b = int(x / 65536); x -= b * 65536; c = int(x / 256); return a "." b "." c "." (x - c * 256) }
+        function and4(a, mk,  o, q, k, r) { split(a, o, "."); split(mk, q, "."); r = 0
+            for (k = 1; k <= 4; k++) r = r * 256 + int(o[k] / (256 - q[k])) * (256 - q[k]); return r }
+        function maskbits(mk,  q, k, b, v) { split(mk, q, "."); b = 0
+            for (k = 1; k <= 4; k++) { v = q[k]; while (v > 0) { b += v % 2; v = int(v / 2) } } return b }
+        function pfxmask(p,  k, o, r, n) { r = ""; for (k = 1; k <= 4; k++) { n = p - (k - 1) * 8; if (n > 8) n = 8; if (n < 0) n = 0
+            o = 256 - 2 ^ (8 - n); r = r (k > 1 ? "." : "") o } return r }
+        $2 == "=" { ord[$3, ++cnt[$3]] = $1; next }
+        { val[$1, $2] = $3 }
+        END { for (i = 1; i <= cnt["dhcp"]; i++) { s = ord["dhcp", i]; n = val[s, "interface"]; if (n == "") n = substr(s, 6)
+                sub_ = "-"; rng = "-"; ip = val[n, "ipaddr"]; if (n == "lan" && lanip != "") ip = lanip
+                m = val[n, "netmask"]; if (index(ip, ", ")) ip = substr(ip, 1, index(ip, ", ") - 1)
+                if (index(ip, "/")) { m = pfxmask(substr(ip, index(ip, "/") + 1)); ip = substr(ip, 1, index(ip, "/") - 1) }
+                on = (val[s, "ignore"] == "1") ? "OFF" : "ON"
+                if (ip != "" && m != "") { net = and4(ip, m); bits = maskbits(m); sub_ = dot(net) "/" bits
+                    if (on == "ON") { st = val[s, "start"]; if (st == "") st = 100; lm = val[s, "limit"]; if (lm == "") lm = 150
+                        last = net + st + lm - 1; bc = net + 2 ^ (32 - bits) - 1; if (last >= bc) last = bc - 1
+                        rng = dot(net + st) " - " dot(last) } }
+                ls = val[s, "leasetime"]; if (ls == "") ls = "default"; if (on == "OFF") ls = "-"
+                print n "|" on "|" sub_ "|" rng "|" ls } }'
+}
+_ws_uci_network() {
+    local pools; pools=$(uci_dhcp_pools)
+    _ws_uci_network_body "$pools" | while IFS= read -r l; do
+        if [ "$l" = "@pools" ]; then
+            ws_card "DHCP Pools"; ws_th Interface Status Subnet "Address Range" Lease
+            printf '%s\n' "$pools" | while IFS='|' read -r n st sub rng ls; do
+                [ -n "$n" ] && ws_tr "$n" "$([ "$st" = ON ] && echo "~green~ON" || echo "~grey~OFF")" "$sub" "$rng" "$ls"
+            done
+        else printf '%s\n' "$l"; fi
+    done
+}
+_ws_uci_network_body() {
+    { _uci_rows network; _uci_rows dhcp | sed 's/^/dhcp:/'; } | awk -F '\t' -v T="$(printf '\t')" -v lanip="$(get_lan_ip)" '
+        function d(x) { return x == "" ? "-" : x }
+        $2 == "=" { typ[$1] = $3; ord[$3, ++cnt[$3]] = $1; next }
+        { val[$1, $2] = $3 }
+        END {
+            print "card" T "Interfaces"; print "th" T "Interface" T "Protocol" T "Address" T "Gateway" T "DNS"
+            for (i = 1; i <= cnt["interface"]; i++) { s = ord["interface", i]; ip = val[s, "ipaddr"]
+                if (s == "lan" && lanip != "") ip = lanip
+                if (ip != "" && val[s, "netmask"] != "") ip = ip " / " val[s, "netmask"]
+                print "tr" T s T d(val[s, "proto"]) T d(ip) T d(val[s, "gateway"]) T d(val[s, "dns"]) }
+            if (cnt["dhcp"]) print "@pools"
+            if (cnt["host"]) { print "card" T "Static Leases"; print "th" T "Name" T "MAC" T "IP"
+                for (i = 1; i <= cnt["host"]; i++) { s = ord["host", i]
+                    nm = val[s, "name"]; if (nm == "") nm = substr(s, 6)
+                    print "tr" T nm T d(val[s, "mac"]) T d(val[s, "ip"]) } }
+            if (cnt["route"]) { print "card" T "Static Routes"; print "th" T "Target" T "Gateway" T "Interface"
+                for (i = 1; i <= cnt["route"]; i++) { s = ord["route", i]
+                    print "tr" T d(val[s, "target"]) T d(val[s, "gateway"]) T d(val[s, "interface"]) } }
+            for (i = 1; i <= cnt["dnsmasq"]; i++) { s = ord["dnsmasq", i]
+                if (val[s, "domain"] != "" || val[s, "server"] != "") { print "card" T "DNS"
+                    if (val[s, "domain"] != "") print "row" T "Local domain" T val[s, "domain"] T "fact"
+                    if (val[s, "server"] != "") print "row" T "Upstream servers" T val[s, "server"] T "fact"
+                    break } }
+        }'
+}
+_ws_uci_firewall() {
+    _uci_rows firewall | awk -F '\t' -v T="$(printf '\t')" '
+        function d(x, y) { return x == "" ? y : x }
+        function on(s) { return val[s, "enabled"] == "0" ? "~grey~DISABLED" : "~green~ENABLED" }
+        $2 == "=" { ord[$3, ++cnt[$3]] = $1; next }
+        { val[$1, $2] = $3 }
+        END {
+            s = ord["defaults", 1]
+            print "card" T "Default Policy"
+            print "row" T "Input" T d(val[s, "input"], "-") T "fact"
+            print "row" T "Output" T d(val[s, "output"], "-") T "fact"
+            print "row" T "Forward" T d(val[s, "forward"], "-") T "fact"
+            if (cnt["zone"]) { print "card" T "Zones"; print "th" T "Zone" T "Input" T "Output" T "Forward" T "Masquerade" T "Networks"
+                for (i = 1; i <= cnt["zone"]; i++) { s = ord["zone", i]; mq = "~grey~OFF"; if (val[s, "masq"] == "1") mq = "~green~ON"
+                    print "tr" T d(val[s, "name"], s) T d(val[s, "input"], "-") T d(val[s, "output"], "-") T d(val[s, "forward"], "-") \
+                        T mq T d(val[s, "network"], "-") } }
+            if (cnt["forwarding"]) { print "card" T "Forwardings"; print "th" T "From" T "To"
+                for (i = 1; i <= cnt["forwarding"]; i++) { s = ord["forwarding", i]
+                    print "tr" T d(val[s, "src"], "?") T d(val[s, "dest"], "?") } }
+            if (cnt["redirect"]) { print "card" T "Port Forwards"; print "th" T "Name" T "Protocol" T "Outside" T "Inside" T "Status"
+                for (i = 1; i <= cnt["redirect"]; i++) { s = ord["redirect", i]
+                    print "tr" T d(val[s, "name"], s) T d(val[s, "proto"], "any") T d(val[s, "src"], "wan") ":" d(val[s, "src_dport"], "-") \
+                        T d(val[s, "dest_ip"], "-") ":" d(val[s, "dest_port"], d(val[s, "src_dport"], "-")) T on(s) } }
+            if (cnt["rule"]) { print "card" T "Traffic Rules"; print "th" T "Name" T "From" T "To" T "Protocol" T "Action" T "Status"
+                for (i = 1; i <= cnt["rule"]; i++) { s = ord["rule", i]
+                    print "tr" T d(val[s, "name"], s) T d(val[s, "src"], "*") T d(val[s, "dest"], "router") T d(val[s, "proto"], "any") \
+                        T d(val[s, "target"], "-") T on(s) } }
+        }'
+}
+_ws_uci_vpn() {
+    local any=0 ts zt
+    # WireGuard / OpenVPN servers: a card each; clients: one table per kind (a site can have many)
+    if _uci_rows wireguard_server | grep -q "$WS_T=${WS_T}servers\$"; then any=1
+        _uci_rows wireguard_server | awk -F '\t' -v T="$(printf '\t')" '
+            $2 == "=" { if ($3 == "servers") ord[++n] = $1; next } { val[$1, $2] = $3 }
+            END { for (i = 1; i <= n; i++) { s = ord[i]; print "card" T "WireGuard Server: " s
+                if (val[s, "port"] != "") print "row" T "Listen port" T val[s, "port"] T "fact"
+                if (val[s, "address_v4"] != "") print "row" T "Address" T val[s, "address_v4"] T "fact"
+                if (val[s, "mtu"] != "") print "row" T "MTU" T val[s, "mtu"] T "fact" } }'
+    fi
+    if _uci_rows ovpnserver | grep -q "$WS_T=${WS_T}general\$"; then any=1
+        _uci_rows ovpnserver | awk -F '\t' -v T="$(printf '\t')" '
+            $2 != "=" { val[$1, $2] = $3 }
+            END { print "card" T "OpenVPN Server"
+                if (val["vpn", "proto"] != "") print "row" T "Protocol" T val["vpn", "proto"] T "fact"
+                if (val["vpn", "port"] != "") print "row" T "Port" T val["vpn", "port"] T "fact"
+                if (val["vpn", "subnetv4"] != "") print "row" T "Subnet" T val["vpn", "subnetv4"] T "fact"
+                if (val["global", "mtu"] != "") print "row" T "MTU" T val["global", "mtu"] T "fact" }'
+    fi
+    if _uci_rows wireguard | grep -q "$WS_T=${WS_T}peers\$"; then any=1
+        _uci_rows wireguard | awk -F '\t' -v T="$(printf '\t')" '
+            function d(x) { return x == "" ? "-" : x }
+            $2 == "=" { if ($3 == "peers") ord[++n] = $1; next } { val[$1, $2] = $3 }
+            END { print "card" T "WireGuard Clients"; print "th" T "Peer" T "Endpoint" T "Address" T "Allowed IPs" T "Keepalive"
+                for (i = 1; i <= n; i++) { s = ord[i]; nm = val[s, "name"]; if (nm == "") nm = s
+                    ka = val[s, "persistent_keepalive"]; if (ka == "") ka = "-"; else ka = ka " s"
+                    print "tr" T nm T d(val[s, "end_point"]) T d(val[s, "address_v4"]) T d(val[s, "allowed_ips"]) T ka } }'
+    fi
+    if _uci_rows ovpnclient | grep -q "$WS_T=${WS_T}clients\$"; then any=1
+        _uci_rows ovpnclient | awk -F '\t' -v T="$(printf '\t')" '
+            function d(x) { return x == "" ? "-" : x }
+            $2 == "=" { if ($3 == "clients") ord[++n] = $1; next } { val[$1, $2] = $3 }
+            END { print "card" T "OpenVPN Clients"; print "th" T "Client" T "Remote" T "Protocol"
+                for (i = 1; i <= n; i++) { s = ord[i]; nm = val[s, "name"]; if (nm == "") nm = s
+                    print "tr" T nm T d(val[s, "remote"]) T d(val[s, "proto"]) } }'
+    fi
+    if [ -f /etc/config/tailscale ]; then any=1
+        ws_card Tailscale
+        ts=$(uci -q get tailscale.settings.enabled || uci -q get tailscale.@tailscale[0].enabled)
+        if [ "$ts" = 1 ]; then ws_row Status ENABLED green; else ws_row Status DISABLED grey; fi
+        # only ask a running tailscaled: with the service down, `tailscale ip` waits out a ~2 s timeout
+        _proc_running tailscaled && command -v tailscale >/dev/null 2>&1 \
+            && ts=$(tailscale ip -4 2>/dev/null </dev/null | head -1) && [ -n "$ts" ] && ws_row "Node IP" "$ts"
+    fi
+    if [ -f /etc/config/zerotier ]; then any=1
+        ws_card ZeroTier
+        _uci_rows zerotier | awk -F '\t' -v T="$(printf '\t')" '
+            $2 == "=" { if ($3 == "zerotier") ord[++n] = $1; next } { val[$1, $2] = $3 }
+            END { for (i = 1; i <= n; i++) { s = ord[i]
+                    st = "DISABLED" T "grey"; if (val[s, "enabled"] == "1") st = "ENABLED" T "green"
+                    print "row" T "Status" T st
+                    if (val[s, "id"] != "") print "row" T "Network" T val[s, "id"] T "fact" }
+                  if (!n) print "row" T "Status" T "NOT SET" T "grey" }'
+    fi
+    [ "$any" = 1 ] || { ws_card VPN; ws_note "No VPN servers or clients are set up on this router."; }
+}
+_ws_uci_system()   { _ws_uci_view _uci_view_system; }
+_ws_uci_cloud() {
+    local en srv mail tok ip
+    ws_card GoodCloud
+    if [ -f /etc/config/gl-cloud ]; then
+        en=$(uci -q get gl-cloud.@cloud[0].enable); srv=$(uci -q get gl-cloud.@cloud[0].server)
+        mail=$(uci -q get gl-cloud.@cloud[0].email); tok=$(uci -q get gl-cloud.@cloud[0].token)
+        if [ "$en" = 1 ]; then ws_row Status ENABLED green; else ws_row Status DISABLED grey; fi   # off by choice = grey
+        [ -n "$mail" ] && ws_row Account "$mail"
+        [ -n "$srv" ] && ws_row Server "$srv"
+        [ -n "$tok" ] && ws_row Token "$(printf '%s' "$tok" | cut -c1-16)..."
+    else ws_row Status "NOT SET" grey "" "GoodCloud isn't configured"; fi
+    ws_card AstroWarp
+    ip=$(ip -4 addr show mptun0 2>/dev/null | awk '/inet / { print $2; exit }')
+    if [ -n "$ip" ]; then ws_row Status ACTIVE green; ws_row Interface "mptun0 ($ip)"
+    else ws_row Status "NOT ACTIVE" grey "" "no mptun0 interface or no address"; fi
+}
+
+# ---- AdGuardHome Control Center --------------------------------------------------------------------------
+_wt_agh() {
+    printf '%s\t%s\t%s\n' status Status show_agh_help
+    [ "$(agh_presence)" = supported ] || return 0
+    printf '%s\t%s\t%s\n' lists "Allow/Blocklists" show_agh_lists_help storage "Storage" show_agh_storage_help \
+        zram "Zram Swap" show_zram_help direct "Direct UI Access" show_agh_direct_help updates "Updates & Channel" show_agh_ui_help \
+        backups "Backup & Recovery" show_agh_backup_help logs "Logs & Maintenance" show_agh_service_help
+}
+_ws_agh_status() {   # the Control Center's STATUS + item 1 (the same model as the menus: agh_rows, agh_primary_action)
+    local p act l v t n
+    p=$(agh_presence)
+    ws_card Status
+    if [ "$p" = supported ]; then
+        get_agh_stats >/dev/null 2>&1
+        agh_status_rows | while IFS='|' read -r l v t n; do ws_row "$l" "$v" "$t" "" "$n"; done   # the menu's rows, all of them
+        act=$(agh_primary_action)
+    else
+        agh_life "$p"; ws_row AdGuardHome "$AGH_WORD" "$AGH_TONE" "" "$AGH_NOTE"
+        [ "$p" = missing ] && act=factory_reset
+        ws_msg warning "$(agh_presence_msg "$p")"
+    fi
+    if [ -n "$act" ] && agh_action_text "$act"; then
+        case "$act" in   # the menus' step-by-step recoveries: a confirmed job each, or the two ways back
+            reinstall) ws_act reinstall "$A_LABEL" danger "Reinstall AdGuardHome?" \
+                           "The installed version can't read this config.yaml: this downloads AdGuard's current stable release (config.yaml is backed up first). Restoring a backup on the Backup & Recovery tab is the other way back." job ;;
+            recover)   ws_msg warning "AdGuardHome's config.yaml is missing or can't be read" \
+                           "Restore a backup on the Backup & Recovery tab, or use Reset to Factory Settings below" ;;
+            factory_reset) ws_act factory_reset "$A_LABEL" danger "Reset to factory settings?" \
+                           "This restores GL.iNet's AdGuardHome (binary, config.yaml, startup script) from /rom" job
+                       ws_field enable "Turn AdGuardHome on afterwards" check 1 "" "" ;;
+            *) ws_act "$act" "$A_LABEL" "$([ -n "$A_ASK" ] && echo danger || echo primary)" "$A_ASK" "$A_WARN" ;;
+        esac
+    fi
+    ws_act refresh Refresh
+    # [CL] Reset to Factory Settings (Start Over) - the menu's own flow, as a job
+    [ "$p" = supported ] && { ws_act reset "Reset to Factory Settings (Start Over)" danger "Reset to factory settings?" \
+        "This restores GL.iNet's AdGuardHome (binary, config.yaml, startup script) from /rom - your lists and settings go" job
+        ws_field enable "Turn AdGuardHome on afterwards" check 1 "" ""; }
+}
+_wj_agh_status() {   # reset | factory_reset | reinstall - the dialog was the confirmation
+    case "$1" in
+        reinstall) AGH_ANS_GO=y AGH_ANS_KEEP=y _agh_channel_switch release recover ;;
+        *) if [ "$(ws_args enable)" = 0 ]; then printf 'y\nn\n' | sub_confirm_factory_reset
+           else printf 'y\ny\n' | sub_confirm_factory_reset; fi ;;
+    esac
+}
+_wa_agh_status() {
+    local l
+    [ "$1" = refresh ] || [ "$1" = reset ] && return 0
+    agh_action_text "$1" || return 0
+    if agh_do "$1" >/dev/null 2>&1; then ws_msg success "$A_DONE"
+    else ws_msg error "$A_FAIL" "$A_FIX"; logread 2>/dev/null | grep -i adguard | tail -3 | while IFS= read -r l; do ws_detail "$l"; done; fi
+}
+
+# ---- shared pieces ------------------------------------------------------------------------------------------
+# run a quick menu helper and turn what it printed into the screen message: its last line is the message
+# (success when it returned 0, error when not), the lines before it are the details
+_ws_run_msg() {   # <command...>
+    local out rc tone line E
+    E=$(printf '\033')
+    out=$("$@" 2>&1 </dev/null); rc=$?
+    # the menus' result line: print_success (green) / print_error (red) / print_warning (yellow); else the last line
+    line=$(printf '%s\n' "$out" | grep "${E}\[[0-9;]*3[123]m" | tail -1)
+    case "$line" in *"${E}[32m"*|*"${E}[1;32m"*) tone=success ;; *"${E}[31m"*|*"${E}[1;31m"*) tone=error ;; *"${E}[33m"*) tone=warning ;; *) line=""; tone="" ;; esac
+    out=$(printf '%s\n' "$out" | sed "s/${E}\[[0-9;]*[A-Za-z]//g; s/^[^A-Za-z0-9(\"'\[]*//" | grep -v '^[[:space:]]*$')
+    if [ -z "$line" ]; then line=$(printf '%s\n' "$out" | tail -1); [ "$rc" = 0 ] && tone=success || tone=error
+    else line=$(printf '%s' "$line" | sed "s/${E}\[[0-9;]*[A-Za-z]//g; s/^[^A-Za-z0-9(\"'\[]*//"); fi
+    ws_msg "$tone" "${line:-Done}"
+    printf '%s\n' "$out" | grep -vxF -- "$line" | tail -6 | while IFS= read -r _l; do ws_detail "$_l"; done
+    return $rc
+}
+# a feature that follows the lifecycle standard (install / enable / disable / reinstall / uninstall): its STATUS
+# and the actions _lc_actions offers for its state; every action runs as a job (the menus' own flow, its output
+# in the log card). Persistence (when it has it) is a quick toggle.
+_ws_lc() {   # <state> <pkg-backed 0|1> <persist: on|off|none> <url or ""> <name> <package words> [status row label]
+    local st="$1" a word tone
+    case "$st" in NOT_INSTALLED) word="NOT INSTALLED"; tone=grey ;; DISABLED) word=DISABLED; tone=grey ;;
+                  ENABLED) word=ENABLED; tone=green ;; *) word="SERVICE DOWN"; tone=red ;; esac
+    ws_card Status
+    ws_row "${7:-Service}" "$word" "$tone"
+    [ -n "${WS_LC_ROWS:-}" ] && "$WS_LC_ROWS" "$st"
+    [ -n "$4" ] && ws_row "Direct URL" "$4" link
+    case "$3" in on) ws_row Persistence ENABLED green ;; off) ws_row Persistence DISABLED grey ;; esac
+    for a in $(_lc_actions "$st" "$2"); do
+        case "$a" in
+            install_enable) ws_act "$a" "$(_lc_label "$a")" primary "Install and enable $5?" "This downloads $6" job; [ -n "${WS_LC_FIELDS:-}" ] && "$WS_LC_FIELDS" "$a" ;;
+            uninstall)      ws_act "$a" "$(_lc_label "$a")" danger "Uninstall $5?" "This removes $6 and its config" job ;;
+            reinstall|enable) ws_act "$a" "$(_lc_label "$a")" primary "" "" job; [ -n "${WS_LC_FIELDS:-}" ] && "$WS_LC_FIELDS" "$a" ;;
+            *)              ws_act "$a" "$(_lc_label "$a")" "" "" "" job ;;
+        esac
+    done
+    case "$3" in on) ws_act persist_off "Disable Persistence" ;; off) [ "$st" = ENABLED ] || [ "$st" = SERVICE_DOWN ] && ws_act persist_on "Enable Persistence" ;; esac
+}
+
+# ---- System Benchmarks ---------------------------------------------------------------------------------------
+_wt_bench() {
+    printf '%s\t%s\t%s\n' cpu "CPU Stress" show_benchmarks_help crypto "VPN & Crypto" show_benchmarks_help \
+        disk "Disk I/O" show_benchmarks_help memory "Memory I/O" show_benchmarks_help dns "DNS Latency" show_benchmarks_help \
+        speedtest "Internet Speedtest" show_benchmarks_help librespeed LibreSpeed show_librespeed_help \
+        iperf iPerf3 show_benchmarks_help ost OpenSpeedTest show_openspeedtest_help
+}
+_ws_bench_run() {   # <title> <what it does> [run-label] - a benchmark tab: what it measures, and Run (a job)
+    WS_RESULTS=1
+    ws_card "$1"; ws_note "$2"
+    _ws_job_alive "bench_$WS_TAB" || ws_act run "${3:-Run Benchmark}" primary "" "" job
+}
+_ws_bench_cpu() {
+    _ws_bench_run "CPU Thermal Stress Test" "Loads every CPU core for the time you choose, then shows the temperature and fan speed at the start, at the end and 3 seconds after - how well the router sheds heat under full load."
+    _ws_job_alive bench_cpu || ws field duration "Duration (seconds)" number 60 10-600 "How long to keep every core at 100%"
+}
+_ws_bench_crypto() { _ws_bench_run "VPN & Crypto Benchmark" "Measures the cipher speeds VPNs depend on (WireGuard ChaCha20-Poly1305, OpenVPN/IPsec AES-256-GCM, RSA) with OpenSSL, and ranks this router on the leaderboard of GL.iNet routers."; }
+_ws_bench_disk()   { _ws_bench_run "Disk I/O Benchmark" "Writes then reads a test file on the router's storage (the filesystem of /root) and reports the write and read speeds. The file is removed afterwards."; }
+_ws_bench_memory() { _ws_bench_run "Memory I/O Benchmark" "Measures memory copy throughput in RAM (/tmp) and reports the read and write speeds."; }
+_ws_bench_dns()    { _ws_bench_run "DNS Latency Benchmark" "Times DNS lookups against well-known public resolvers and shows each one's average latency."; }
+_ws_bench_speedtest() {
+    case "$(uname -m)" in
+        mips*) _ws_bench_run "Internet Speedtest" "Runs speedtest-go against speedtest.net servers (Ookla ships no MIPS build): a real download/upload test from the router's WAN." "Run Speedtest" ;;
+        *)     _ws_bench_run "Internet Speedtest" "Runs Ookla's official speedtest CLI from the router: a real download/upload test over the router's WAN." "Run Speedtest" ;;
+    esac
+}
+_wj_bench_cpu()       { local d; d=$(ws_args duration); case "$d" in ''|*[!0-9]*) d=60 ;; esac; [ "$d" -gt 600 ] && d=600; [ "$d" -lt 10 ] && d=10; printf '%s\n' "$d" | bench_cpu_stress; }
+_wj_bench_crypto()    { bench_crypto; }
+_wj_bench_disk()      { cd /root 2>/dev/null || cd /; bench_disk_io; }
+_wj_bench_memory()    { bench_memory_io; }
+_wj_bench_dns()       { bench_dns_latency; }
+_wj_bench_speedtest() { bench_speedtest; }
+_wa_bench_cpu() { :; }; _wa_bench_crypto() { :; }; _wa_bench_disk() { :; }; _wa_bench_memory() { :; }; _wa_bench_dns() { :; }; _wa_bench_speedtest() { :; }
+
+# iPerf3: the server runs as a job - its log IS the server's output, so every test a client runs shows up there
+_ws_bench_iperf() {
+    local ip; ip=$(get_lan_ip)
+    ws_card "iPerf3 Server"
+    if _ws_job_alive bench_iperf; then ws_row Server RUNNING green; else ws_row Server STOPPED grey; fi
+    ws_row Port 5201
+    command -v iperf3 >/dev/null 2>&1 || ws_note "iperf3 isn't installed yet - starting the server installs it first."
+    ws_note "Run a test from a computer on the LAN:
+Download:  iperf3 -c $ip -P 6 -R -t 60
+Upload:    iperf3 -c $ip -P 4 -t 60"
+    _ws_job_alive bench_iperf || ws_act run "Start Server" primary "" "" job
+}
+_wa_bench_iperf() { :; }
+_wj_bench_iperf() {
+    if ! command -v iperf3 >/dev/null 2>&1; then install_package iperf3 || return 1; fi
+    print_action "iperf3 server listening on port 5201 - stop it with Stop"
+    exec iperf3 -s --forceflush 2>&1 || exec iperf3 -s
+}
+
+_ws_bench_librespeed() {
+    local st url="" per
+    st=$(_lc_state 1 _ls_pkg_installed _ls_enabled _ls_service_up)
+    _ls_service_up && url="http://$(get_lan_ip):$(_ls_port)"
+    _ls_persist_is_on && per=on || per=off
+    _ws_lc "$st" 1 "$per" "$url" LibreSpeed "the librespeed-go package"
+}
+_wa_bench_librespeed() {
+    case "$1" in
+        persist_on|persist_off) _ws_run_msg _ls_toggle_persistence ;;
+    esac
+}
+_wj_bench_librespeed() { printf 'y\n' | _ls_do "$1"; }
+
+_ws_bench_ost() {
+    local st url="" per
+    st=$(_lc_state 1 _ost_pkg_installed _ost_enabled _ost_service_up)
+    _ost_running && url="http://$(get_lan_ip):$OST_PORT"
+    _ost_persisted && per=on || per=off
+    WS_LC_FIELDS=_ws_ost_source _ws_lc "$st" 1 "$per" "$url" OpenSpeedTest "the OpenSpeedTest app (about ${OST_REQUIRED_MB} MB)"
+    [ "$st" != NOT_INSTALLED ] && ws_act diagnose Diagnostics "" "" "" job
+}
+_ws_ost_source() { [ "$1" = enable ] && return 0; ws field source "Download source" select 1 "1=Official repository (github.com/openspeedtest)|2=GL.iNet mirror (fw.gl-inet.com)"; }
+_wa_bench_ost() {
+    case "$1" in
+        persist_on|persist_off) _ws_run_msg _ost_toggle_persistence ;;
+    esac
+}
+_wj_bench_ost() {
+    case "$1" in
+        diagnose) _ost_diagnose ;;
+        install_enable|reinstall) local src; src=$(ws_args source); [ "$src" = 2 ] || src=1; printf '%s\ny\n' "$src" | _ost_do "$1" ;;
+        *) printf 'y\n' | _ost_do "$1" ;;
+    esac
+}
+
+# ---- System Tweaks -------------------------------------------------------------------------------------------
+_wt_tweaks() {
+    printf '%s\t%s\t%s\n' fan "Fan" show_fan_help zram "Zram Swap" show_zram_help terminal "Web Terminal" show_terminal_help \
+        switch "Switch Indicator" show_switch_indicator_help packages "Packages" show_package_help \
+        repair "Package Repair" show_pkg_repair_help toolkit "Toolkit Management" show_toolkit_help \
+        firmware "Firmware Update" show_firmware_help
+}
+# a tab whose first reading is slow says what it's doing while the page waits (_wl_<screen>_<tab>)
+_wl_tweaks_repair()   { echo "Checking the package system - it refreshes the package index online, up to a minute on slower routers"; }
+_wl_tweaks_firmware() { echo "Reading GL.iNet's firmware catalogue for this router"; }
+_wl_tweaks_packages() { echo "Reading the packages and their sizes"; }
+# Fan Management: the same readings, setpoints, limits and messages as the menu screen
+_ws_tweaks_fan() {
+    local fsp note per
+    _fan_state
+    ws_card Status
+    if [ "$has_fan" = false ]; then
+        ws_row Hardware "NOT DETECTED" grey "" "fanless unit"; ws_row Temperature "${c_temp_fmt}°C"
+        ws_msg warning "Fan settings are disabled on fanless hardware"; return 0
+    fi
+    note=$c_mode_note; fsp=$(_fan_static_pct)
+    [ "$c_mode" = MANUAL ] && [ -n "$fsp" ] && note="(static ${fsp}%, kept across reboots)"
+    [ "$c_mode" = MANUAL ] && [ -z "$fsp" ] && note="(static, this boot only)"
+    note=${note#(}; note=${note%)}
+    ws_row "Control Mode" "$c_mode" "$([ "$c_mode" = DYNAMIC ] && echo green || echo yellow)" "" "$note"
+    ws_row "Current Speed" "$c_speed_pct% ($c_fan_rpm RPM)"
+    ws_row Temperature "${c_temp_fmt}°C"
+    ws_act static "Set Static Fan Speed" primary
+    ws_field pct "Speed (%)" number "${fsp:-$c_speed_pct}" 0-100 "0-100%; kept across reboots"
+    [ "$c_mode" = DYNAMIC ] || ws_act dynamic "Enable Dynamic Fan Control"
+    ws_card "System & Web UI Settings"
+    ws_row "Minimum Setpoint" "$(_fan_sp_disp "$u_min")" "$(case "$u_min" in ''|*[!0-9]*) echo yellow ;; esac)"
+    ws_row "Fan-On Setpoint" "$(_fan_sp_disp "$u_cur")" "$(case "$u_cur" in ''|*[!0-9]*) echo yellow ;; esac)"
+    ws_row "Warning Setpoint" "$(_fan_sp_disp "$u_wrn")" "$(case "$u_wrn" in ''|*[!0-9]*) echo yellow ;; esac)"
+    [ -n "${_fan_rom_max+x}" ] || _fan_rom_max=$(_fan_bundle_max "/rom$view_gz")
+    if [ -n "$_fan_rom_max" ] && [ "$ui_max" -gt "$_fan_rom_max" ] 2>/dev/null; then ws_row "Max Setpoint" "${ui_max}°C" yellow "" "factory ${_fan_rom_max}°C"
+    else ws_row "Max Setpoint" "${ui_max}°C"; fi
+    if glpersist_is_on fan; then ws_row Persistence ENABLED green "" "survives firmware upgrades"; per=on
+    else ws_row Persistence DISABLED grey "" "reboot-safe; lost on firmware upgrade"; per=off; fi
+    ws_act min "Set Minimum Setpoint"; ws_change;  ws_field val "Minimum (°C)" number "$u_min" "0-$u_cur" "0°C - $u_cur°C (the Fan-On setpoint)"
+    ws_act fanon "Set Fan-On Setpoint"; ws_change; ws_field val "Fan-On (°C)" number "$u_cur" "$u_min-$ui_max" "$u_min°C - $ui_max°C"
+    ws_act warn "Set Warning Setpoint"; ws_change; ws_field val "Warning (°C)" number "$u_wrn" "$u_min-$ui_max" "$u_min°C - $ui_max°C"
+    ws_act max "Set Maximum Setpoint" danger "Set a new maximum setpoint?" "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO YOUR DEVICE!"
+    ws_change
+    ws_field val "Maximum (°C)" number "$ui_max" "$u_cur-120" "$u_cur°C - 120°C"
+    ws_act reset "Reset to Factory Defaults"
+    if [ "$per" = on ]; then ws_act persist "Disable Persistence"
+    elif glwebui_is_on fan || [ -n "$fsp" ]; then ws_act persist "Enable Persistence"; fi
+    ws_live 5
+}
+_wa_tweaks_fan() {
+    local v; v=$(ws_args pct); [ -n "$v" ] || v=$(ws_args val); v=$(printf '%s' "$v" | tr -dc '0-9')
+    _fan_state
+    case "$1" in
+        static)
+            if [ -n "$v" ] && [ "$v" -le 100 ]; then
+                if _fan_static_set "$v" >/dev/null 2>&1; then ws_msg success "Fan held at $v% - kept across reboots"
+                else ws_msg error "The fan didn't take the $v% setting" "Try again, or choose Enable Dynamic Fan Control"; fi
+            else ws_msg error "Invalid input"; fi ;;
+        dynamic)
+            if fan_dynamic_restore >/dev/null 2>&1; then ws_msg success "Dynamic control restored"
+            else ws_msg error "The fan controller did not restart"; fi ;;
+        min)   if [ -n "$v" ] && [ "$v" -le "$u_cur" ]; then _fan_apply "$v" "$u_cur" "$u_wrn" "$ui_max" >/dev/null 2>&1; ws_msg success "Minimum setpoint updated to ${v}°C (System & UI)"
+               else ws_msg error "Must be a number and ≤ Fan-On ($u_cur°C)"; fi ;;
+        fanon) if [ -n "$v" ] && [ "$v" -ge "$u_min" ] && [ "$v" -le "$ui_max" ]; then _fan_apply "$u_min" "$v" "$u_wrn" "$ui_max" >/dev/null 2>&1; ws_msg success "Fan-On setpoint updated"
+               else ws_msg error "Must be between Min ($u_min°C) and Max ($ui_max°C)"; fi ;;
+        warn)  if [ -n "$v" ] && [ "$v" -ge "$u_min" ] && [ "$v" -le "$ui_max" ]; then _fan_apply "$u_min" "$u_cur" "$v" "$ui_max" >/dev/null 2>&1; ws_msg success "Warning setpoint updated"
+               else ws_msg error "Must be between Min ($u_min°C) and Max ($ui_max°C)"; fi ;;
+        max)   if [ -n "$v" ] && [ "$v" -ge "$u_cur" ] && [ "$v" -le 120 ]; then
+                   [ "$v" -lt "$u_wrn" ] && { u_wrn=$v; _fmw=1; }
+                   _fan_apply "$u_min" "$u_cur" "$u_wrn" "$v" >/dev/null 2>&1
+                   ws_msg success "Max setpoint updated to ${v}°C"
+                   [ "${_fmw:-}" = 1 ] && ws_detail "New Max is below current Warning setpoint. Adjusting Warning to match new Max."
+               else ws_msg error "Must be between Fan-On ($u_cur°C) and 120°C"; fi ;;
+        reset) { _fan_reset_to_factory; fan_dynamic_restore; glwebui_disable fan; glpersist_is_on fan && glpersist_disable fan; } >/dev/null 2>&1
+               ws_msg success "Factory defaults restored" ;;
+        persist)
+            if glpersist_is_on fan; then glpersist_disable fan; ws_msg success "$(_persist_msg off "fan control" 2>&1 | sed "s/$(printf '\033')\[[0-9;]*m//g; s/^[^A-Za-z]*//" | head -1)"
+            elif glpersist_enable fan; then ws_msg success "$(_persist_msg on "fan control" 2>&1 | sed "s/$(printf '\033')\[[0-9;]*m//g; s/^[^A-Za-z]*//" | head -1)"
+            else ws_msg error "Could not enable persistence (no installable toolkit copy found)"; fi ;;
+    esac
+}
+
+_ws_tweaks_zram() {
+    local st per ds
+    st=$(_lc_state 1 _zram_pkg_installed _zram_enabled _zram_service_up)
+    _zram_persist_is_on && per=on || per=off
+    WS_LC_ROWS=_ws_zram_rows _ws_lc "$st" 1 "$per" "" "zram swap" "the zram-swap package" "Zram Swap"
+}
+_ws_zram_rows() {   # <state> - the menu's second row: the swap device's capacity (uncompressed; it lives in RAM)
+    local ds
+    [ "$1" = ENABLED ] && [ -f /sys/block/zram0/disksize ] || return 0
+    ds=$(cat /sys/block/zram0/disksize 2>/dev/null); case "$ds" in ''|*[!0-9]*) ds=0 ;; esac
+    ws_row "Swap Capacity" "$((ds / 1024 / 1024)) MB"
+}
+_wa_tweaks_zram() { case "$1" in persist_on|persist_off) _ws_run_msg _zram_toggle_persistence ;; esac; }
+_wj_tweaks_zram() { printf 'y\n' | _zram_do "$1"; }
+
+_ws_tweaks_terminal() {
+    local st per url="" port proto
+    if [ -z "$(glwebui_appjs)" ]; then ws_card Status; ws_row "Web Terminal" UNKNOWN red; ws_msg error "The admin-panel bundle was not found; can't manage the Web Terminal"; return 0; fi
+    st=$(_lc_state 1 _ttyd_pkg_installed _ttyd_enabled _ttyd_service_up)
+    glpersist_is_on ttyd && per=on || per=off
+    if _ttyd_service_up; then
+        port=$(uci -q get ttyd.@ttyd[0].port 2>/dev/null); : "${port:=7681}"
+        grep -q "option ssl '1'" /etc/config/ttyd 2>/dev/null && proto=https || proto=http
+        url="$proto://$(get_lan_ip 2>/dev/null):$port"
+    fi
+    WS_LC_FIELDS=_ws_ttyd_fields _ws_lc "$st" 1 "$per" "$url" "the Web Terminal" "the ttyd package" "Web Terminal"
+}
+_ws_ttyd_fields() { case "$1" in install_enable|enable) ws_field https "Use HTTPS" check 0 "" "Serve the terminal over HTTPS (a self-signed certificate)" ;; esac; }
+_wa_tweaks_terminal() { case "$1" in persist_on|persist_off) _ws_run_msg _ttyd_toggle_persistence ;; esac; }
+_wj_tweaks_terminal() {
+    case "$1" in
+        install_enable|enable) [ "$(ws_args https)" = 1 ] && printf 'y\n' | _ttyd_do "$1" || printf 'n\n' | _ttyd_do "$1" ;;
+        *) printf 'y\n' | _ttyd_do "$1" ;;
+    esac
+}
+
+_ws_tweaks_switch() {
+    local st per pos fn sw n=0 opts="" f sub lab grp cur
+    ws_card Status
+    if ! _switch_supported; then
+        ws_row Hardware "NOT DETECTED" grey
+        ws_msg warning "This model has no physical toggle switch, so a position indicator can't be shown"; return 0
+    fi
+    st=$(_lc_state 0 : _switch_enabled _switch_service_running)
+    glpersist_is_on switch && per=on || per=off
+    ws_row Hardware DETECTED green "" "gpio-$(_switch_gpio)"
+    pos=$(_switch_pos 2>/dev/null)
+    if [ -n "$pos" ]; then ws_row Position "$pos"; else ws_row Position UNKNOWN yellow; fi
+    fn=$(_switch_func); sw=$(_switch_state 2>/dev/null)
+    if [ "$fn" = None ]; then ws_row "Toggle function" NONE grey; else ws_row "Toggle function" "$fn"; fi
+    [ "$fn" != None ] && case "$sw" in ON) ws_row State ON green ;; OFF) ws_row State OFF grey ;; esac
+    _ws_lc_rows_and_acts "$st" "$per"
+    # every choice in one list, the menu's labels, VPN / Wi-Fi under a group heading ("#<title>"); it opens on the current one
+    local cf cs last="" sel=1
+    cf=$(uci -q get switch-button.@main[0].func 2>/dev/null); cs=$(uci -q get switch-button.@main[0].sub_func 2>/dev/null)
+    while IFS='|' read -r f sub lab grp; do
+        [ -n "$f" ] || continue; n=$((n + 1))
+        [ -n "$grp" ] && [ "$grp" != "$last" ] && opts="$opts${opts:+|}#$grp"; last=$grp
+        opts="$opts${opts:+|}$n=${grp:+$grp: }$lab"
+        { [ "$f" = "${cf:-none}" ] && [ "$sub" = "$cs" ]; } && sel=$n
+    done <<SWEOF
+$(_switch_func_list)
+SWEOF
+    [ "$n" -gt 0 ] && { ws_act func "Set Toggle Button Function" "" "" ""; ws_change; ws_field choice "Function" select "$sel" "$opts"; }
+    ws_live 5
+}
+_ws_lc_rows_and_acts() {   # <state> <persist> - the lifecycle rows + actions inside the current card (switch)
+    local st="$1" a word tone
+    case "$st" in DISABLED) word=DISABLED; tone=grey ;; ENABLED) word=ENABLED; tone=green ;; *) word="SERVICE DOWN"; tone=red ;; esac
+    ws_row Indicator "$word" "$tone"
+    case "$2" in on) ws_row Persistence ENABLED green ;; *) ws_row Persistence DISABLED grey ;; esac
+    for a in $(_lc_actions "$st" 0); do ws_act "$a" "$(_lc_label "$a")" "$([ "$a" = disable ] || echo primary)" "" "" job; done
+    case "$2" in on) ws_act persist_off "Disable Persistence" ;; *) [ "$st" = DISABLED ] || ws_act persist_on "Enable Persistence" ;; esac
+}
+_wa_tweaks_switch() {
+    local c
+    case "$1" in
+        persist_on|persist_off) _ws_run_msg _switch_toggle_persistence ;;
+        func) c=$(ws_args choice); case "$c" in ''|*[!0-9]*) ws_msg error "Invalid choice"; return ;; esac
+              press_any_key() { :; }; _ws_run_msg _ws_switch_set "$c" ;;
+    esac
+}
+_ws_switch_set() { printf '%s\ny\n' "$1" | _switch_set_function | grep -v '^ *[0-9]*\. \|^ *VPN$\|^ *Wi-Fi$\|Assign the switch'; }
+_wj_tweaks_switch() { printf 'y\n' | _switch_do "$1"; }
+
+# Package & Persistence Manager: its rows (PM_LIST); changes go back through its own Confirm step (PM_TARGETS)
+_ws_pm_id() { printf 'p_%s' "$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -c 'a-z0-9_\n' '_' | cut -c1-28)"; }
+_ws_pm_fresh() {   # <list file> -> 0 while nothing it reads has changed since it was built (and it's under 10 min old)
+    local x
+    [ -s "$1" ] && [ -n "$(find "$1" -mmin -10 2>/dev/null)" ] || return 1
+    for x in "$(pkg_db_path)" "$(_lazlist)" /etc/sysupgrade.conf "${GLPERSIST_DIR:-/etc/glinet_utils/persist}"; do
+        [ -e "$x" ] && [ -n "$(find "$x" -prune -newer "$1" 2>/dev/null)" ] && return 1
+    done
+    return 0
+}
+_ws_pm_rows() {   # -> name|type|installed|persisted|sizeKB|paths (cached for this request)
+    [ -n "${_WS_PM:-}" ] && { printf '%s\n' "$_WS_PM"; return; }
+    local f=/tmp/glutils/pm_rows
+    # measuring every package takes seconds (10+ on a small router), so the list is kept - while it still describes
+    # the router: the package database (any install / remove, from any screen, the menus, GL's own pages or a shell)
+    # and the persistence settings are no newer than it (a 2-minute timer missed apache installed by Direct UI Access)
+    if ! _ws_pm_fresh "$f"; then
+        mkdir -p /tmp/glutils; PM_LIST=$f.t manage_packages >/dev/null 2>&1 </dev/null; mv -f "$f.t" "$f" 2>/dev/null
+    fi
+    _WS_PM=$(cat "$f" 2>/dev/null)
+    printf '%s\n' "$_WS_PM"
+}
+_ws_tweaks_packages() {   # the Package & Persistence Manager, edited in place (the same toggle table as the Lists Manager)
+    local rows name type oi op kb paths free comp=0 fs
+    rows=$(_ws_pm_rows)
+    free=$(df -k /overlay 2>/dev/null | awk 'NR==2{print $4}')
+    fs=$(awk '$2=="/overlay"{print $3; exit}' /proc/mounts 2>/dev/null); case "$fs" in ubifs|jffs2) comp=1 ;; esac
+    ws_card Packages
+    ws editor apply pkg
+    ws emeter "${free:-0}" "$comp" 0
+    printf '%s\n' "$rows" | while IFS='|' read -r name type oi op kb paths; do
+        [ -n "$name" ] && [ "$type" != F ] || continue
+        [ "$name" = stress ] && [ "$(_stress_backend 2>/dev/null)" = stress-ng ] && name="stress (stress-ng)"
+        ws erow "$(_ws_pm_id "${name%% (*}")" "$name" "$type" "" "$oi" "$op" "$oi" "$op" "${kb:-0}" 0
+    done
+    _ws_job_alive tweaks_packages || ws_act apply "Apply Changes" primary "Apply these package changes?" "Installing downloads packages; removing deletes them and their settings" job
+    if printf '%s\n' "$rows" | awk -F'|' '$2 == "F" { f = 1 } END { exit !f }'; then
+        ws_card "Features"
+        ws_note "Toolkit features whose settings can be kept across firmware updates."
+        ws editor features feat
+        printf '%s\n' "$rows" | while IFS='|' read -r name type oi op kb paths; do
+            [ "$type" = F ] && ws erow "$(_ws_pm_id "f_$paths")" "$name" F "" 1 "$op" 1 "$op" 0 0
+        done
+        _ws_job_alive tweaks_packages || ws_act features "Apply Changes" primary "Change what's kept across firmware updates?" "" job
+    fi
+}
+_wa_tweaks_packages() { :; }
+_wj_tweaks_packages() {   # apply|features - only the rows whose value changed become targets
+    local rows name type oi op kb paths v t=""
+    rows=$(_ws_pm_rows)
+    while IFS='|' read -r name type oi op kb paths; do
+        [ -n "$name" ] || continue
+        if [ "$type" = F ]; then
+            [ "$1" = features ] || continue
+            v=$(ws_args "$(_ws_pm_id "f_$paths")"); case "$v" in 0|1) [ "$v" != "$op" ] && t="${t}F:$paths=$v
+" ;; esac
+        else
+            [ "$1" = apply ] || continue
+            v=$(ws_args "$(_ws_pm_id "$name")")
+            case "$v" in 0:0|1:0|1:1) [ "$v" != "$oi:$([ "$oi" = 1 ] && echo "$op" || echo 0)" ] && t="${t}$name=$v
+" ;; esac
+        fi
+    done <<PMEOF
+$rows
+PMEOF
+    if [ -z "$t" ]; then print_info "No changes to apply"; return 0; fi
+    rm -f /tmp/glutils/pm_rows
+    printf 'y\n' | PM_TARGETS="$t" manage_packages
+    rm -f /tmp/glutils/pm_rows
+}
+
+# Package System Repair: its measurement is slow (it refreshes the index online), so the page keeps the last
+# one for 5 minutes; Check re-measures as a job
+_ws_pr_state() {
+    local f=/tmp/glutils/pr_state
+    if [ -s "$f" ] && [ -n "$(find "$f" -mmin -5 2>/dev/null)" ]; then . "$f"; return; fi
+    pkg_repair_measure >/dev/null 2>&1 </dev/null
+    mkdir -p /tmp/glutils; printf 'PR_MGR=%s\nPR_NET=%s\nPR_BK=%s\nPR_DB=%s\nPR_CACHE=%s\n' "$PR_MGR" "$PR_NET" "$PR_BK" "$PR_DB" "$PR_CACHE" > "$f"
+}
+_ws_tweaks_repair() {
+    local t ok=1 ts n=0 opts=""
+    _ws_pr_state
+    ws_card Status
+    ws_row "Package manager" "$(printf '%s' "$PR_MGR" | tr 'a-z' 'A-Z')"
+    case "$PR_DB" in HEALTHY) t=green ;; CORRUPT) t=red ;; *) t=yellow ;; esac; ws_row "Installed database" "$PR_DB" "$t"
+    case "$PR_CACHE" in HEALTHY) t=green ;; CORRUPT) t=red ;; *) t=yellow ;; esac; ws_row "Index cache" "$PR_CACHE" "$t"
+    ws_row Internet "$PR_NET" "$([ "$PR_NET" = UP ] && echo green || echo red)"
+    if [ "${PR_BK:-0}" -gt 0 ]; then ws_row "Database backups" "$PR_BK"; else ws_row "Database backups" NONE grey; fi
+    { [ "$PR_DB" = CORRUPT ] || [ "$PR_CACHE" = CORRUPT ] || [ "$PR_CACHE" = EMPTY ]; } && ok=0
+    _ws_job_alive tweaks_repair && return 0
+    if [ "$ok" = 1 ]; then ws_act check "Check for Package System Issues" primary "" "" job
+    else
+        ws_act repair "Repair Now" primary "Repair the package system?" \
+            "The index cache is rebuilt first; if the installed database still can't be read, a safe end-of-file repair is tried before anything drastic" job
+        _ws_pr_factory_field
+    fi
+    ws_act cache "Rebuild the Package Index Cache" "" "" "" job
+    ws_act db "Repair the Installed Database" "" "Repair the installed database?" \
+        "This repairs $(pkg_db_path); a safe end-of-file repair is tried first, before anything drastic" job
+    _ws_pr_factory_field
+    ws_card "Database Backups"
+    ws_row "Database file" "$(pkg_db_path)"
+    local ns; ns=$(pkg_db_ns)
+    set -- $(bk_list "$ns" "$(basename "$(pkg_db_path)")")
+    if [ $# -gt 0 ]; then
+        ws_th "" "Date / Time" Size
+        for ts in "$@"; do ws_tr "~pickm~dbk=$ts" "$(bk_date "$ts")" "$(bk_size_kb "$ns" "$ts")K"; done
+    else ws_note "No database backups saved yet."; fi
+    ws_act save "Save a Backup Now"
+    [ $# -gt 0 ] || return 0
+    ws_act restore "Restore" danger "Restore the installed database from a backup?" \
+        "This overwrites the current installed database with the chosen backup" job
+    ws_field dbk Backup inline "" 1
+    ws_act delete "Delete Selected" danger "Delete the selected backups?" "Deleted backups can't be recovered" job
+    ws_field dbk Backups inline "" 1+
+}
+_wa_tweaks_repair() {
+    case "$1" in
+        save) if [ ! -f "$(pkg_db_path)" ]; then ws_msg error "No installed database found at $(pkg_db_path)"
+              elif bk_save "$(pkg_db_ns)" "$(bk_ts)" "$(pkg_db_path)"; then ws_msg success "Backup saved"; rm -f /tmp/glutils/pr_state
+              else ws_msg error "Could not save a backup"; fi ;;
+    esac
+}
+_ws_pr_factory_field() {   # the last-resort step the repair asks about - opt-in, and said plainly
+    ws_field factory "If that isn't enough, restore the factory package database (packages added since are forgotten by the package manager; their files and your settings stay)" check 0
+}
+_wj_tweaks_repair() {   # the dialog was the confirmation; its answers arrive as named args
+    local ts n=0 ns fac=n
+    [ "$(ws_args factory)" = 1 ] && fac=y
+    rm -f /tmp/glutils/pr_state
+    case "$1" in
+        check)   _pr_recheck ;;
+        repair)  PKG_ANS_REPAIR=y PKG_ANS_FACTORY=$fac pkg_repair_now ;;
+        cache)   pkg_cache_rebuild_action ;;
+        db)      PKG_ANS_REPAIR=y PKG_ANS_FACTORY=$fac pkg_db_repair_action ;;
+        restore) ts=$(ws_args dbk); ns=$(pkg_db_ns)
+                 case "$ts" in ''|*,*) print_error "Tick one backup to restore"; return 1 ;; esac
+                 bk_list "$ns" "$(basename "$(pkg_db_path)")" | grep -qx "$ts" || { print_error "That backup no longer exists"; return 1; }
+                 pkg_db_restore_ts "$ts" ;;
+        delete)  ns=$(pkg_db_ns)
+                 for ts in $(bk_list "$ns" "$(basename "$(pkg_db_path)")"); do
+                     case ",$(ws_args dbk)," in *",$ts,"*) bk_delete "$ns" "$ts" && n=$((n + 1)) ;; esac
+                 done
+                 case "$n" in 0) print_error "No backups selected"; return 1 ;; 1) print_success "Deleted 1 backup" ;; *) print_success "Deleted $n backups" ;; esac ;;
+    esac
+    rm -f /tmp/glutils/pr_state
+}
+
+# Toolkit Management: everything but Display Settings (the terminal's own look - terminal-only, agreed)
+_ws_tweaks_toolkit() {
+    local ver st upd remote f=/tmp/glutils/update_state
+    ver=$(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}' | tr -d '\r'); : "${ver:=unknown}"
+    ws_card Status
+    if toolkit_is_installed; then ws_row Installation INSTALLED green; else ws_row Installation "NOT INSTALLED" grey; fi
+    if toolkit_persistence_enabled; then ws_row Persistence ENABLED green; else ws_row Persistence DISABLED grey; fi
+    st=$(webui_state)
+    case "$st" in ENABLED) ws_row "Admin Panel" ENABLED green; ws_row "Admin Panel URL" "$(webui_url)" link ;;
+                  SERVICE_DOWN) ws_row "Admin Panel" "SERVICE DOWN" red ;; DISABLED) ws_row "Admin Panel" DISABLED grey ;; esac
+    ws_row "Running from" "$SCRIPT_PATH"
+    ws_row Version "$ver"
+    remote=$(cat "$f" 2>/dev/null)
+    if [ -z "$remote" ]; then upd=unknown
+    elif [ "$remote" \> "$ver" ]; then upd=available; else upd=current; fi
+    case "$upd" in available) ws_row Update AVAILABLE yellow "" "$remote" ;; current) ws_row Update "UP TO DATE" green ;; *) ws_row Update UNKNOWN grey "" "not checked yet" ;; esac
+    if toolkit_is_installed; then ws_act uninstall Uninstall danger "Remove the toolkit?" "This will remove $INSTALL_PATH from the system - and this page with it" job
+    elif [ "$SCRIPT_PATH" != "$INSTALL_PATH" ]; then ws_act install Install primary "" "" job; fi
+    if toolkit_is_installed; then
+        if toolkit_persistence_enabled; then ws_act persist_off "Disable Persistence" "" "Disable sysupgrade persistence?"
+        else ws_act persist_on "Enable Persistence" "" "Enable sysupgrade persistence?"; fi
+    fi
+    ws_act check "Check for Updates"
+    ws_act changelog "View Change Log" "" "" "" read
+    [ "$upd" = available ] && ws_act update "Update to $remote" primary "Update the toolkit to $remote?" "The page reloads with the new version when it finishes" job
+    case "$st" in ENABLED|SERVICE_DOWN) ws_act webui_off "Disable Admin Panel Page" danger "Disable the Admin Panel page?" "This removes the toolkit's pages from the Admin Panel - this page included. Enable it again from Toolkit Management in a terminal" ;; esac
+    ws_act display "Display Settings" "" "the terminal's own display settings - open Toolkit Management in a terminal" "" terminal
+}
+_wr_tweaks_toolkit() { echo changelog; }
+_wa_tweaks_toolkit() {
+    local r f
+    case "$1" in
+        changelog)   # the latest three releases to read (the menu pages the whole file); the rest is on GitHub
+            mkdir -p /tmp/glutils; f=/tmp/glutils/CHANGELOG.$$
+            if wget -q -T 20 -O "$f" "$CHANGELOG_URL" 2>/dev/null </dev/null && [ -s "$f" ]; then
+                ws_reader "Change Log" md "$(awk '/^## /{n++} n > 3 {exit} n >= 1' "$f")
+
+Earlier releases: https://github.com/phantasm22/GL-iNet_utils/blob/main/CHANGELOG.md"
+            else ws_msg warning "Unable to fetch the change log (network or GitHub issue)"; fi
+            rm -f "$f" ;;
+        persist_on)  _ws_run_msg set_toolkit_persistence 1 ;;
+        persist_off) _ws_run_msg set_toolkit_persistence 0 ;;
+        check)
+            mkdir -p /tmp/glutils
+            if wget -q -T 15 -O /tmp/glutils/.remote "$SCRIPT_URL" 2>/dev/null; then
+                r=$(grep -m1 '^# Version:' /tmp/glutils/.remote | awk '{print $3}' | tr -d '\r'); rm -f /tmp/glutils/.remote
+                printf '%s' "$r" > /tmp/glutils/update_state; ws_msg success "Checked - the latest version is $r"
+            else rm -f /tmp/glutils/.remote; ws_msg warning "Unable to check for updates (network or GitHub issue)"; fi ;;
+        webui_off) if webui_disable >/dev/null 2>&1; then ws_msg success "Admin Panel page disabled"
+                   else ws_msg error "The Admin Panel page could not be removed completely" "Retry, or reboot the router and retry"; fi ;;
+    esac
+}
+_wj_tweaks_toolkit() {
+    local f
+    case "$1" in
+        uninstall) rm -f "$INSTALL_PATH"; set_toolkit_persistence 0; print_success "Uninstalled" ;;
+        install)   do_install_to_sbin ;;
+        update)
+            f=/tmp/glutils/glinet_utils.new
+            print_action "Downloading update"
+            if ! wget -q -T 30 -O "$f" "$SCRIPT_URL" 2>/dev/null || ! _is_toolkit_file "$f"; then
+                rm -f "$f"; print_warning "Download failed (network or GitHub issue)"; return 1
+            fi
+            space_preflight "$(dirname "$SCRIPT_PATH")" 0 "$(( ($(wc -c < "$f") + 1023) / 1024 ))" "the toolkit update" </dev/null || { rm -f "$f"; return 1; }
+            if cp "$f" "$SCRIPT_PATH.new" && chmod 755 "$SCRIPT_PATH.new" && mv "$SCRIPT_PATH.new" "$SCRIPT_PATH"; then
+                rm -f "$f"; print_success "Updated to $(grep -m1 '^# Version:' "$SCRIPT_PATH" | awk '{print $3}')"
+                __GL_HEADLESS=1 sh "$SCRIPT_PATH" --webui-refresh && print_info "Admin Panel pages refreshed - reload this page"
+            else rm -f "$f" "$SCRIPT_PATH.new"; print_warning "Could not write $SCRIPT_PATH (permissions?)"; return 1; fi ;;
+    esac
+}
+
+# Firmware Update: STATUS, the update check, and the builds - pick one in the table, Install asks the menu's
+# questions in its dialog (named answers) and the job flashes; the page reconnects after the reboot
+# the web's firmware work lives in ONE place (the menu's is per session and removed when it closes): the screen,
+# its jobs and the next load share the catalogue; it's re-fetched after an hour or on Check for Updates
+_ws_fw_tmp() {
+    FW_TMP=/tmp/glutils/fw; mkdir -p "$FW_TMP"
+    [ -s "$FW_TMP/cat" ] && [ -z "$(find "$FW_TMP/cat" -mmin -60 2>/dev/null)" ] && rm -f "$FW_TMP/cat" "$FW_TMP/products.json"
+}
+_ws_fw_rows() {   # < _fw_table_rows lines - the build rows
+    local idx p chan lbl rel mb dir act
+    while IFS='|' read -r idx p chan lbl rel mb dir; do
+        [ -n "$idx" ] || continue
+        # the menu's picker words: only the picked row says what will happen (the page paints it as you pick)
+        case "$p" in
+            SAME)      act="~plan~!green:Reinstall|grey:Installed" ;;
+            DOWNGRADE) act="~plan~yellow:Downgrade|grey:No Change" ;;
+            INSTALL)   act="~plan~green:Install|grey:No Change" ;;
+            *)         act="~plan~green:Update|grey:No Change" ;;
+        esac
+        ws_tr "~pick~build=$idx$([ "$idx" = "${def:-1}" ] && echo '*')" "$lbl" "$rel" "$mb MB" "$act"
+    done
+}
+_ws_tweaks_firmware() {
+    local t ok=1 need ls
+    _ws_fw_tmp
+    for t in sysupgrade sha256sum jsonfilter; do command -v "$t" >/dev/null 2>&1 || ok=0; done
+    _fw_cur >/dev/null 2>&1
+    [ "$ok" = 1 ] && [ ! -s "$FW_TMP/cat" ] && _fw_catalog >/dev/null 2>&1
+    [ -s "$FW_TMP/products.json" ] && FW_NAME=$(jsonfilter -i "$FW_TMP/products.json" -e "@.info[@.code=\"$(_fw_model)\"].name" 2>/dev/null | head -1)
+    _fw_update_state >/dev/null 2>&1
+    [ "$ok" = 1 ] && _fw_risk_scan keep >/dev/null 2>&1
+    ws_card Status
+    ws_row Model "${FW_NAME:-$(_fw_model | tr 'a-z' 'A-Z')}"
+    ws_row Channel "$FW_CUR_CHAN" "$(ws_lc "$FW_CUR_CHAN")"
+    ws_row Version "$FW_CUR_LABEL"
+    case "$FW_UPD" in   # the word coloured, its detail beside it (the menu's "AVAILABLE (<build>)")
+        AVAILABLE) ws_row Update AVAILABLE yellow "" "$(_fw_field "$FW_UPD_ROW" 2 | sed 's/ (/ /; s/)$//')$(t=$(_fw_checked); [ -n "$t" ] && echo ", checked $t")" ;;
+        UPTODATE)  ws_row Update "UP TO DATE" green "" "$(t=$(_fw_checked); [ -n "$t" ] && echo "checked $t")" ;;
+        *)         ws_row Update UNKNOWN grey "" offline ;;
+    esac
+    need=$(awk -F'|' '$1=="Packages" {n += split($2, a, ", "); next} NF {n++} END {print n+0}' "$FW_TMP/risk.keep" 2>/dev/null); : "${need:=0}"
+    if [ "$need" -gt 0 ]; then
+        ws_row "Not Persisted" "$need ITEM$([ "$need" = 1 ] || echo S)" yellow
+        # what isn't persisted, one row per kind under it - the menu's sub-rows ("Packages:  apache, speedtest")
+        _fw_risk_rows "$FW_TMP/risk.keep" 2>/dev/null | sed "s/$(printf '\033')\[[0-9;]*m//g; s/^ *//" | while IFS= read -r t; do
+            case "$t" in *:*) ws_row "${t%%:*}" "$(printf '%s' "${t#*:}" | sed 's/^ *//')" ;; ?*) ws_note "$t" ;; esac
+        done
+    else ws_row "Not Persisted" NONE green; fi
+    ls=$(_fw_hist_latest)
+    # back from a flash: the same health re-check the menu runs when it opens
+    # back from a flash: the same post-update check the toolkit runs at startup (_fw_post_check), its report shown once
+    local hrep=""
+    case "$(_fw_st "$ls" status 2>/dev/null)" in flashing|pending) [ -n "$ls" ] && hrep=$(_fw_health "$ls" show 2>&1 </dev/null) ;; esac
+    [ -n "$ls" ] && { t=$(_fw_status_disp "$(_fw_st "$ls" status)" | sed "s/$(printf '\033')\[[0-9;]*m//g"); ws_row "Last Update" "$t" "$(ws_lc "$t")" "" "$(_fw_st "$ls" when | cut -c1-16), $(_fw_st "$ls" to)"; }
+    if [ "$ok" != 1 ]; then ws_msg warning "This firmware lacks the tools needed to flash safely (sysupgrade, sha256sum, jsonfilter)"; return 0; fi
+    ws_act recheck "Check for Updates"
+    # the menu's View Update History - only while there is history (the menu leaves the item out too)
+    [ -n "$ls" ] && ws_act history "View Update History" "" "" "" read
+    if [ -n "$hrep" ]; then
+        ws_card "After the Update"
+        printf '%s\n' "$hrep" | sed "s/$(printf '\033')\[[0-9;?]*[A-Za-z]//g" | grep -v '^[┌│└]' | sed '/./,$!d' | while IFS= read -r t; do ws pre "$t"; done
+    fi
+    [ "$need" -gt 0 ] && ws_note "Keep what's listed above on the Packages tab - or leave \"Persist the items under Not Persisted\" ticked when you install a build."
+    # Choose a Build: the same catalogue as the menu's picker; installing runs the menu's own update, its questions
+    # answered in the output card (an interactive job)
+    [ -s "$FW_TMP/cat" ] || return 0
+    local idx row chan lbl dir act def=""
+    ws_card "Available Builds"
+    ws_th "" Version Released Size "Planned Action"
+    _fw_build_list > "$FW_TMP/web.list"
+    # the default pick: the offered update, else the installed build
+    _fw_table_rows < "$FW_TMP/web.list" > "$FW_TMP/web.rows"
+    def=$(while IFS='|' read -r idx row; do [ "$row" = "$FW_UPD_ROW" ] && echo "$idx"; done < "$FW_TMP/web.list" | head -1)
+    [ -n "$def" ] || def=$(awk -F'|' '$7 == "SAME" { print $1; exit }' "$FW_TMP/web.rows")
+    # every build, grouped by channel like the menu's picker, each channel under the Lists editor's section heading row
+    awk -F'|' '!s[$3]++ { print $3 }' "$FW_TMP/web.rows" | while IFS= read -r chan; do
+        ws_tr "~group~$(_fw_pick_head "$chan")$([ "$chan" = "$FW_CUR_CHAN" ] && echo " · your channel")"
+        awk -F'|' -v c="$chan" '$3 == c' "$FW_TMP/web.rows" | _ws_fw_rows
+    done
+    rm -f "$FW_TMP/web.rows"
+    _ws_job_alive tweaks_firmware && return 0
+    # the build is the table's ticked row; what the menu asks on the way is the dialog's form
+    ws_act install "Install Selected Build" danger "Flash the selected build?" \
+        "The router downloads it, checks GL.iNet's checksum and signature, then flashes and reboots (about 5 minutes). This page reconnects when the router is back." job
+    ws_field build Build inline
+    # GL's own Upgrade page: a Keep Settings switch; off shows what erasing means
+    ws_field keep "Keep Settings" switch 1 "All settings are erased and the router starts GL.iNet's first-time setup - this can't be undone"
+    [ "$need" -gt 0 ] && ws_field persist "Persist the items under Not Persisted first" switch 1
+    ws_act notes "Release Notes" "" "" "" read
+    ws_field build Build inline
+}
+_wj_tweaks_firmware() {
+    local n row; n=$(ws_args build); case "$n" in ''|*[!0-9]*) print_error "Pick a build"; return 1 ;; esac
+    FW_TMP=/tmp/glutils/fw; mkdir -p "$FW_TMP"; _fw_cur >/dev/null 2>&1
+    row=$(_fw_build_list | sed -n "${n}p" | cut -d'|' -f2-)
+    [ -n "$row" ] || { print_error "That build isn't in GL.iNet's catalogue any more - check for updates and pick again"; return 1; }
+    case "$1" in
+        install) # the dialog's form answers the update's questions; its Flash button was the final yes
+                 if [ "$(ws_args keep)" = 0 ]; then export FW_ANS_KEEP=n FW_ANS_WIPE=y; else export FW_ANS_KEEP=y FW_ANS_WIPE=n; fi
+                 [ "$(ws_args persist)" = 0 ] && export FW_ANS_PERSIST=n || export FW_ANS_PERSIST=y
+                 export FW_ANS_GO=y
+                 if [ "$(_fw_direction "$row")" = SAME ]; then _fw_install "$row" reinstall; else _fw_install "$row"; fi ;;
+    esac
+}
+_wr_tweaks_firmware() { printf 'notes\nhistory\n'; }   # read actions (see _ws_act)
+_wa_tweaks_firmware() {
+    local n row t
+    case "$1" in
+        notes)   # the chosen build's notes as a reading view (the first "V4.9.2" line repeats the title)
+            n=$(ws_args build); FW_TMP=/tmp/glutils/fw; _fw_cur >/dev/null 2>&1
+            row=$(_fw_build_list | sed -n "${n}p" | cut -d'|' -f2-)
+            [ -n "$row" ] || { ws_msg warning "That build isn't in GL.iNet's catalogue any more - check for updates and pick again"; return 0; }
+            t=$(_fw_notes "$row" | sed '/./,$!d' | sed '1{/^V[0-9][0-9.]*$/d;}')
+            if [ -n "$t" ]; then ws_reader "$(_fw_field "$row" 2) - Release Notes" notes "$t"
+            else ws_msg info "GL.iNet publishes no release notes for $(_fw_field "$row" 2)"; fi ;;
+        recheck) rm -f /tmp/glutils/fw/cat /tmp/glutils/fw/products.json; ws_msg success "Checked GL.iNet's firmware catalogue" ;;
+        history) t=$(_fw_history_text)   # read live from the history files each time
+                 if [ -n "$t" ]; then ws_reader "Update History" log "$t"; else ws_msg info "No update attempts recorded yet"; fi ;;
+    esac
+}
+
+# ---- Network and VPN Tools ------------------------------------------------------------------------------------
+_wt_net() {
+    printf '%s\t%s\t%s\n' mtu "MTU Optimizer" show_mtu_help rla "Remote LAN Access" show_rla_help \
+        limiter "Bandwidth Limiter" show_netlimit_help ssh "SSH Keys" show_ssh_help
+}
+# VPN MTU Optimizer: one card per tunnel (the menu pages them), the same state (_mtu_state) and actions
+_ws_net_mtu() {
+    local tf=/tmp/glutils/mtu.$$ n=0 line word note t
+    mkdir -p /tmp/glutils; mtu_detect > "$tf" 2>/dev/null
+    if [ ! -s "$tf" ]; then rm -f "$tf"; ws_card Status; ws_row Tunnels NONE grey; ws_msg warning "No active WireGuard or OpenVPN tunnels found"; return 0; fi
+    while IFS= read -r line <&3; do
+        n=$((n + 1)); _mtu_state "$line"
+        ws_card "$type $role: $iface"
+        case "$_st" in CONNECTED*|UP*) t=green ;; *) t=red ;; esac
+        case "$_st" in *"  "*) ws_row Status "${_st%%  *}" "$t" "" "$(printf '%s' "${_st#*  }" | sed 's/^ *//')" ;; *) ws_row Status "$_st" "$t" ;; esac
+        ws_row "Current MTU" "${cur:-N/A}" fact "" "$(printf '%s' "$source_label" | tr -d ' ()')"
+        ws_row Underlay "${underlay:-N/A} (MTU ${underlay_mtu:-N/A})"
+        ws_row Overhead "-$overhead ($type / $family)"
+        if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then ws_row Recommended "$rec" green "" optimal
+        elif [ -n "$rec" ]; then ws_row Recommended "$rec" yellow "" "$([ "${cur:-0}" -lt "$rec" ] 2>/dev/null && echo "can raise" || echo "should lower")"
+        else ws_row Recommended UNKNOWN yellow "" "endpoint not resolved"; fi
+        word=${vplain%% *}; note=${vplain#* (}; note=${note%)}
+        case "$word" in VERIFIED) t=green ;; STALE) t=yellow ;; *) t=grey ;; esac
+        ws_row Basis "$word" "$t" "" "$note"
+        if [ "$_m_opt" = 1 ]; then ws_act "opt_$n" "Optimize Tunnel (Apply Recommended)" primary
+        else ws_act "recalc_$n" "Recalculate Recommended MTU"; fi
+        ws_act "set_$n" "Set MTU Manually"; ws_change   # the slider snaps to the Recommended tick
+        ws_field val "MTU for $iface" number "${cur:-1420}" "1280-1500${rec:+;mark=$rec}" "1280-1500${rec:+ (recommended $rec)}"
+        ws_act "probe_$n" "Verify with an Active Probe" "" "" "" job
+        [ "$_m_keys" = "1/2/3/4" ] && ws_act "reset_$n" "Reset MTU (Remove Override)" danger "Remove the toolkit's MTU override on $iface?"
+    done 3< "$tf"
+    rm -f "$tf"
+}
+_ws_mtu_pick() {   # <action like opt_2> -> that tunnel's _mtu_state
+    local i=${1##*_}
+    _mtu_state "$(mtu_detect 2>/dev/null | sed -n "${i}p")"
+}
+_wa_net_mtu() {
+    local v nr tf=/tmp/glutils/mtu.rec
+    _ws_mtu_pick "$1"
+    case "$1" in
+        opt_*)    _ws_run_msg mtu_apply "$iface" "$rec" "$type" ;;
+        recalc_*) _mtu_rec_now "$iface" "$endpoint" "$overhead" "$tf" >/dev/null 2>&1; nr=$(cat "$tf" 2>/dev/null); rm -f "$tf"
+                  if [ -z "$nr" ]; then ws_msg error "Couldn't resolve the link under $iface, so there's no recommendation" "Check the tunnel's endpoint and the WAN connection, then retry"
+                  elif [ "$nr" = "$(mtu_get "$iface")" ]; then ws_msg success "Recommended MTU is $nr - already applied"
+                  else ws_msg info "Recommended MTU is now $nr - choose Optimize Tunnel"; fi ;;
+        set_*)    v=$(ws_args val)
+                  case "$v" in ''|*[!0-9]*) ws_msg error "Invalid MTU" ;;
+                      *) if [ "$v" -ge 1280 ] && [ "$v" -le 1500 ]; then _ws_run_msg mtu_apply "$iface" "$v" "$type"; else ws_msg error "MTU must be 1280-1500"; fi ;; esac ;;
+        reset_*)  _ws_run_msg mtu_reset "$iface" "$type" ;;
+    esac
+}
+_wj_net_mtu() { _ws_mtu_pick "$1"; printf 'y\n' | mtu_probe "$type" "$iface" "$endpoint" "$overhead" "$role" "$underlay_mtu"; }
+
+# Remote LAN Access: every tunnel as a card (its four ends), then its Outbound and Inbound matrices - the menu's own
+# rla_rows over a shared measurement cache - and the menu's levers as INTERACTIVE jobs: their "apply anyway?" and the
+# 30-second keep-or-revert confirm are answered on the page (if a change cuts the page off, it reverts by itself)
+WS_RLA_CACHE=/tmp/glutils/rla/m
+_ws_rla_tunnels() { rla_detect 2>/dev/null | awk -F'|' 'NF >= 3 && !seen[$3]++ { print NR "|" $0 }' | awk -F'|' '{ print ++n "|" $2 "|" $3 "|" $4 }'; }
+_ws_rla_change() {   # <text> <option 1's label> <option 3's label> - the menu's "opt N" -> the button's name on the page
+    printf '%s' "$1" | sed "s/[Oo]pt 1/$2/; s/[Oo]pt 2/Detect or Set the Remote LAN/; s/[Oo]pt 3/$3/"
+}
+_ws_net_rla() {
+    local n t r i tun peer lan lanip rlan rgw st tn rt k a b c d dir lev any=0
+    RLA_MCACHE=$WS_RLA_CACHE; mkdir -p "${RLA_MCACHE%/*}"
+    _ws_rla_tunnels > "/tmp/glutils/rla/list.$$"
+    if [ ! -s "/tmp/glutils/rla/list.$$" ]; then
+        rm -f "/tmp/glutils/rla/list.$$"; ws_card Status; ws_row Tunnels NONE grey
+        ws_msg warning "No VPN tunnel is up on this router - start a WireGuard or OpenVPN client or server first"; return 0
+    fi
+    ws_card "Reachability"
+    ws_note "A live probe of who can reach whom across each tunnel - this LAN, this router, the remote router and the remote LAN. Changes re-check their own tunnel."
+    _ws_job_alive net_rla || ws_act measure "Check Reachability" primary "" "" job
+    while IFS='|' read -r n t r i <&3; do
+        case "$r" in server) rt=Server ;; *) rt=Client ;; esac
+        tun=$(rla_tunnel_ip "$i"); peer=$(rla_peer_tunnel_ip "$i" "$t" "$r")
+        lan=$(rla_lan_cidr); lanip=$(rla_lan_ip)
+        rlan=$(d_get "$i"); [ -z "$rlan" ] && rlan=$(rla_remote_lan "$i" "$t")
+        st=$(vpn_state_label "$i" "$t" "$r"); case "$st" in CONNECTED*|UP*) tn=green ;; *) tn=red ;; esac
+        ws_card "$t $rt: $i"
+        case "$st" in *"  "*) ws_row Status "${st%%  *}" "$tn" "" "$(printf '%s' "${st#*  }" | sed 's/^ *//')" ;; *) ws_row Status "$st" "$tn" ;; esac
+        ws_row "This LAN" "$lan"
+        ws_row "This router" "$lanip" fact "" "tunnel $tun"
+        ws_row "Remote router" "${peer:-$([ "$r" = server ] && echo "no clients" || echo "no peer")}"
+        if [ -n "$rlan" ]; then
+            rgw="${rlan%.*}.1"
+            ws_row "Remote LAN" "$rlan" fact "" "$([ "$(d_get_src "$i")" = probe ] && echo "inferred - " )gateway $rgw"
+        else ws_row "Remote LAN" UNKNOWN yellow "" "detect or set it below"; fi
+        local l1o l1i l3
+        if [ -n "$rlan" ] && rla_routes_via "$rlan" "$i" 2>/dev/null; then l1o="Disable Routing to the Remote LAN"; else l1o="Enable Routing to the Remote LAN"; fi
+        if [ "$(rla_access "$(rla_zone "$i")")" = on ]; then l1i="Disable Inbound Access from the Remote LAN"; else l1i="Enable Inbound Access from the Remote LAN"; fi
+        if [ "$(rla_masq "$(rla_zone "$i")")" = on ]; then l3="Disable IP Masquerading"; else l3="Enable IP Masquerading"; fi
+        for dir in out in; do
+            if [ "$dir" = out ]; then ws_card "Outbound - from here to the remote side ($i)"; lev=$l1o
+            else ws_card "Inbound - from the remote side to here ($i)"; lev=$l1i; fi
+            if [ -f "$RLA_MCACHE.$i" ]; then
+                any=1
+                ws_th Status From As To Change
+                rla_rows "$i" "$t" "$r" "$dir" 2>/dev/null | while IFS='|' read -r k a b c d; do
+                    case "$k" in REACH) k="~green~REACHABLE" ;; BLOCK) k="~red~BLOCKED" ;; *) k="~yellow~UNKNOWN" ;; esac
+                    ws_tr "$k" "$a" "$b" "$c" "$(_ws_rla_change "$d" "$lev" "$l3")"
+                done
+            else ws_note "Not measured yet - Check Reachability (above) probes it"; fi
+            _ws_job_alive net_rla && continue
+            if [ "$dir" = out ]; then
+                ws_act "route_$n" "$l1o" "$(case "$l1o" in Enable*) echo primary ;; esac)" "" "" ijob
+                ws_act "detect_$n" "Detect or Set the Remote LAN" "" "" "" job
+                ws_field subnet "Remote LAN subnet" text "" "e.g. 192.168.2.0/24" "Leave empty to detect it: the tunnel's settings, the remote router over SSH, then a scan"
+                ws_field full "If the quick scan finds nothing, run a full scan (every private /24, ~30 s - installs fping)" check 0
+                ws_act "masq_$n" "$l3" "" "" "" ijob
+            else
+                ws_act "inbound_$n" "$l1i" "$(case "$l1i" in Enable*) echo primary ;; esac)" "" "" ijob
+            fi
+        done
+    done 3< "/tmp/glutils/rla/list.$$"
+    rm -f "/tmp/glutils/rla/list.$$"
+    [ "$any" = 1 ] && ws_note "Measured $(date -r "$(ls -t "$RLA_MCACHE".* 2>/dev/null | head -1)" '+%H:%M' 2>/dev/null) - † / inferred = a subnet found by probing, not configured"
+}
+_wa_net_rla() { :; }
+_wj_net_rla() {
+    local n t r i dir
+    RLA_MCACHE=$WS_RLA_CACHE; mkdir -p "${RLA_MCACHE%/*}"
+    if [ "$1" = measure ]; then
+        _ws_rla_tunnels | while IFS='|' read -r n t r i; do
+            [ -z "$(d_get "$i")" ] && rla_autodetect "$i" "$t" "$r"
+            rm -f "$RLA_MCACHE.$i"
+            spin_run "Checking reachability on $i" rla_cache_measure "$i" "$t" "$r"
+        done
+        print_success "Reachability checked"; return 0
+    fi
+    n=${1##*_}
+    IFS='|' read -r n t r i <<RLAEOF
+$(_ws_rla_tunnels | sed -n "${n}p")
+RLAEOF
+    [ -n "$i" ] || { print_error "That tunnel isn't up any more"; return 1; }
+    case "$1" in
+        route_*)   rla_do_lever2 "$i" "$t" "$r" out; rla_reverify "$i" "$t" "$r" ;;
+        inbound_*) rla_do_lever2 "$i" "$t" "$r" in; rla_reverify "$i" "$t" "$r" ;;
+        masq_*)    rla_do_lever3 "$i" "$t" "$r" out; rla_reverify "$i" "$t" "$r" ;;
+        detect_*)  # the form: a typed subnet is set as is; empty detects (a found one is kept, a full scan only if ticked)
+                   if [ -n "$(ws_args subnet)" ]; then rla_ctx "$i" "$t" "$r"; rla_set_remote_lan "$i" "$(ws_args subnet)" || return 1
+                   else RLA_ANS_KEEP=y RLA_ANS_FULL=$([ "$(ws_args full)" = 1 ] && echo y || echo n) rla_do_detect "$i" "$t" "$r"; fi
+                   rla_reverify "$i" "$t" "$r" ;;
+    esac
+}
+
+# Network Bandwidth Limiter: the networks table, HW acceleration, limits and Reset, per-network router access,
+# persistence, interface up/down and Wi-Fi bands (one tick per band)
+_ws_net_limiter() {
+    # a private map: a job (Set Limits, Router Access) and this screen's re-read can run at the same moment
+    local NL_MAP="/tmp/glutils/nl_map.$$"; mkdir -p /tmp/glutils
+    local hw idx name iface type zone dl ul wb ps st ifstate rv opts=""
+    _netlimit_build_map >/dev/null 2>&1; netlimit_sweep_orphans >/dev/null 2>&1
+    hw=$(offload_state)
+    ws_card Status
+    if [ "$hw" != on ]; then ws_row "HW Acceleration" DISABLED green
+    elif netlimit_any_limited; then ws_row "HW Acceleration" ENABLED yellow "" "limits are BYPASSED - disable it to enforce them"
+    else ws_row "HW Acceleration" ENABLED green; fi
+    command -v tc >/dev/null 2>&1 || ws_msg warning "Traffic control (tc) isn't available - limits can't be applied until it's installed"
+    if [ "$hw" = on ]; then
+        if netlimit_any_limited; then ws_act hw_off "Disable HW Acceleration" primary
+        else ws_act hw_off "Disable HW Acceleration"; fi
+    elif netlimit_any_limited; then ws_act hw_on "Enable HW Acceleration" "" "Enable HW acceleration anyway?" "Active limits will stop working with HW acceleration on (offload bypasses the shaper)"
+    else ws_act hw_on "Enable HW Acceleration"; fi
+    ws_act reset Reset danger "Revert to defaults?" "This removes every limit and router rule, re-enables HW acceleration, and stops the background service" job
+    # pick a network in the table, then act on it: each action names the networks it applies to ("1:<names>") and
+    # opens with that network's current values ("~per~<name>=<value>;...") - as the menu's per-network editor does
+    local all="" lim="" ra="" ck="" pe="" ud="" pdl="" pul="" pall="" pkeep="" pup="" acts nn
+    ws_card Networks
+    ws_th "" Network Interface If-State Download Upload Router Persist Status
+    while IFS='|' read -r idx name iface type zone dl ul wb ps st ifstate; do
+        [ -n "$name" ] || continue
+        case "$wb" in open|full) rv="~green~REACHABLE" ;; partial) rv="~yellow~PARTIAL" ;; blocked) rv="~red~BLOCKED" ;; *) rv="-" ;; esac
+        nn=$(_nl_net_note "$name" "$type")
+        ws_tr "~pick~nw=$name" "$name${nn:+ ($nn)}" "$iface" "$([ "$ifstate" = down ] && echo '~grey~DOWN' || echo '~green~UP')" "$(_nl_rate "$dl")" "$(_nl_rate "$ul")" "$rv" \
+            "$([ "$ifstate" = down ] && echo - || { [ "$ps" = 1 ] && echo '~green~YES' || echo '~grey~NO'; })" \
+            "$(case "$st" in active) echo '~green~ACTIVE' ;; bypassed) echo '~yellow~BYPASSED' ;; *) echo '~grey~INACTIVE' ;; esac)"
+        all="$all${all:+,}$name"
+        # which buttons this row enables: the menu editor's own list (netlimit_net_actions)
+        acts=" $(netlimit_net_actions "$idx|$name|$iface|$type|$zone|$dl|$ul|$wb|$ps|$st|$ifstate" | tr '\n' ' ')"
+        case "$acts" in *" limits "*) lim="$lim${lim:+,}$name"; pdl="$pdl$name=${dl:-0};"; pul="$pul$name=${ul:-0};" ;; esac   # the map is in Mbps
+        case "$acts" in *" access "*) ra="$ra${ra:+,}$name"; pall="$pall$name=$([ "$wb" = full ] && echo 1 || echo 0);" ;; esac
+        case "$acts" in *" check "*) ck="$ck${ck:+,}$name" ;; esac
+        case "$acts" in *" persist "*) pe="$pe${pe:+,}$name"; pkeep="$pkeep$name=${ps:-0};" ;; esac
+        case "$acts" in *" toggle "*) ud="$ud${ud:+,}$name"; pup="$pup$name=$([ "$ifstate" = down ] && echo 0 || echo 1);" ;; esac
+    done < "$NL_MAP"
+    [ -n "$all" ] || { rm -f "$NL_MAP"; return 0; }
+    # a switched-off network can't be shaped - bring it up first (the menu's rule)
+    [ -n "$lim" ] && { ws_act limits "Set Limits" primary "" "" job; ws_change
+    ws_field nw Network inline "" "1:$lim"
+    # the slider in sections: half its width for 0-1,000 (where most limits are), then coarser steps up to 100,000
+    local seg="0-100000;seg=1000/10/50,10000/500/25,100000/5000/25"
+    ws_field dl "Download limit (Mbps, 0 = none)" number "~per~$pdl" "$seg" ""
+    ws_field ul "Upload limit (Mbps, 0 = none)" number "~per~$pul" "$seg" ""; }
+    [ -n "$ra" ] && { ws_act access "Router Access" "" "Change router access?" "Reachable on all ports also exposes the router's admin panel to that network - on an isolated network that undoes the isolation" job; ws_change
+        ws_field nw Network inline "" "1:$ra"; ws_field all "Router reachable on all ports" check "~per~$pall" "" "Off = only the ports the firewall zone allows"; }
+    # where the firewall zone governs router access (or there's no zone) it can only be re-measured, as in the menu
+    [ -n "$ck" ] && { ws_act check "Check Router Access"; ws_field nw Network inline "" "1:$ck"; }
+    [ -n "$pe" ] && { ws_act persist "Network Persistence"; ws_change
+        ws_field nw Network inline "" "1:$pe"; ws_field keep "Keep this network's limits across firmware updates" check "~per~$pkeep" "" ""; }
+    [ -n "$ud" ] && { ws_act ifstate "Bring Interface Up / Down" "" "Change the interface state?" "Down stays down across reboots until you bring it up - devices on it lose their connection" job; ws_change
+        ws_field nw Network inline "" "1:$ud"; ws_field up "Interface up" check "~per~$pup" "" ""; }
+    # a network with 2+ Wi-Fi bands is brought up / down per band (one switch each, on = up), like the menu's grid
+    # behind the same "Bring Interfaces UP or DOWN" item - so it's the same button here: one per such network, all
+    # labelled like the whole-interface one, and the page shows the one that applies to the network you picked
+    while IFS='|' read -r idx name iface type zone dl ul wb ps st ifstate; do
+        netlimit_net_actions "$idx|$name|$iface|$type|$zone|$dl|$ul|$wb|$ps|$st|$ifstate" | grep -qx bands || continue
+        ws_act "bands_$idx" "Bring Interface Up / Down" "" "Bring $name's Wi-Fi bands up or down?" "$(_nl_wifi_restart)" job; ws_change
+        ws_field nw Network inline "" "1:$name"
+        i=0
+        netlimit_net_wifi "$name" | while IFS='|' read -r sec band ssid dis; do
+            [ -n "$sec" ] || continue; i=$((i + 1))
+            ws_field "b_$i" "${band:-$sec}${ssid:+ - $ssid}" check "$([ "$dis" = 1 ] && echo 0 || echo 1)"
+        done
+    done < "$NL_MAP"
+    rm -f "$NL_MAP"
+}
+_ws_nl_row() {   # <network name, or its index> -> that network's map row (fresh, from a private map)
+    local NL_MAP="/tmp/glutils/nl_map.$$.row"; mkdir -p /tmp/glutils
+    _netlimit_build_map >/dev/null 2>&1
+    case "$1" in ''|*[!0-9]*) awk -F'|' -v n="$1" '$2 == n' "$NL_MAP" ;; *) grep "^$1|" "$NL_MAP" ;; esac
+    rm -f "$NL_MAP" "$NL_MAP.tmp"
+}
+_wa_net_limiter() {
+    local n ln iface dl ul
+    case "$1" in
+        persist) n=$(ws_args nw); [ -n "$n" ] || { ws_msg error "Pick a network in the table first"; return; }
+                 ln=$(_ws_nl_row "$n"); [ -n "$ln" ] || { ws_msg error "That network isn't there any more"; return; }
+                 iface=$(printf '%s' "$ln" | cut -d'|' -f3)
+                 dl=$(netlimit_conf_field "$iface" 2); ul=$(netlimit_conf_field "$iface" 3)
+                 netlimit_conf_put "$iface" "${dl:-0}" "${ul:-0}" "$(netlimit_conf_field "$iface" 4)" "$([ "$(ws_args keep)" = 1 ] && echo 1 || echo 0)"
+                 netlimit_persist_sync >/dev/null 2>&1
+                 ws_msg success "$(printf '%s' "$ln" | cut -d'|' -f2): limits $([ "$(ws_args keep)" = 1 ] && echo "kept" || echo "not kept") across firmware updates" ;;
+        check)  n=$(ws_args nw); ln=$(_ws_nl_row "$n"); [ -n "$ln" ] || { ws_msg error "That network isn't there any more"; return; }
+                ws_msg info "$(_nl_access_says "$(printf '%s' "$ln" | cut -d'|' -f5)")" ;;
+        hw_off) if set_hw_accel 0 >/dev/null 2>&1; then ws_msg success "HW acceleration disabled"; else ws_msg error "HW acceleration didn't change"; fi ;;
+        hw_on)  if set_hw_accel 1 >/dev/null 2>&1; then ws_msg success "HW acceleration enabled"; else ws_msg error "HW acceleration didn't change"; fi ;;
+    esac
+}
+_wj_net_limiter() {
+    local n dl ul ln iface name
+    case "$1" in
+        reset) spin_run "Reverting to defaults" netlimit_reset_all && print_success "Reverted to defaults" ;;
+        access|ifstate)
+            n=$(ws_args nw); [ -n "$n" ] || { print_error "Pick a network in the table first"; return 1; }
+            ln=$(_ws_nl_row "$n"); [ -n "$ln" ] || { print_error "That network isn't there any more"; return 1; }
+            IFS='|' read -r idx name iface type zone dl ul wb ps st ifstate <<NLEOF
+$ln
+NLEOF
+            if [ "$1" = access ]; then
+                if [ "$(ws_args all)" = 1 ]; then spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 1
+                else spin_run "Updating firewall" netlimit_webui "$iface" "$zone" 0; fi
+                spin_run "Checking router access" netlimit_router_state "$zone"
+                case "$(tail -n1 "$SPIN_LOG" 2>/dev/null)" in
+                    full)    print_success "$name: router REACHABLE on all ports" ;;
+                    partial) print_success "$name: router access PARTIAL (some ports)" ;;
+                    blocked) print_success "$name: router access BLOCKED" ;;
+                    *)       print_info "$name: router access is managed by the '$zone' firewall zone" ;;
+                esac
+            elif [ "$(ws_args up)" = 1 ]; then spin_run "Bringing $name up" netlimit_ifset "$name" up && print_success "$name is UP" || _nl_toggle_fail "$name didn't come up"
+            else spin_run "Bringing $name down" netlimit_ifset "$name" down && print_success "$name is DOWN" || _nl_toggle_fail "$name didn't go down"; fi ;;
+        bands_*)   # the dialog's ticks -> the menu's band map (idx|iface|band|ssid|up), applied and verified live
+            n=${1#bands_}; ln=$(_ws_nl_row "$n"); [ -n "$ln" ] || { print_error "That network isn't there any more"; return 1; }
+            name=$(printf '%s' "$ln" | cut -d'|' -f2); iface=$(printf '%s' "$ln" | cut -d'|' -f3)
+            local mf=/tmp/glutils/nl_bands.$$ i=0 v dev
+            dev=$(uci -q get "network.$name.device" 2>/dev/null); [ -n "$dev" ] || dev=$iface   # as the menu's grid
+            netlimit_net_wifi "$name" | while IFS='|' read -r sec band ssid dis; do
+                [ -n "$sec" ] || continue; i=$((i + 1))
+                v=$(ws_args "b_$i"); case "$v" in 0|1) ;; *) [ "$dis" = 1 ] && v=0 || v=1 ;; esac
+                echo "$i|$sec|$band|$ssid|$v"
+            done > "$mf"
+            spin_run "Applying Wi-Fi bands" netlimit_bands_apply "$name" "$dev" "$mf" \
+                && print_success "$name: Wi-Fi bands applied" || _nl_toggle_fail "Some Wi-Fi bands didn't reach the selected state"
+            rm -f "$mf" ;;
+        limits)
+            n=$(ws_args nw); dl=$(ws_args dl); ul=$(ws_args ul)
+            case "$dl$ul" in *[!0-9]*|"") print_error "Invalid value"; return 1 ;; esac
+            [ -n "$n" ] || { print_error "Pick a network in the table first"; return 1; }
+            ln=$(_ws_nl_row "$n")
+            [ -n "$ln" ] || { print_error "That network isn't there any more"; return 1; }
+            iface=$(printf '%s' "$ln" | cut -d'|' -f3)
+            if [ "$dl" -gt 0 ] || [ "$ul" -gt 0 ]; then printf 'y\n' | _netlimit_offload_ok || return 1; fi
+            if spin_run "Applying limit" netlimit_set "$iface" "$dl" "$ul"; then print_success "Limits applied to $(printf '%s' "$ln" | cut -d'|' -f2)"
+            else print_error "The limit couldn't be applied"; tail -5 "$SPIN_LOG" 2>/dev/null; fi ;;
+    esac
+}
+
+# SSH Key Management
+_ws_net_ssh() {
+    local af=/etc/dropbear/authorized_keys up=/etc/sysupgrade.conf n=0 opts="" i ty id
+    [ -f "$af" ] && n=$(grep -c "^ssh-" "$af")
+    ws_card Status
+    ws_row "Authorized Keys" "$n"
+    if grep -qFx "$af" "$up" 2>/dev/null; then ws_row Persistence ENABLED green; ws_act persist_off "Disable Persistence" "" "Disable persistence for SSH keys anyway?" "Your SSH keys would then be lost on the next firmware upgrade, with no way to recover them from the router"
+    else ws_row Persistence DISABLED grey; ws_act persist_on "Enable Persistence"; fi
+    ws_card "Authorized Keys"
+    if [ -s "$af" ]; then
+        ws_th "" "#" Type Identity
+        awk '{ type = $1; if ($3 != "") { id = $3; for (i = 4; i <= NF; i++) id = id " " $i } else id = "(No comment) " substr($2, 1, 15) "..."; print NR "|" type "|" id "|" $2 }' "$af" \
+            | while IFS='|' read -r i ty id blob; do ws_tr "~pickm~pk=$(_ssh_key_id "$blob")" "$i" "$ty" "$id"; done
+        n=1
+    else ws_note "No keys yet"; n=0; fi
+    ws_act add "Add a New SSH Key" primary
+    ws_field key "Public key" text "" "ssh-ed25519 AAAA... you@computer" "Paste the whole line (starts with ssh-rsa, ssh-ed25519, ...)"
+    # tick the keys in the table, then Delete Selected (enabled once one is ticked)
+    [ "$n" = 1 ] && { ws_act delete "Delete Selected" danger "Delete the selected keys?" "Whoever holds their private keys can't sign in with them any more"; ws_field pk Keys inline "" 1+; }
+}
+_ssh_key_id() { printf '%s' "$1" | md5sum | cut -c1-12; }   # <key blob> -> a short stable id (the line number shifts)
+_wa_net_ssh() {
+    local af=/etc/dropbear/authorized_keys up=/etc/sysupgrade.conf k b i id
+    case "$1" in
+        add) k=$(ws_args key)
+             if printf '%s' "$k" | grep -qE "^ssh-(rsa|ed25519|dss|ecdsa) "; then
+                 b=$(printf '%s' "$k" | awk '{print $2}')
+                 if [ -f "$af" ] && grep -q "$b" "$af"; then ws_msg warning "Key already exists in authorized_keys"
+                 else mkdir -p /etc/dropbear; printf '%s\n' "$k" >> "$af"; chmod 0700 /etc/dropbear; chmod 0600 "$af"
+                      if grep -qF "$b" "$af" 2>/dev/null; then ws_msg success "Key added"; else ws_msg error "Could not add the key - check free space and permissions on $af"; fi; fi
+             else ws_msg error "That isn't an SSH public key (it starts with ssh-rsa, ssh-ed25519, ...)"; fi ;;
+        delete) k=",$(ws_args pk),"; i=0
+             case "$k" in ,,) ws_msg error "Tick the keys to delete first"; return ;; esac
+             : > "$af.tmp.$$"
+             while IFS= read -r b; do
+                 id=$(_ssh_key_id "$(printf '%s' "$b" | awk '{print $2}')")
+                 case "$k" in *",$id,"*) [ -n "$b" ] && i=$((i + 1)); continue ;; esac
+                 printf '%s\n' "$b" >> "$af.tmp.$$"
+             done < "$af"
+             if [ "$i" -gt 0 ] && mv "$af.tmp.$$" "$af" && chmod 0600 "$af"; then
+                 if [ "$i" = 1 ]; then ws_msg success "Deleted 1 key"; else ws_msg success "Deleted $i keys"; fi
+             else rm -f "$af.tmp.$$"; ws_msg warning "Those keys aren't there any more - the list has been refreshed"; fi ;;
+        persist_on)  echo "$af" >> "$up"; ws_msg success "$(_persist_msg on "SSH keys" 2>&1 | sed "s/$(printf '\033')\[[0-9;]*m//g; s/^[^A-Za-z]*//" | head -1)" ;;
+        persist_off) sed -i "\|$af|d" "$up"; ws_msg success "$(_persist_msg off "SSH keys" 2>&1 | sed "s/$(printf '\033')\[[0-9;]*m//g; s/^[^A-Za-z]*//" | head -1)" ;;
+    esac
+}
+
+# AdGuardHome Lists Manager: the rows (AGH_LM_LIST); changes go through its own Confirm/stop/write/restart (AGH_LM_TARGETS)
+_ws_lm_id() { printf 'l_%s' "$(printf '%s' "$1" | md5sum | cut -c1-12)"; }
+_ws_agh_rows() {
+    local f=/tmp/glutils/lm_rows.$$
+    mkdir -p /tmp/glutils; AGH_LM_LIST=$f manage_agh_lists >/dev/null 2>&1 </dev/null
+    cat "$f" 2>/dev/null; rm -f "$f"
+}
+_ws_agh_lists() {   # the Lists Manager, edited in place: each list's two switches, the menu's planned actions and
+    local rows i sec n ty oi oe ti te rules url est st mt sw cap dl=0 fl=0     # its Memory Impact meter, then Apply
+    rows=$(_ws_agh_rows)
+    st=$(agh_run_state 2>/dev/null)
+    case "$st" in down) ws_msg warning "AdGuardHome is stopped. Changes take effect once started." ;;
+                  off)  ws_msg warning "AdGuardHome is disabled. Changes will take effect once enabled." ;; esac
+    read -r mt sw cap <<CAPEOF
+$(agh_capacity_mb)
+CAPEOF
+    ws_card Lists
+    ws editor apply
+    ws emeter "$mt" "$sw" "$cap"
+    # the menu's rows: oi/oe = now; ti/te = the menu's starting selection (the Recommended lists pre-selected)
+    while IFS='|' read -r i sec n ty oi oe ti te rules url est; do
+        [ -n "$n" ] || continue
+        ws erow "$(_ws_lm_id "$n")" "$n" "$ty" "$sec" "$oi" "$oe" "$ti" "$te" "$rules" "$est"
+        [ "$oi" = 1 ] && [ "$oe" = 1 ] && case "$est" in 1) dl=$((dl + 1)) ;; 2|3) fl=$((fl + 1)) ;; esac
+    done <<LMROWS
+$rows
+LMROWS
+    [ "$dl" -gt 0 ] && [ "$st" != down ] && [ "$st" != off ] && ws_note "$dl list$([ "$dl" = 1 ] || echo s) downloading - rule count estimated until finished"
+    [ "$fl" -gt 0 ] && ws_note "$fl list$([ "$fl" = 1 ] || echo s) failed to download - rules not loaded"
+    _ws_job_alive agh_lists && return 0
+    ws_act apply "Apply Changes" primary "Apply these list changes?" "AdGuardHome restarts to load them (and is turned on if it's off)" job
+}
+_wa_agh_lists() { :; }
+_wj_agh_lists() {
+    local rows i sec n ty oi oe ti te rules url est v t=""
+    rows=$(_ws_agh_rows)
+    while IFS='|' read -r i sec n ty oi oe ti te rules url est; do
+        [ -n "$n" ] || continue
+        v=$(ws_args "$(_ws_lm_id "$n")")
+        case "$v" in 0:0|1:0|1:1) [ "$v" != "$oi:$([ "$oi" = 1 ] && echo "$oe" || echo 0)" ] && t="$t$n=$v
+" ;; esac
+    done <<LMEOF
+$rows
+LMEOF
+    [ -n "$t" ] || { print_info "No changes to apply"; return 0; }
+    printf 'y\ny\n' | AGH_LM_TARGETS="$t" manage_agh_lists
+}
+
+# the rest of the Control Center mirrors its menu screens (STATUS + one button per item, run in the menu's code)
+# Storage, native: the menu's STATUS rows (agh_storage_rows), its one toggle as a button whose dialog says what the menu
+# warns before asking
+_ws_agh_storage() {
+    local wd d fl lim w=""
+    wd=$(get_agh_workdir)
+    [ -n "$wd" ] || { ws_msg error "Could not find AdGuardHome's working directory"; return 0; }
+    ws_card Status
+    agh_storage_rows "$wd" | while IFS='|' read -r l v t n; do ws_row "$l" "$v" "$t" "" "$n"; done   # the menu's rows
+    fl=$(_agh_fl_state)
+    if [ "$fl" = none ]; then ws_note "GL.iNet's filter space limit doesn't apply to this model/firmware"; return 0; fi
+    _ws_job_alive agh_storage && return 0
+    if [ "$fl" = on ]; then
+        swapon -s 2>/dev/null | grep -q zram || w=" Zram swap is NOT enabled - it is strongly recommended to enable it (Zram Swap tab) before adding additional filter lists."
+        ws_act disable "Disable Filter Space Limit" "" "Remove the filter storage limit?" \
+            "GL.iNet caps the AdGuardHome filter cache (~9MB loop partition) to protect RAM on ~512MB models. Removing it allows larger/more lists, but raises RAM use and can destabilize small-RAM routers.$w" job
+    else
+        _agh_fl_fit "$wd" && w="Your filter lists use ~$(( _use_kb / 1024 ))MB, but this limit only holds ~$(( _usable_kb / 1024 ))MB - lists that don't fit won't load. Remove some, or leave the limit off for full space."
+        ws_act enable "Enable Filter Space Limit" "" "Re-enable the filter storage limit?" "$w" job
+    fi
+}
+_wa_agh_storage() { :; }
+_wj_agh_storage() {   # disable | enable - the dialog was the confirmation
+    AGH_WORKDIR=$(get_agh_workdir)
+    case "$1" in
+        disable) agh_remove_filter_limit ;;
+        enable)  agh_restore_filter_limit ;;
+    esac
+}
+_ws_agh_zram() { _ws_tweaks_zram; }
+_wa_agh_zram() { _wa_tweaks_zram "$@"; }
+_wj_agh_zram() { _wj_tweaks_zram "$@"; }
+# Updates & Channel, native: the menu's STATUS and its four items as buttons; what the menu asks before a switch
+# or an update is the dialog's question, and "keep this version across firmware updates" a check box in it
+_ws_agh_updates() {
+    local cver chan uion=1 per=0 lw lt ld=""
+    _agh_upd_unchecked && _agh_upd_check </dev/null
+    cver=$(_agh_cur_ver); chan=$(agh_channel "$cver"); agh_update_state </dev/null
+    grep -q -- "--no-check-update" "$AGH_INIT" 2>/dev/null && uion=0
+    _agh_updates_persist && per=1
+    case "$(agh_run_state)" in
+        on) lw=ENABLED; lt=green ;; partial) lw=ENABLED; lt=yellow; ld="GL switch off" ;;
+        down) lw="SERVICE DOWN"; lt=red ;; *) lw=DISABLED; lt=grey ;;
+    esac
+    ws_card Status
+    ws_row AdGuardHome "$lw" "$lt" "" "$ld"
+    ws_row Channel "$chan" "$([ "$chan" = BETA ] && echo yellow || echo green)"
+    ws_row Version "v${cver:-?}"
+    case "$AGH_UPD" in
+        AVAILABLE) ws_row Update AVAILABLE yellow "" "v$AGH_UPD_VER" ;;
+        UPTODATE)  ws_row Update "UP TO DATE" green ;;
+        *)         ws_row Update UNKNOWN grey "" offline ;;
+    esac
+    if [ "$uion" = 1 ]; then ws_row "Updates via UI" ENABLED green; else ws_row "Updates via UI" DISABLED grey; fi
+    if [ "$per" = 1 ]; then ws_row Persistence ENABLED green
+    elif _agh_fw_risk; then ws_row Persistence DISABLED yellow "" "firmware update would stop AdGuardHome"
+    else ws_row Persistence DISABLED grey; fi
+    _ws_job_alive agh_updates && return 0
+    if [ "$AGH_UPD" = AVAILABLE ]; then
+        ws_act update "Update to v$AGH_UPD_VER" primary "Update AdGuardHome to v$AGH_UPD_VER?" \
+            "config.yaml is backed up first; if the new version won't start, the current one is put back" job
+        ws_field keep "Keep the new version across firmware updates (if GL.iNet's build can't read its config)" check 1
+    else
+        ws_act update "Check for Updates" "" "" "" job
+    fi
+    if [ "$chan" = BETA ]; then
+        ws_act channel "Switch to Stable Channel" "" "Switch to the Stable channel?" \
+            "This installs AdGuard's current stable release. To return to an earlier version, restore a backup in Backup & Recovery." job
+    else
+        ws_act channel "Switch to Beta Channel" "" "Switch to the Beta channel?" \
+            "Beta builds are AdGuard's pre-release versions and can be less stable. config.yaml is backed up first; Beta upgrades it to a format GL.iNet's firmware build (v$(_agh_rom_ver)) can't read." job
+        ws_field keep "Keep the Beta build across firmware updates" check 1
+    fi
+    if [ "$uion" = 1 ]; then
+        ws_act ui "Disable Updates via UI" "" "Disable Updates via UI?" "" job
+    else
+        ws_act ui "Enable Updates via UI" "" "Enable Updates via UI?" \
+            "$([ "$per" = 1 ] && echo "Persistence is on - a version installed through the dashboard survives firmware updates" || echo "Persistence is off, so a firmware update reinstalls GL.iNet's build and drops any version installed through the dashboard. Consider enabling persistence.")" job
+    fi
+    if [ "$per" = 1 ]; then ws_act persist "Disable Persistence"; else ws_act persist "Enable Persistence"; fi
+}
+_wa_agh_updates() {   # persist: instant, like the menu (no question)
+    case "$1" in
+        persist) if _agh_updates_persist; then _agh_persist_set off; else _agh_persist_set on; fi >/dev/null 2>&1
+                 if _agh_updates_persist; then ws_msg success "Persistence enabled"; else ws_msg success "Persistence disabled"; fi ;;
+    esac
+}
+_wj_agh_updates() {   # update | channel | ui - the dialog was the confirmation
+    local keep; [ "$(ws_args keep)" = 0 ] && keep=n || keep=y
+    case "$1" in
+        update)
+            agh_update_state </dev/null
+            if [ "$AGH_UPD" = AVAILABLE ]; then AGH_ANS_KEEP=$keep agh_update_now
+            else
+                rm -f "$(_agh_upd_file)"; spin_run "Checking for updates" _agh_upd_check; agh_update_state
+                case "$AGH_UPD" in
+                    UPTODATE)  print_success "AdGuardHome is up to date (v$(_agh_cur_ver))" ;;
+                    AVAILABLE) print_info "v$AGH_UPD_VER is available - choose Update to v$AGH_UPD_VER" ;;
+                    *)         fail_report "Couldn't reach AdGuard's update server" "" "Check the router's internet connection, then retry"; return 1 ;;
+                esac
+            fi ;;
+        channel)
+            if [ "$(agh_channel "$(_agh_cur_ver)")" = BETA ]; then AGH_ANS_GO=y AGH_ANS_KEEP=$keep agh_channel_to_stable
+            else AGH_ANS_GO=y AGH_ANS_KEEP=$keep agh_channel_to_beta; fi ;;
+        ui) if grep -q -- "--no-check-update" "$AGH_INIT"; then agh_updates_ui_set enable; else agh_updates_ui_set disable; fi ;;
+    esac
+}
+# Logs & Maintenance, native: the recent log, Watch Live Logs (follows until Stop), and Clear Filter Cache /
+# Restart confirmed in the dialog
+_ws_agh_logs() {
+    local recent
+    ws_card "Recent Log"
+    # OpenWrt's logread filters with -e <regexp> and has no -i: both spellings in the pattern instead
+    # each line as "time  message" (syslog's date + tag and AdGuardHome's own UTC stamp dropped)
+    recent=$(logread -e '[Aa][Dd][Gg]uard' 2>/dev/null | tail -n 20 \
+        | sed -E 's/^[A-Z][a-z]+ [A-Z][a-z]+ +[0-9]+ ([0-9:]+) [0-9]+ [^:]*: ([0-9]+\/[0-9]+\/[0-9]+ [0-9:.]+ )?/\1  /')
+    if [ -n "$recent" ]; then ws_pre "$recent"; else ws_note "No AdGuardHome lines in the system log yet."; fi
+    _ws_job_alive agh_logs && return 0
+    ws_act watch "Watch Live Logs" primary "" "" job
+    ws_act clear "Clear Filter Cache" "" "Clear the filter cache?" \
+        "This clears all cached filter files; AdGuardHome re-downloads them on next start" job
+    if is_agh_running; then ws_act restart "Restart AdGuardHome" "" "Restart AdGuardHome?" "" job
+    else ws_note "AdGuardHome is disabled - enable it on the Status tab to restart it."; fi
+}
+_wa_agh_logs() { :; }
+_wj_agh_logs() {
+    case "$1" in
+        watch|item_1) print_info "Following AdGuardHome's log - Stop ends it"; exec logread -f -e '[Aa][Dd][Gg]uard' ;;
+        clear)   agh_clear_filter_cache ;;
+        restart) agh_service_restart ;;
+    esac
+}
+# Backup & Recovery, native: the backups as a table; Save / Restore / Delete gather their choices in the dialog
+# (the menu's component pickers and backup list become check boxes and a drop-down)
+_ws_agh_bk_yn() { [ "$1" = Y ] && echo "~green~YES" || echo "~grey~NO"; }
+_ws_agh_backups() {
+    local backups ts rv d info bv bc bs bin cfg ini bytes f n=0 opts="" v ch sch bin_kb
+    bk_migrate_legacy agh "$(get_agh_config)" /usr/bin/AdGuardHome /etc/init.d/adguardhome >/dev/null 2>&1
+    get_agh_stats >/dev/null 2>&1 </dev/null
+    backups=$(bk_list agh); rv=$(_agh_rom_ver); d=$(bk_dir agh)
+    ws_card Status
+    if [ "${bk_date:-None}" = None ]; then ws_row "Last backup" NONE grey; else ws_row "Last backup" "$bk_date"; fi
+    ws_row Backups "${bk_count:-0}" fact "" "${bk_total_u:-0B} used, ${bk_free:-N/A} free"
+    ws_card Backups
+    if [ -z "$backups" ]; then
+        ws_note "No backups yet - Save a New Backup keeps a copy of AdGuardHome's settings to restore later."
+    else
+        ws_th "" "Date / Time" Version Channel Schema Config Binary Startup Size
+        for ts in $backups; do
+            info=$(_agh_bk_info "$ts"); bv=${info%%|*}; bc=${info#*|}; bs=${bc#*|}; bc=${bc%%|*}
+            cfg=N; bk_has agh config.yaml "$ts" && cfg=Y
+            ini=N; bk_has agh adguardhome "$ts" && ini=Y
+            bin=$(_agh_bk_bin_cell "$ts" "$rv"); case "$bin" in "[Y]") bin="~green~YES" ;; rom) bin="GL.iNet (rom)" ;; *) bin="~grey~NO" ;; esac
+            bytes=0
+            for f in "$d/config.yaml.$ts" "$d/AdGuardHome.$ts" "$d/adguardhome.$ts"; do
+                [ -f "$f" ] && bytes=$((bytes + $(ls -nl "$f" | awk '{print $5}')))
+            done
+            ws_tr "~pickm~bk=$ts" "$(bk_date "$ts")" "$([ "$bv" = - ] && echo - || echo "v$bv")" \
+                "$(case "$bc" in BETA) echo "~yellow~BETA" ;; -) echo "~grey~-" ;; *) echo "~green~$bc" ;; esac)" "$bs" \
+                "$(_ws_agh_bk_yn $cfg)" "$bin" "$(_ws_agh_bk_yn $ini)" \
+                "$(awk -v b="$bytes" 'BEGIN { if (b >= 1048576) printf "%.1fM", b/1048576; else if (b >= 1024) printf "%.1fK", b/1024; else printf "%dB", b }')"
+        done
+    fi
+    _ws_job_alive agh_backups && return 0
+    # Save: what this backup captures (the running build and its config schema) as the dialog's hint
+    v=$(_agh_cur_ver); ch=$(agh_channel "$v"); sch=$(_agh_cfg_schema "$(get_agh_config)")
+    bin_kb=$(_file_kb "$(_agh_bin)")
+    ws_act save "Save a New Backup" primary "" "" job
+    if [ -n "$v" ] && [ "$v" = "$rv" ]; then   # GL.iNet's build needs no copy - /rom holds it
+        ws_field cfg "Configuration Settings (YAML)" check 1 "" \
+            "AdGuardHome v$v ($ch), config schema ${sch:--} - GL.iNet's build, so a restore takes the app from /rom"
+    else
+        ws_field cfg "Configuration Settings (YAML)" check 1 "" "AdGuardHome v${v:-?} ($ch), config schema ${sch:--}"
+        ws_field bin "App Binary (AdGuardHome executable, $(( (bin_kb + 1023) / 1024 )) MB)" check 0
+    fi
+    ws_field ini "Startup Script (init.d)" check 0
+    [ -n "$backups" ] || return 0
+    ws_act restore "Restore" primary "Restore AdGuardHome from a backup?" \
+        "AdGuardHome restarts with the backup's setup; if it won't start, the current setup is put back" job
+    ws_field bk Backup inline "" 1
+    ws_field cfg "Configuration Settings" check 1 "" "Only the parts the chosen backup holds are restored (see the table)"
+    ws_field bin "App Binary" check 1
+    ws_field ini "Startup Script (init.d)" check 1
+    ws_field rom "Also bring back GL.iNet's build from /rom when the backup was taken on it" check 1
+    ws_field keep "Keep a restored newer version across firmware updates" check 1
+    ws_act delete "Delete Selected" danger "Delete the selected backups?" "Deleted backups can't be recovered" job
+    ws_field bk Backups inline "" 1+
+}
+_wa_agh_backups() { :; }
+_wj_agh_backups() {   # save | restore | delete - the dialog's answers arrive as named args
+    local ts cfg bin ini n=0
+    _yn() { [ "$(ws_args "$1")" = 1 ] && echo Y || echo N; }
+    case "$1" in
+        save)
+            cfg=$(_yn cfg); bin=$(_yn bin); ini=$(_yn ini)
+            [ "$(_agh_cur_ver)" = "$(_agh_rom_ver)" ] && bin=N
+            if [ "$cfg$bin$ini" = NNN ]; then print_error "Nothing selected to save"; return 1; fi
+            agh_backup_save "$(date +%Y%m%d%H%M%S)" "$cfg" "$bin" "$ini" ;;
+        restore)
+            ts=$(ws_args bk)
+            case "$ts" in ''|*,*) print_error "Tick one backup to restore"; return 1 ;; esac
+            bk_list agh | grep -qx "$ts" || { print_error "That backup no longer exists"; return 1; }
+            cfg=$(_yn cfg); bin=$(_yn bin); ini=$(_yn ini)
+            bk_has agh config.yaml "$ts" || cfg=N
+            bk_has agh AdGuardHome "$ts" || bin=N
+            bk_has agh adguardhome "$ts" || ini=N
+            if [ "$cfg$bin$ini" = NNN ]; then print_error "Nothing to restore - the backup holds none of the selected parts"; return 1; fi
+            AGH_ANS_ROM=$(_yn rom) AGH_ANS_KEEP=$(_yn keep) agh_restore_backup "$ts" "$cfg" "$bin" "$ini" ;;
+        delete)
+            for ts in $(bk_list agh); do
+                case ",$(ws_args bk)," in *",$ts,"*) ;; *) continue ;; esac
+                bk_delete agh "$ts" && n=$((n+1))
+            done
+            case "$n" in 0) print_error "No backups selected"; return 1 ;; 1) print_success "Deleted 1 backup" ;; *) print_success "Deleted $n backups" ;; esac ;;
+    esac
+}
+# Direct UI Access: its questions (including the dashboard login, typed into the masked reply box) are the menu's
+# Direct UI Access, native: the menu's STATUS, and its three changes as buttons whose dialog gathers the login
+# The Direct UI Access STATUS rows - the menu and the page both render these (after _ws_agh_direct_state).
+# No login is the user's choice, never "broken": grey while Direct Access is off (the GL.iNet login guards the
+# dashboard), yellow while it's on (the dashboard is open to the LAN - worth knowing)
+agh_direct_rows() {
+    if [ "$_wd_on" = 1 ]; then echo "Direct UI Access|ENABLED|green|"; echo "Direct URL|$_wd_url|link|"
+    else echo "Direct UI Access|DISABLED|grey|"; fi
+    case "$_wd_login" in
+        unknown) echo "Web UI Login|UNKNOWN|red|config.yaml missing" ;;
+        none)    if [ "$_wd_on" = 1 ]; then echo "Web UI Login|NOT SET|yellow|dashboard open to the LAN"
+                 else echo "Web UI Login|NOT SET|grey|"; fi ;;
+        *)       echo "Web UI Login|SET|green|" ;;
+    esac
+}
+_ws_agh_direct_state() {   # -> _wd_on (1 = standalone), _wd_login (set|none|unknown), _wd_url
+    local conf; conf=$(get_agh_config)
+    _wd_on=0; grep -q -- "--glinet" "$AGH_INIT" 2>/dev/null || _wd_on=1
+    _wd_login=set
+    if [ -z "$conf" ]; then _wd_login=unknown; elif grep -q "users: \[\]" "$conf"; then _wd_login=none; fi
+    _wd_url="http://$(get_lan_ip):$(agh_ui_port "$conf")"
+}
+_ws_agh_direct() {
+    _ws_agh_direct_state
+    ws_card Status
+    agh_direct_rows | while IFS='|' read -r l v t n; do ws_row "$l" "$v" "$t" "" "$n"; done   # the menu's rows
+    _ws_job_alive agh_direct && return 0
+    if [ "$_wd_on" = 1 ]; then
+        ws_act disable "Disable Direct Access" primary "Disable Direct UI Access?" \
+            "The dashboard at $_wd_url closes and returns behind the GL.iNet login; its own login is kept but bypassed" job
+    else
+        ws_act enable "Enable Direct Access" primary "Enable Direct UI Access?" \
+            "Direct UI Access bypasses the GL.iNet login - the dashboard will be at $_wd_url" job
+        if [ "$_wd_login" = none ]; then
+            ws_field setlogin "Set a username and password (without one the dashboard is open to the LAN)" check 1
+            ws_field user Username text root "" "" setlogin
+            ws_field pass Password password "" "" "" setlogin
+            ws_field pass2 "Confirm Password" password "" match:pass "" setlogin
+        fi
+    fi
+    [ "$_wd_login" = unknown ] && return 0
+    ws_act login "$([ "$_wd_login" = set ] && echo "Change Web UI Login" || echo "Set Web UI Login")" "" \
+        "$([ "$_wd_login" = set ] && echo "Replace the Web UI login?" || echo "Set a Web UI login?")" \
+        "$([ "$_wd_login" = set ] && echo "This replaces the current username and password")" job
+    ws_field user Username text root
+    ws_field pass Password password
+    ws_field pass2 "Confirm Password" password "" match:pass
+    [ "$_wd_login" = set ] && ws_act remove "Remove Web UI Login" danger "Remove the Web UI login?" \
+        "$([ "$_wd_on" = 1 ] && echo "This leaves the dashboard OPEN to anyone on the LAN" || echo "This removes the AdGuardHome Web UI credentials")" job
+    return 0
+}
+_wa_agh_direct() { :; }
+_wj_agh_direct() {   # enable | disable | login | remove - the dialog's answers arrive as named args
+    local pass_status="✅"
+    AGH_CONF=$(get_agh_config); TIMESTAMP=$(date +%Y%m%d%H%M%S)
+    _ws_agh_direct_state; [ "$_wd_login" = none ] && pass_status="❌"
+    _wd_creds() {   # the form's login -> user_name / BCRYPT_HASH, checked like the menu's prompt
+        [ -n "$(ws_args user)" ] || { print_error "Username cannot be blank - nothing was changed"; return 1; }
+        [ -n "$(ws_args pass)" ] || { print_error "Password cannot be blank - nothing was changed"; return 1; }
+        [ "$(ws_args pass)" = "$(ws_args pass2)" ] || { print_error "Passwords do not match - nothing was changed"; return 1; }
+        AGH_ANS_USER=$(ws_args user) AGH_ANS_PASS=$(ws_args pass) _agh_creds_prompt && _agh_creds_validate
+    }
+    case "$1" in
+        enable)
+            [ "$_wd_on" = 1 ] && { print_info "Direct UI Access is already enabled"; return 0; }
+            if [ "$pass_status" = "❌" ] && [ "$(ws_args setlogin)" = 1 ]; then
+                _wd_creds || return 1
+                agh_direct_enable 1 "$pass_status"
+            else
+                agh_direct_enable 0 "$pass_status"
+            fi ;;
+        disable)
+            [ "$_wd_on" = 1 ] || { print_info "Direct UI Access is already disabled"; return 0; }
+            agh_direct_disable ;;
+        login)  _wd_creds || return 1; agh_creds_apply ;;
+        remove) [ "$pass_status" = "✅" ] || { print_warning "No password currently exists"; return 0; }
+                agh_creds_remove ;;
+    esac
+}
+
+# the leaderboards as web tables: the menus' ranking and "vs yours" (bench_render_*), this router first in the
+# data file and marked; the bars are bar cells (~bar~<percent of the best>)
+_ws_board() {   # <data> <title> <rank col> <value cols "c:Header:unit,..."> - unit kb (crypto kB/s), mb (MB/s), n (number)
+    local df="$1" title="$2" rc="$3" cols="$4"
+    ws_card "$title"
+    awk -F'|' -v rc="$rc" -v cols="$cols" -v T="$(printf '\t')" '
+        function unit(k, u,  v, s) { if (u == "n") return sprintf("%.1f", k); if (u == "mb") return (k >= 10000 ? sprintf("%.1f GB/s", k / 1000) : sprintf("%.1f MB/s", k))
+            v = k * 8; s = "Kb/s"; if (v >= 10000) { v /= 1000; s = "Mb/s" } if (v >= 10000) { v /= 1000; s = "Gb/s" }
+            if (v >= 1000) return sprintf("%.0f %s", v, s); if (v >= 100) return sprintf("%.1f %s", v, s)
+            if (v >= 10) return sprintf("%.2f %s", v, s); return sprintf("%.3f %s", v, s) }
+        NR == 1 { me = $1; base = $rc }
+        { R[NR] = $0; K[NR] = $rc + 0; n = NR }
+        END {
+            nc = split(cols, C, ","); h = "th" T "Device" T "CPU"
+            for (i = 1; i <= nc; i++) { split(C[i], x, ":"); h = h T x[2]; if (x[1] == rc) h = h T "" T "vs yours" }
+            print h
+            for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (K[j] > K[i]) { t = K[i]; K[i] = K[j]; K[j] = t; t = R[i]; R[i] = R[j]; R[j] = t }
+            mx = K[1]
+            for (i = 1; i <= n; i++) {
+                split(R[i], F, "|"); mine = (F[1] == me)
+                # (no "T (" anywhere: busybox awk reads a name followed by "(" as a function call)
+                dev = F[2]; if (mine) dev = "~green~" F[2] " (this router)"
+                line = "tr" T dev T F[3]
+                for (k = 1; k <= nc; k++) { split(C[k], x, ":"); line = line T unit(F[x[1]], x[3])
+                    if (x[1] == rc) { pc = 0; if (mx > 0) pc = int(F[rc] / mx * 100 + 0.5)
+                        vs = ""; if (mine) vs = "---"; else if (base > 0) vs = sprintf("%+.1f%%", (F[rc] - base) / base * 100)
+                        line = line T "~bar~" pc T vs } }
+                print line
+            }
+        }' "$df"
+}
+_ws_results_bench_crypto() {
+    _ws_board "$1" "WireGuard · ChaCha20-Poly1305" 8 "7:64 B:kb,8:1420 B:kb,9:16 K:kb"
+    ws_note "64 B = small packets (VoIP/gaming/DNS), 1420 B = VPN throughput (downloads/streaming), 16 K = raw cipher ceiling. Each device uses its own OpenSSL build; WireGuard runs kernel ChaCha20, so that column is a proxy."
+    _ws_board "$1" "OpenVPN / IPsec · AES-256-GCM" 5 "4:64 B:kb,5:1420 B:kb,6:16 K:kb"
+    _ws_board "$1" "Connection setup · RSA-2048" 10 "10:sign/s:n,11:verify/s:n"
+}
+_ws_results_bench_disk() {
+    _ws_board "$1" "Disk I/O" 4 "4:Write:mb,5:Read:mb"
+    ws_note "Write is the reliable cross-device metric. Read may reflect the storage controller's own cache (notably on eMMC) - treat it as indicative. Test size scales with free disk space."
+}
+_ws_results_bench_memory() {
+    _ws_board "$1" "Memory I/O" 4 "4:Throughput:mb"
+    ws_note "Raw memcpy-style throughput via dd, not a full memory-latency benchmark; test size scales with device RAM."
+}
+
+# a speed test's result, the web way: the headline numbers as tiles, the rest as rows (Ookla's CLI and speedtest-go)
+_ws_resultslog_bench_speedtest() {   # <job log>
+    sed "s/$(printf '\033')\[[0-9;?]*[A-Za-z]//g; s/\r//g" "$1" 2>/dev/null | awk -v T="$(printf '\t')" '
+        function trim(s) { sub(/^[^A-Za-z0-9]*/, "", s); sub(/[ \t]+$/, "", s); return s }
+        function num(s,  m) { if (match(s, /[0-9]+(\.[0-9]+)?/)) return substr(s, RSTART, RLENGTH); return "" }
+        function unit(s,  r) { r = s; sub(/^[^0-9]*[0-9]+(\.[0-9]+)? ?/, "", r); sub(/[ (].*/, "", r); return r }
+        function paren(s,  m) { if (match(s, /\(([^)]*)\)/)) return substr(s, RSTART + 1, RLENGTH - 2); return "" }
+        { l = trim($0) }
+        l ~ /^Server:/       { sv = l; sub(/^Server:[ \t]*/, "", sv) }
+        l ~ /^ISP:/          { isp = l; sub(/^ISP:[ \t]*/, "", isp) }
+        l ~ /^(Idle )?Latency:/ && lat == "" { x = l; sub(/^[^:]*:[ \t]*/, "", x); lat = num(x); latu = unit(x); latn = paren(x)
+                                if (latn == "" && match(x, /Jitter: ?[0-9.]+ ?ms/)) latn = "jitter " num(substr(x, RSTART)) " ms" }
+        l ~ /^Download:/     { x = l; sub(/^Download:[ \t]*/, "", x); dl = num(x); dlu = unit(x); dln = paren(x) }
+        l ~ /^Upload:/       { x = l; sub(/^Upload:[ \t]*/, "", x); ul = num(x); ulu = unit(x); uln = paren(x) }
+        l ~ /^Packet Loss:/  { x = l; sub(/^Packet Loss:[ \t]*/, "", x); pl = x }
+        l ~ /^Result URL:/   { url = l; sub(/^Result URL:[ \t]*/, "", url) }
+        END {
+            if (dl == "" && ul == "") exit
+            print "card" T "Results"
+            if (dl != "") print "tile" T "Download" T dl T dlu T dln
+            if (ul != "") print "tile" T "Upload" T ul T ulu T uln
+            if (latu == "") latu = "ms"
+            if (lat != "") print "tile" T "Latency" T lat T latu T latn
+            if (pl != "") print "tile" T "Packet Loss" T pl T "" T ""
+            if (sv != "") print "row" T "Server" T sv T "fact"
+            if (isp != "") print "row" T "ISP" T isp T "fact"
+            if (url != "") print "row" T "Result" T url T "link"
+        }'
+}
+
+glu_api() {
+    local ver; ver=$(grep -m1 '^# Version:' "$0" 2>/dev/null | awk '{print $3}' | tr -d '\r')   # stops at the match (sed read all 1.2 MB)
+    # nothing here reads input: GL's server leaves stdin open, and a command that reads it (iwinfo, ubus,
+    # jsonfilter on a terminal) would wait until the request times out. The one exception: an interactive job,
+    # whose stdin carries the answers the page sends (see _ws_job_start)
+    if [ "$1" = jobrun ] && [ -n "${GLU_JOB_DIR:-}" ] && [ -f "$GLU_JOB_DIR/interactive" ]; then :; else exec </dev/null; fi
+    WS_SELF=$0
+    case "$1|$2" in
+        features\|)
+            # build = this exact file (size + modification time): what the page keys its saved help on, so any
+            # update or redeploy - even under the same version - reads the help fresh
+            printf '{"toolkit":{"version":%s,"build":%s},"features":[' "$(_json_str "$ver")" \
+                "$(_json_str "$(ls -nlL --full-time "$0" 2>/dev/null | awk '{print $5 "-" $6 "T" $7}')")"
+            _webui_screens | awk -F'|' 'BEGIN { ORS = "" } { if (NR > 1) print ","; gsub(/"/, "\\\"", $2); print "{\"id\":\"" $1 "\",\"title\":\"" $2 "\"}" }'
+            printf ']}\n' ;;
+        # every other screen: the page's generic renderer. k=v arguments are form fields; each action reads
+        # only its own keys (ws_args) and checks them itself
+        screen\|*)  _s=$2; _t=${3:-}; if [ $# -ge 3 ]; then shift 3; else shift $#; fi
+                    WS_ARGS=$(printf '%s\n' "$@" | grep '^[a-z_][a-z_0-9]*='); _ws_render "$_s" "$_t" ;;
+        act\|*)     _s=$2; _t=${3:-}; _a=${4:-}; _c=0; if [ $# -ge 4 ]; then shift 4; else shift $#; fi
+                    [ "${1:-}" = --confirmed ] && { _c=1; shift; }
+                    WS_ARGS=$(printf '%s\n' "$@" | grep '^[a-z_][a-z_0-9]*='); _ws_act "$_s" "$_t" "$_a" "$_c" ;;
+        job\|stop)  _ws_job_stop "${3:-}" ;;
+        jobrun\|*)  WS_ARGS=${WS_ARGS:-}; _ws_jobrun "$2" "${3:-}" "${4:-}" ;;
+        status\|hardware) _api_hw_status "$3" "$4" ;;
+        help\|hardware)
+            case "$3" in crypto) _hn=2 ;; network) _hn=3 ;; wireless) _hn=4 ;; *) _hn=1 ;; esac
+            printf '{"feature":"hardware","title":"Hardware Information - Help","text":%s}\n' "$(_json_str "$(_hw_help_text "$_hn" | _help_for web)")" ;;
+        live\|*)     hw_live_json "$2" ;;
+        status\|agh) _api_agh_status; printf '\n' ;;
+        help\|agh)   if [ -z "${3:-}" ] || [ "$3" = status ]; then
+                         printf '{"feature":"agh","title":"AdGuardHome Control Center - Help","text":%s}\n' "$(_json_str "$(_agh_help_text | _help_for web)")"
+                     else _ws_help agh "$3"; fi ;;
+        help\|*)    _ws_ok_id "$2" && _ws_help "$2" "${3:-}" ;;
+        # every tab's help for one screen in one request - the page keeps it for the browser session (help only
+        # changes with the toolkit), instead of a request per tab per page load (1.4 s each on a MIPS router)
+        helps\|*)   case "$2" in hardware) _tl="overview crypto network wireless" ;;
+                                 *) _ws_ok_id "$2" || return 2; _tl=$(_wt_$2 | cut -f1) ;; esac
+                    printf '{"helps":{'; _n=0
+                    for _tb in $_tl; do
+                        [ "$_n" = 0 ] || printf ','; _n=1
+                        printf '%s:' "$(_json_str "$_tb")"; glu_api help "$2" "$_tb" | tr -d '\n'
+                    done
+                    printf '}}\n' ;;
+        action\|agh)
+            case "$3" in enable|disable|restart|reinstall|recover|factory_reset) : ;;
+                *) printf '{"ok":false,"message":%s}\n' "$(_api_message error "Unknown action")"; return 2 ;; esac
+            _api_agh_action "$3" "$([ "$4" = --confirmed ] && echo 1 || echo 0)"; printf '\n' ;;
+        maint\|*) _api_maint "$2" "$3" ;;
+        *) printf '{"ok":false,"message":%s}\n' "$(_api_message error "Unknown request")"; return 2 ;;
+    esac
+}
+# glinet_utils --api maint <fan_auto | agh_off | agh_remove_list <url> | sweep> - the e2e fleet guard's way to
+# bring a router back to a stable state THROUGH the toolkit (no raw kills that leave a half-set feature behind).
+# Local root only: the Admin Panel page's rpc module never passes "maint".
+_api_maint() {
+    local ok=false msg
+    case "$1" in
+        fan_auto)
+            if [ ! -x /etc/init.d/gl_fan ]; then msg="No fan controller on this router"; ok=true
+            elif fan_dynamic_restore; then ok=true; msg="Dynamic control restored"
+            else msg="The fan controller did not restart"; fi ;;
+        agh_off)
+            if [ "$(agh_presence)" != supported ]; then ok=true; msg="AdGuardHome isn't on this router"
+            elif ! is_agh_running && [ "$(uci -q get adguardhome.config.enabled)" != 1 ]; then ok=true; msg="AdGuardHome is already off"
+            elif agh_do disable >/dev/null 2>&1; then ok=true; agh_action_text disable; msg=$A_DONE
+            else agh_action_text disable; msg=$A_FAIL; fi ;;
+        agh_remove_list)
+            agh_list_remove_url "$2"; case $? in 0) ok=true; msg="List removed" ;; 2) ok=true; msg="No such list" ;; *) msg="AdGuardHome couldn't be stopped, so nothing was changed" ;; esac ;;
+        sweep) _stale_session_sweep; ok=true; msg="Stale session files removed" ;;
+        *) printf '{"ok":false,"message":%s}\n' "$(_api_message error "Unknown maintenance step")"; return 2 ;;
+    esac
+    printf '{"ok":%s,"message":%s}\n' "$ok" "$(_api_message "$([ "$ok" = true ] && echo success || echo error)" "$msg")"
+}
+
+# -----------------------------
 # Startup
 # -----------------------------
 # Headless dispatch: every function is defined by here, so run the requested headless task
@@ -17096,6 +22321,8 @@ manage_openspeedtest() {
 if [ -n "${__GL_HEADLESS:-}" ]; then
     case "$1" in
         --webui-persist-run) _glpersist_run; exit $? ;;
+        --api) shift; glu_api "$@"; exit $? ;;
+        --webui-refresh) _webui_refresh_if_stale; exit $? ;;
     esac
     exit 0
 fi
@@ -17111,9 +22338,10 @@ check_self_update "$@"
 
 # Not in this firmware at all: nothing to say at startup - the AdGuardHome Control Center explains it
 # (NOT SUPPORTED) when it's opened. Startup stops only for what it can fix: a missing startup script.
-if [ ! -f "$AGH_INIT" ] && [ ! -f "/rom$AGH_INIT" ]; then
+_agh_p=$(agh_presence)
+if [ "$_agh_p" = unsupported ]; then
     AGH_DISABLED=1
-elif [ ! -f "$AGH_INIT" ]; then
+elif [ "$_agh_p" = missing ]; then
     clear
     printf "%b\n" "$SPLASH"
     print_error "AdGuardHome startup script missing! Will attempt AGH factory reset to restore it."
@@ -17190,11 +22418,7 @@ fi
 # /usr/bin/stress matches the kernel (a stress-ng installed without our link gets one; a stress-ng link on a
 # pre-6.6 kernel goes) - cheap, every launch
 _stress_link >/dev/null 2>&1
-# package-size caches left by sessions that ended without their exit trap (a dropped SSH session)
-for _f in /tmp/.glinet_pkgsizes.* /tmp/.glinet_fwarch.* /tmp/.agh_cfgreads.* /tmp/.agh_update_check.* /tmp/.glfw.* /tmp/.glnet-op.*; do
-    [ -e "$_f" ] || continue; [ -d "/proc/${_f##*.}" ] || rm -rf "$_f"   # left by a session that's gone
-done
-for _f in /tmp/.fw_keeplist.*.* /tmp/.fw_keepsize.*; do [ -e "$_f" ] || continue; _p=${_f#/tmp/.fw_keep*.}; [ -d "/proc/${_p%%.*}" ] || rm -f "$_f"; done
+_stale_session_sweep
 if grep -qxE '/usr/bin/stress(-ng)?' /etc/sysupgrade.conf 2>/dev/null; then
     sed -i '\|^/usr/bin/stress$|d; \|^/usr/bin/stress-ng$|d' /etc/sysupgrade.conf 2>/dev/null
     grep -qx stress /etc/lazarus.list 2>/dev/null || echo stress >> /etc/lazarus.list
@@ -17263,6 +22487,8 @@ show_menu() {
 # -----------------------------
 _fw_post_check                # one-time: confirm a firmware update from Firmware Update really took
 _glpersist_show_report        # one-time report if a firmware update re-applied Web-UI tweaks
+_webui_refresh_if_stale       # the Admin Panel page follows a toolkit update (rewritten when it's stale)
+check_webui_prompt            # one-time offer: the Router Toolkit page in the Admin Panel menu
 keycap_first_run_prompt       # one-time macOS Terminal keycap-gap calibration (mac profile only)
 # ALWAYS the last startup step: the menu clears the screen, so hold 2 s when any startup item printed a
 # message (print_* sets _STARTUP_MSG) - a clean start passes straight through. New startup items go ABOVE.

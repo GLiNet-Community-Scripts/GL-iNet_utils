@@ -4,6 +4,149 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-10-18
+### What's New
+#### Admin Panel Page
+- **The toolkit lives in GL.iNet's Admin Panel.** A ROUTER TOOLKIT group in the left menu mirrors the
+  main menu - Hardware Information, AdGuardHome Control Center, System Tweaks, System Benchmarks, Network
+  and VPN Tools and System Configuration - each screen's sub-screens as tabs at the top, drawn the GL way
+  (its cards, colours, light and dark themes, phone layout). Same words, states and checks as the menus:
+  both read the same functions.
+- Turn it on or off in Toolkit Management (Enable/Disable Admin Panel Page). A one-time offer at startup;
+  "no" isn't asked again until the next update. It survives firmware updates when persistence is on.
+- Hardware Information refreshes once a second, like the menu screen, with Reveal for the full IDs.
+- Choices are made the web way, never typed into a terminal: on/off switches in place of pick lists
+  (Allow/Blocklists, Packages, Features - with the menu's planned actions, Memory Impact and Storage
+  projection updating as you toggle, and one Apply), check boxes and drop-downs in the confirm dialog
+  (AdGuardHome backups, Direct UI Access logins, updates and channels, Package Repair), and rows picked
+  in place (firmware builds). Everything a menu asks along the way is answered up front in that dialog.
+- Long work - benchmarks, installs, the iPerf3 server, AdGuardHome's live log - runs in the background.
+  Its Log stays minimized to one line with its state (RUNNING, DONE, NO CHANGE, FAILED) and opens
+  when you want it, when it fails or when it needs you; the screen itself shows the result. A finished
+  benchmark shows its results as tables - the leaderboards with bars and this router marked - and the
+  Ookla speed test as Download / Upload / Latency / Packet Loss tiles.
+- A benchmark's results say when it ran ("Last Run" with the date and time), and a finished job's Log
+  line reads "<action> · finished <date> <time> <zone>" by the router's clock.
+- System Configuration shows networks, DHCP pools (each with its subnet and the addresses it hands out),
+  firewall zones and rules, VPN servers and clients, and cloud services as tables and status rows, like
+  Wireless Networks and System Settings.
+- Lists are acted on in place: tick the SSH keys or backups to delete (all / none in the header), tick
+  one backup to restore, pick the network in the Bandwidth Limiter's table - its dialogs open with that
+  network's current values, and buttons that don't apply to it stay disabled.
+- Tabs that don't fit show arrows at the edges to scroll the rest into view.
+- Refreshing the browser keeps you on the tab you were on; opening a screen from GL's menu still starts
+  on its first tab.
+- A tab you click is selected at once and waits under the spinner while it reads the router; clicking
+  another meanwhile shows the last one you chose.
+- Dialogs use GL's own controls: its drop-down (the toggle function lists every choice, VPN and Wi-Fi
+  under headings, and opens on the current one) and its switch for every yes/no, in GL's colour; tick
+  boxes are only for picking rows in a table, and a picked row takes GL's selection tint.
+- A dialog that changes a setting opens on the current values and its button waits until something
+  differs, like GL's own Apply - applying nothing no longer reloads the network or restarts Wi-Fi.
+- Faster without cutting corners: each page request skips reading the whole toolkit just for its version
+  (about a third quicker on MIPS routers), and a screen's Help comes in one request kept for the browser
+  session - it's read again whenever the toolkit changes.
+- Number fields pair GL's slider with a - / + box, as on GL's own Display settings: the slider gets
+  you close, the box and - / + are exact. The Bandwidth Limiter's slider gives half its width to
+  0-1,000 Mbps, where most limits are, and Set MTU Manually snaps to the Recommended MTU's tick.
+- Help on every tab is the menu screen's own help. Help, release notes and the Change Log open in GL's
+  own dialog style over the page, with headings and lists; so do the confirmations and their choices.
+- Firmware Update on the page: the builds GL.iNet publishes for the router - pick one in the table, read
+  its release notes, and Install Selected Build runs the toolkit's own update (memory check, checksum,
+  signature and image test) with its choices - keep or erase settings, persist what's at risk, free
+  memory - set in the dialog. The page waits through the reboot, reconnects, and shows the result.
+- Remote LAN Access on the page: each tunnel's ends and its Outbound/Inbound reachability, measured live.
+  Set the remote LAN's subnet or detect it; the levers (routing, inbound access, masquerade) run the
+  menu's own steps, so a risky change still reverts by itself unless you press Yes within 30 seconds.
+- Not on the page (terminal only): the toolkit's display settings.
+- AdGuardHome's Status tab shows every status row the menu does - update, persistence, lists, storage and
+  backups too - from the same list. Firmware Update has View Update History (each attempt, newest first,
+  read live), and the Packages table sorts by Package or Size like the menu's [S] Sort.
+
+#### AdGuardHome
+- Direct UI Access says the same on both sides: Disable Direct Access, Set / Change Web UI Login, Remove
+  Web UI Login (offered only while a login is set), and a "Web UI Login: SET / NOT SET" status (yellow
+  while the dashboard is open to the LAN). The menu screen shows the Direct URL too.
+- Storage lists each directory on one line - "4.4M used (56.5G free, 57.9G total)" - in the menu and on
+  the page, with the Status screen's storage rows in the same order. "Used" is the directory itself (it
+  was everything on its disk); free and total are its disk's, or the Filter Space Limit's when it's on.
+- Status rows put the detail in brackets: "Filter storage: 4.2M used (56.5G free)". Backup & Recovery
+  shows its backups on one line: "Backups: 2 (0.01M used, 56.5G free)".
+
+#### Package & Persistence Manager
+- Opens faster on firmware that uses apk (OpenWrt 25): every package's size comes from one apk call
+  instead of one each - the same sizes, 12 s down to 8 s on an MT3000.
+
+#### Firmware Update
+- Choose a Build says what a build means from where you are: Update or Downgrade within your own channel,
+  Install for a build in another channel (whether that's up or down depends on your point of view), and
+  Reinstall for the installed build picked again. An older build in another channel still warns that
+  settings made on newer firmware may not carry back. On the page, Planned Action follows your pick,
+  as in the menu.
+- On the page, builds are grouped by channel under headings, like the Allow/Blocklists sections, with
+  yours marked. Keep Settings is GL's own switch - turned off, it says plainly that every setting is
+  erased.
+- The Update status says when GL.iNet's list was checked: "UP TO DATE (checked 2026-10-15 14:02)".
+- When an update won't fit in memory, the services in the way (AdGuardHome, Tailscale, ...) are stopped
+  without asking, each named with the memory stopping it frees. They start again with the reboot, or
+  straight away if the update ends early - now including Ctrl-C and Stop on the page.
+- On routers with zram swap (the Mango 2), an update now keeps 6 MB of memory spare. Tested on 60+ real
+  flashes: with under 2 MB to spare about a third rebooted without installing, while stopping services
+  before the download prevented every failure. Under 6 MB the meter says "tight" and services are stopped
+  before the download; under 4 MB it won't fit. If you're connected through Tailscale (so it can't be
+  stopped), a tight update asks first. Routers without swap keep the old limit.
+
+#### OpenSpeedTest
+- Diagnostics moved after Persistence in the menu (lifecycle actions, then Persistence, then extras), as
+  on the page.
+
+#### Remote LAN Access
+- The menu's actions use the page's words in Title Case and GL.iNet's own name for masquerading:
+  Enable / Disable IP Masquerading (the menu keeps its plain-English outcome alongside) and Detect or Set
+  the Remote LAN.
+
+#### Bandwidth Limiter
+- The menu and the page offer the same actions for each network, from one shared list: a VLAN network can
+  be brought up or down on the page too (it was menu-only), a switched-off network is brought up before
+  limits are set, and Check Router Access is on the page.
+- The Wi-Fi Bands grid says up front that applying restarts Wi-Fi - devices may disconnect briefly.
+- On the page, Bring Interface Up / Down is one button for every network that can be switched, as in the
+  menu: guest and iot get a switch per Wi-Fi band, a VLAN network one switch for the whole interface.
+- lan is described as "wired + main Wi-Fi": the main SSIDs are bridged into it, so its limit covers both.
+- Confirming the Wi-Fi Bands grid with nothing changed applies nothing (it restarted Wi-Fi for nothing).
+
+#### System Configuration
+- Wireless Networks labels GL.iNet's mesh interfaces (Role: Mesh backhaul / Mesh uplink) - they show a
+  placeholder name such as "gl-mesh-bh-" and stay off until mesh is set up.
+- DHCP Pools show each pool's subnet and the addresses it hands out (192.168.8.100 - 192.168.8.249)
+  instead of "start=100 limit=150" - a VLAN or guest network has its own subnet, so the numbers alone
+  said little.
+
+### Bug Fixes
+#### Admin Panel Page
+- On iPad and iPhone a long dialog (Help, Update History, release notes) ran off the top and bottom of
+  the screen behind Safari's bars, cutting off its title and Close; it now fits what you can see.
+- A dialog opened with a tap no longer rings its button with a keyboard-focus outline (Safari did on the
+  first open after a refresh). Enter still presses it; the ring returns once you use the keyboard.
+- Tab and Shift+Tab stay inside an open dialog (they moved on to GL's page behind it).
+- The tab row scrolls only sideways: on iPad a finger could drag the tabs up or down out of the row.
+
+#### Toolkit-wide
+- The startup install offer remembers "no" until the next update (it asked on every run).
+- Recent Termius versions were taken for Windows Terminal (they now measure emoji like it) and showed ❶
+  keycaps; they're recognised again and get the 1️⃣ keycaps they draw cleanly.
+
+#### AdGuardHome
+- Backup & Recovery's free space is the backup store's own disk (it showed AdGuardHome's working
+  directory's, which differs when that directory is on another drive).
+
+#### Remote LAN Access
+- With IP Masquerading off, the outbound table pointed to option 2 to hide devices behind the tunnel;
+  it's option 3 (IP Masquerading).
+
+#### Zram Swap
+- "Disk Size" is now "Swap Capacity" - zram swap lives in compressed RAM and uses no disk.
+
 ## 2026-10-05
 ### What's New
 #### Benchmarks

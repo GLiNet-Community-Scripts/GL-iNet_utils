@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-10-18
+# Version: 2026-10-19
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -388,6 +388,7 @@ case "$0" in
     *)   SCRIPT_PATH="$(command -v "$0" 2>/dev/null)" ;;
 esac
 [ -z "$SCRIPT_PATH" ] && SCRIPT_PATH="$(pwd)/$0"
+SCRIPT_PATH=$(printf '%s' "$SCRIPT_PATH" | sed 's#/\./#/#g; s#/\./#/#g; s#//*#/#g')   # "./x" launches left "/./" in it
 INSTALL_PROMPTED=0    # Set to 1 after user responds to install prompt; reset by each new version
 WEBUI_PROMPTED=0      # Set to 1 after "n" to the Admin Panel page offer; reset by each new version
 STARTUP_NOTICE=0      # Set by the install-skip so the update-check spinner runs 2s longer (readable)
@@ -1859,7 +1860,7 @@ check_connectivity() {
     fi
     printf "\n"
     print_info "Common fixes:"
-    printf "   • Check your internet connection\n"
+    printf "   • Check the internet connection\n"
     printf "   • Try: ping fw.gl-inet.com or ping downloads.openwrt.org\n"
     printf "   • Check date/time is correct (HTTPS validation)\n"
     printf "   • Re-flash firmware if repositories are very old or corrupted\n"
@@ -1909,7 +1910,7 @@ offer_pkg_db_repair() {
     printf "Repair the package database now? [y/N]: "; read -r _pdr; printf "\n"
     case "$_pdr" in
         y|Y) ;;
-        *) print_info "Skipped. You can repair it later via System Tweaks ▸ Package System Repair."; return 1 ;;
+        *) print_info "Skipped - repair it later in System Tweaks → Package System Repair"; return 1 ;;
     esac
     spin_run "Repairing the installed database" pkg_db_repair
     spin_run "Verifying the package index" pkg_update
@@ -1918,7 +1919,7 @@ offer_pkg_db_repair() {
         return 0
     fi
     print_error "The automatic repair could not resolve it"
-    print_info "Open System Tweaks ▸ Package System Repair to restore a backup or review options"
+    print_info "Open System Tweaks → Package System Repair to restore a backup or review options"
     return 1
 }
 
@@ -2115,11 +2116,11 @@ get_fan_speed() {
     local gl_path="/proc/gl-hw-info/fan"
     local node=""
     if [ -f "$gl_path" ]; then
-        read -r node rest < "$gl_path" 2>/dev/null
+        read -r node rest 2>/dev/null < "$gl_path"
         if [ -n "$node" ]; then
             for f in /sys/class/hwmon/"$node"/fan*_input; do
                 if [ -f "$f" ]; then
-                    read -r fan_val < "$f" 2>/dev/null
+                    read -r fan_val 2>/dev/null < "$f"
                     break
                 fi
             done
@@ -2128,7 +2129,7 @@ get_fan_speed() {
     if [ -z "$fan_val" ]; then
         for f in /sys/class/hwmon/hwmon*/fan*_input; do
             if [ -f "$f" ]; then
-                read -r fan_val < "$f" 2>/dev/null
+                read -r fan_val 2>/dev/null < "$f"
                 break
             fi
         done
@@ -2140,15 +2141,15 @@ get_cpu_temp() {
     local raw_temp=""
     local temp_path=""
     if [ -f /proc/gl-hw-info/temperature ]; then
-        read -r temp_path < /proc/gl-hw-info/temperature 2>/dev/null
+        read -r temp_path 2>/dev/null < /proc/gl-hw-info/temperature
     fi
     if [ -f "$temp_path" ]; then
-        read -r raw_temp < "$temp_path" 2>/dev/null
+        read -r raw_temp 2>/dev/null < "$temp_path"
     fi
     if [ -z "$raw_temp" ]; then
         for f in /sys/class/hwmon/hwmon*/temp*_input; do
             if [ -f "$f" ]; then
-                read -r raw_temp < "$f" 2>/dev/null
+                read -r raw_temp 2>/dev/null < "$f"
                 break
             fi
         done
@@ -3237,8 +3238,8 @@ _agh_upd_check() {
 agh_update_state() {
     local cur lat
     [ -s "$(_agh_upd_file)" ] || _agh_upd_check
-    read -r cur lat < "$(_agh_upd_file)" 2>/dev/null
-    if [ "$cur" != "$(_agh_cur_ver)" ]; then _agh_upd_check; read -r cur lat < "$(_agh_upd_file)" 2>/dev/null; fi
+    read -r cur lat 2>/dev/null < "$(_agh_upd_file)"
+    if [ "$cur" != "$(_agh_cur_ver)" ]; then _agh_upd_check; read -r cur lat 2>/dev/null < "$(_agh_upd_file)"; fi
     AGH_UPD_VER=${lat:--}
     if [ "${cur:--}" = - ] || [ "$AGH_UPD_VER" = - ]; then AGH_UPD=UNKNOWN
     elif _agh_ver_newer "$cur" "$AGH_UPD_VER"; then AGH_UPD=AVAILABLE
@@ -4052,7 +4053,7 @@ manage_agh_storage() {
                 # Warn if the current filter lists won't fit once the cap is back - the ones
                 # that don't fit will silently fail to load (effectively disabled)
                 if _agh_fl_fit "$AGH_WORKDIR"; then
-                    print_warning "Your filter lists use ~$(( _use_kb / 1024 ))MB, but this limit only holds ~$(( _usable_kb / 1024 ))MB"
+                    print_warning "The filter lists use ~$(( _use_kb / 1024 ))MB, but this limit only holds ~$(( _usable_kb / 1024 ))MB"
                     print_info "Lists that don't fit won't load - remove some, or leave the limit off for full space"
                     printf "Re-enable the filter storage limit anyway? [y/N]: "; read -r _reyn
                     printf "\n"
@@ -5597,7 +5598,7 @@ delete_agh_backups() {
                     print_error "No backups selected"; sleep 2; continue
                 fi
                 printf "\n"
-                print_warning "WARNING: You are about to permanently delete selected backups"
+                print_warning "The selected backups will be deleted permanently"
                 printf "Delete selected backups? [y/N]: "; read -r confirm
                 case "$confirm" in
                     y|Y)
@@ -6382,7 +6383,7 @@ _zram_reinstall_flow() {
 _zram_uninstall_flow() {
     local ans
     printf "This removes the zram-swap package and its config. Uninstall? [y/N]: "; read -r ans; printf "\n"
-    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed"; return ;; esac
+    case "$ans" in y|Y) : ;; *) print_info "No change"; return ;; esac
     spin_run "Uninstalling the zram-swap package" _zram_uninstall
     print_success "Zram swap uninstalled"
 }
@@ -6624,7 +6625,9 @@ _fan_apply() {
 # PIDs of processes NAMED exactly $1 (their /proc comm). busybox `pgrep -x` doesn't match a process started
 # by full path (procd's /usr/bin/gl_fan, /usr/sbin/tailscaled) and `pidof` misses some too - found on the
 # fleet 2026-09-29; `pgrep -f` from an ssh command line matches itself. Names are <= 15 chars (comm).
-_proc_pids() { local p c; for p in /proc/[0-9]*; do read -r c < "$p/comm" 2>/dev/null && [ "$c" = "$1" ] && echo "${p#/proc/}"; done; return 0; }
+# The 2>/dev/null goes BEFORE the < : busybox sh reports a failed input redirect (a process that exited
+# mid-scan) on stderr unless it's already pointed away (a stray line on a web screen, 2026-10-19).
+_proc_pids() { local p c; for p in /proc/[0-9]*; do read -r c 2>/dev/null < "$p/comm" && [ "$c" = "$1" ] && echo "${p#/proc/}"; done; return 0; }
 _proc_running() { [ -n "$(_proc_pids "$1")" ]; }
 FAN_STATIC_INIT="${FAN_STATIC_INIT:-/etc/init.d/glinet_fanstatic}"
 FAN_PWM="${FAN_PWM:-/sys/class/thermal/cooling_device0/cur_state}"
@@ -6642,7 +6645,7 @@ start() {
     pct=$(cat /etc/glinet_utils/fan_static 2>/dev/null | tr -dc '0-9'); [ -n "$pct" ] || return 0
     /etc/init.d/gl_fan stop >/dev/null 2>&1
     # procd kills gl_fan seconds AFTER stop returns, and until then it writes its own level over ours
-    _glfan_up() { local p c; for p in /proc/[0-9]*; do read -r c < "$p/comm" 2>/dev/null && [ "$c" = gl_fan ] && return 0; done; return 1; }
+    _glfan_up() { local p c; for p in /proc/[0-9]*; do read -r c 2>/dev/null < "$p/comm" && [ "$c" = gl_fan ] && return 0; done; return 1; }
     while { _glfan_up || [ ! -w "$pwm" ]; } && [ "$i" -lt 30 ]; do sleep 1; i=$((i + 1)); done
     lvl=$(( (pct * 255 + 50) / 100 ))
     echo "$lvl" > "$pwm" 2>/dev/null; sleep 2
@@ -6904,7 +6907,7 @@ manage_fan_settings() {
                     fi
                     press_any_key; clear ;;
                 6)
-                    print_warning "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO YOUR DEVICE!"
+                    print_warning "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO THE DEVICE!"
                     printf "Set new Maximum Setpoint (%s°C - 120°C): " "$u_cur"
                     read -r val
                     val=$(echo "$val" | tr -dc '0-9')
@@ -7696,7 +7699,7 @@ _netlimit_offload_ok() {
     local a; read -r a
     # The blank line before the apply gear is added by the caller (so it also appears when this
     # confirm is skipped - i.e. HW accel already off); here we only space the cancel message.
-    case "$a" in n|N) printf '\n'; print_info "Cancelled - HW acceleration left on"; sleep 1; return 1 ;; *) return 0 ;; esac
+    case "$a" in n|N) printf '\n'; print_info "No change - HW acceleration left on"; sleep 1; return 1 ;; *) return 0 ;; esac
 }
 
 show_netlimit_help() {
@@ -7810,7 +7813,7 @@ _netlimit_bands_edit() {   # <net> <dev> - multi-select which sub-interfaces (ba
                     sed -i "s/^\($cmd|[^|]*|[^|]*|[^|]*|\).*/\1$((1-sel))/" "$mf"
                 else print_error "Index $cmd not found"; sleep 1; fi ;;
             c) if [ "$(cut -d'|' -f5 "$mf" | tr -d '\n')" = "$_bwas" ]; then
-                   print_info "No changes - nothing applied"; sleep 1; rm -f "$mf"; return
+                   print_info "No changes to apply"; sleep 1; rm -f "$mf"; return
                fi
                spin_run "Applying Wi-Fi bands" netlimit_bands_apply "$net" "$dev" "$mf" \
                    || _nl_toggle_fail "Some Wi-Fi bands didn't reach the selected state"
@@ -7920,7 +7923,7 @@ EOF
             # A switched-off network can't be shaped or reached, so the only action is to bring it
             # up. NOTE: "Bring interface UP/DOWN" (not the standard Enable/Disable) is a DELIBERATE
             # exception to the toggle-label standard, chosen so the verb matches the If-State value.
-            print_info "This network is OFF and stays off across reboots until you bring it up.\nBring it up to set limits or router access."
+            print_info "This network is OFF and stays off across reboots until it's brought up.\nBring it up to set limits or router access."
             printf "\n"
             if [ "$_banded" = 1 ]; then printf " %s%sBring Interfaces UP\n" "$N1" "$NSEP"
             else printf " %s%sBring Interface UP\n" "$N1" "$NSEP"; fi
@@ -7980,7 +7983,7 @@ EOF
                         # Opening ALL router ports to an ISOLATED network exposes admin UI/SSH to a
                         # network deliberately walled off from everything else - warn and confirm.
                         if netlimit_is_isolated "$name" "$zone"; then
-                            print_warning "'$name' is an ISOLATED network - walled off from your other networks.\nOpening all router ports also exposes the router's admin UI, SSH and other\nservices to any device on it."
+                            print_warning "'$name' is an ISOLATED network - walled off from the other networks.\nOpening all router ports also exposes the router's admin UI, SSH and other\nservices to any device on it."
                             printf "Open all router ports to '$name' anyway? [y/N]: "; read -r _iso; printf '\n'
                             case "$_iso" in y|Y) ;; *) continue ;; esac
                         fi
@@ -8401,9 +8404,9 @@ SWFEOF
 
     # A Wi-Fi assignment can drop your own management path when the switch is flipped - confirm.
     if [ "$sel" = wifi ]; then
-        print_warning "This makes the switch toggle Wi-Fi - a physical flip can drop the Wi-Fi you\nmanage the router over."
+        print_warning "This makes the switch toggle Wi-Fi - a physical flip can drop the Wi-Fi used\nto manage the router."
         printf "Assign it anyway? [y/N]: "; read -r choice; printf "\n"
-        case "$choice" in y|Y) : ;; *) print_info "Cancelled - function unchanged"; press_any_key; return ;; esac
+        case "$choice" in y|Y) : ;; *) print_info "No change"; press_any_key; return ;; esac
     fi
 
     if [ "$sel" = none ]; then
@@ -9620,7 +9623,7 @@ _ttyd_reinstall_flow() {
 _ttyd_uninstall_flow() {
     local ans
     printf "This removes the ttyd package and its config. Uninstall? [y/N]: "; read -r ans; printf "\n"
-    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed"; return ;; esac
+    case "$ans" in y|Y) : ;; *) print_info "No change"; return ;; esac
     spin_run "Uninstalling the ttyd package" _ttyd_uninstall
     print_success "Web Terminal uninstalled"
 }
@@ -10238,7 +10241,7 @@ EOF
             if [ "$tp" = 1 ]; then delta=$((delta + k)); else delta=$((delta - k)); fi
         done < "$map_file"
         proj=$((keep_tot + delta)); [ "$proj" -lt 0 ] && proj=0
-        printf " %bPersist:%b  %b%s%b\n" "$CYAN" "$RESET" "$BLUE" "$(_fmt_space "$proj")" "$RESET"   # what an update carries if you Confirm
+        printf " %bPersist:%b  %b%s%b\n" "$CYAN" "$RESET" "$BLUE" "$(_fmt_space "$proj")" "$RESET"   # what an update carries on Confirm
         # the MEASURED archive for what persists now; staged changes are measured after Confirm (no estimate)
         if [ -n "${PM_FW_IMAGE_KB:-}" ]; then
             if [ "$delta" -ne 0 ]; then _fw_mem_meter "$PM_FW_IMAGE_KB" "$keep_arch" "  ${GREY}(updates after Confirm)${RESET}"
@@ -10661,7 +10664,7 @@ manage_ssh_keys() {
         
         case "$ssh_choice" in
             1) # ADD KEY
-                printf "\n${CYAN}Paste your public key (starts with ssh-rsa, etc.):${RESET}\n"
+                printf "\n${CYAN}Paste the public key (starts with ssh-rsa, etc.):${RESET}\n"
                 read -r new_key
                 printf "\n"
                 if echo "$new_key" | grep -qE "^ssh-(rsa|ed25519|dss|ecdsa) "; then
@@ -10763,11 +10766,11 @@ manage_ssh_keys() {
                 if grep -qFx "$auth_file" "$up_conf" 2>/dev/null; then
                     # Disabling here risks DATA loss (SSH keys are not recoverable if wiped),
                     # so warn + confirm first - unlike functionality-only persistence toggles.
-                    print_warning "Your SSH keys would then be lost on the next firmware upgrade, with no way\nto recover them from the router."
+                    print_warning "The SSH keys would then be lost on the next firmware upgrade, with no way\nto recover them from the router."
                     printf "Disable persistence for SSH keys anyway? [y/N]: "; read -r confirm; printf "\n"
                     case "$confirm" in
                         y|Y) sed -i "\|$auth_file|d" "$up_conf"; _persist_msg off "SSH keys" ;;
-                        *)   print_info "Cancelled - persistence unchanged" ;;
+                        *)   print_info "No change - SSH keys stay persisted" ;;
                     esac
                 else
                     echo "$auth_file" >> "$up_conf"
@@ -10905,18 +10908,35 @@ macOS Terminal is the one terminal whose number-keycap spacing can't be
 detected, so the choice made at startup is shown here. Change it in
 Display Settings. Saving Auto there clears it, so the next start asks again.
 
-Uninstall
-─────────
-Removes /usr/sbin/glinet_utils and its sysupgrade.conf entry.
-The script you are currently running is not affected.
+After installing, the toolkit offers to remove the copy you installed
+from, so the router keeps one toolkit. The installed copy has everything
+it had, settings included. A copy in /tmp or a git checkout is kept.
+
+Uninstall / Switch to Installed Version
+───────────────────────────────────────
+Uninstall removes /usr/sbin/glinet_utils and its sysupgrade.conf entry.
+It's offered in the installed copy, the one it removes. Run from another
+copy, this item switches to the installed copy instead, and asks first
+when the two are different versions.
+
+Reset Toolkit Settings
+──────────────────────
+Starts the toolkit's own settings over, in every copy on the router: the
+startup questions (install as a system command, add the Admin Panel page)
+are asked again, and the display is detected again (Auto). The toolkit then
+restarts, so the questions come straight away. What the toolkit set up on the router -
+AdGuardHome, the fan, limits, backups, the Admin Panel page - is left as it
+is; each has its own switch. A new version of the toolkit also starts these
+settings over.
 
 Admin Panel Page
 ────────────────
-Adds a Router Toolkit entry to the GL.iNet Admin Panel's own menu. It opens a
-page with the AdGuardHome status and Enable / Disable, using the same words and
-checks as these menus; the Admin Panel's login protects it, and it follows the
-Admin Panel's light or dark theme. Disable removes the entry and the page. With
-the toolkit installed, the page comes back after a firmware update. Shown as
+Adds a Router Toolkit group to the GL.iNet Admin Panel's own menu: the toolkit's
+screens as pages, using the same words and checks as these menus. The Admin
+Panel's login protects it, and it follows the Admin Panel's light or dark theme.
+Disable removes the group and the pages, and counts as "no" to the startup offer
+until the next update. With the toolkit installed, the page comes back after a
+firmware update. Shown as
 NOT SUPPORTED on firmware whose Admin Panel can't host it.
 HELPEOF
 }
@@ -10938,7 +10958,7 @@ check_install_prompt() {
     [ "$INSTALL_PROMPTED" -eq 1 ] && return
     _is_toolkit_file "$SCRIPT_PATH" || return   # piped/stdin run: no real file to install, don't offer
 
-    print_info "Installing to $INSTALL_PATH lets you run this program from anywhere as a system command"
+    print_info "Installing to $INSTALL_PATH makes it a system command that runs from anywhere"
     printf "Install as a system command? [Y/n]: "
     read -r ip_ans
     printf "\n"
@@ -10947,7 +10967,7 @@ check_install_prompt() {
             # remember the "no" until the next update replaces this file (the line carries a comment, so match
             # its start - the old "=0$" match never fired, so this was asked on every run)
             sed -i 's/^INSTALL_PROMPTED=0/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
-            print_info "Skipping. You can install later via System Tweaks → Toolkit Management."
+            print_info "Skipped - install it later in System Tweaks → Toolkit Management"
             STARTUP_NOTICE=1
             ;;
         *)
@@ -10973,7 +10993,7 @@ do_install_to_sbin() {
         press_any_key
         return 1
     fi
-    print_success "Installed to $INSTALL_PATH"
+    print_success "Installed to $INSTALL_PATH with settings kept"
 
     if ! toolkit_persistence_enabled; then
         printf "\nPersist across firmware upgrades? [Y/n]: "
@@ -10986,9 +11006,53 @@ do_install_to_sbin() {
     fi
 
     printf "\n"
+    if _toolkit_offer_remove_local; then printf "\n"; fi
     print_action "Switching to installed copy"
     sleep 2
     exec "$INSTALL_PATH" "$@"
+}
+
+# The copy being left for the installed one: offer to remove it, so the router keeps ONE toolkit (the installed
+# copy carries the settings). Never a non-toolkit file (a piped run resolves to busybox), a /tmp copy (gone at
+# reboot) or a git checkout. Prints the question and its answer's blank line; returns 0 when a result line
+# followed (the caller adds a blank line before what comes next), 1 for "n", 2 when not offered.
+_toolkit_offer_remove_local() {
+    local a
+    [ "$SCRIPT_PATH" != "$INSTALL_PATH" ] && _is_toolkit_file "$SCRIPT_PATH" || return 2
+    [ -e "$(dirname "$SCRIPT_PATH")/.git" ] && return 2
+    case "$SCRIPT_PATH" in /tmp/*) return 2 ;; esac
+    printf "Remove the local copy at %s? [Y/n]: " "$SCRIPT_PATH"; read -r a; printf "\n"
+    case "$a" in n|N) return 1 ;; esac
+    if rm -f "$SCRIPT_PATH" && [ ! -e "$SCRIPT_PATH" ]; then print_success "Removed $SCRIPT_PATH"
+    else print_warning "Couldn't remove $SCRIPT_PATH"; fi
+    return 0
+}
+
+# Toolkit Management 1 while running another copy: leave it for the installed one. A different version is
+# a side effect worth a question (the installed copy may be older - its start then offers the update).
+_toolkit_switch_installed() {
+    local iv tv c
+    iv=$(grep -m1 '^# Version:' "$INSTALL_PATH" 2>/dev/null | awk '{print $3}' | tr -d '\r')
+    tv=$(grep -m1 '^# Version:' "$SCRIPT_PATH" 2>/dev/null | awk '{print $3}' | tr -d '\r')
+    if [ -n "$iv" ] && [ "$iv" != "$tv" ]; then
+        print_info "The installed copy is version $iv; this one is $tv"
+        printf "Switch to the installed copy? [Y/n]: "; read -r c; printf "\n"
+        case "$c" in n|N) print_info "No change"; press_any_key; return 0 ;; esac
+    fi
+    if _toolkit_offer_remove_local; then printf "\n"; fi
+    print_action "Switching to installed copy"
+    sleep 2
+    stty sane 2>/dev/null </dev/tty
+    exec sh "$INSTALL_PATH" "$@"
+}
+
+# Reset Toolkit Settings: start this copy again, so the startup questions are asked now - not mid-session,
+# where the screens would still show the settings that were just reset
+_toolkit_restart() {
+    print_action "Restarting the toolkit"
+    sleep 2
+    stty sane 2>/dev/null </dev/tty
+    exec sh "$SCRIPT_PATH" "$@"
 }
 
 # --- macOS Terminal keycap spacing --------------------------------------------------------
@@ -11166,7 +11230,7 @@ manage_display_settings() {
                 ;;
             5)
                 printf " %bPage 5 of %s — Auto%b (detect terminal on each launch)\n\n" "${BOLD}${CYAN}" "$total" "$_R"
-                printf "   Re-detects your terminal every time the toolkit\n"
+                printf "   Re-detects the terminal every time the toolkit\n"
                 printf "   starts and selects Full or Compatible automatically.\n\n"
                 printf "   Right now it would use:\n"
                 printf "     %b%s%b\n" "$_G" "$detected" "$_R"
@@ -11333,7 +11397,8 @@ manage_toolkit() {
         local installed_status persistence_status running_from install_label persist_label
         if toolkit_is_installed; then
             installed_status="${GREEN}INSTALLED${RESET}"
-            install_label="Uninstall"
+            # Uninstall only from the copy it removes; another copy offers the installed one instead
+            if [ "$SCRIPT_PATH" = "$INSTALL_PATH" ]; then install_label="Uninstall"; else install_label="Switch to Installed Version"; fi
         else
             installed_status="${GREY}NOT INSTALLED${RESET}"
             install_label="Install"
@@ -11396,7 +11461,7 @@ manage_toolkit() {
         [ -n "$kc_status" ] && printf "   Keycap spacing:  %b\n" "$kc_status"
         printf "   Installation:    %b\n"   "$installed_status"
         printf "   Persistence:     %b\n"   "$persistence_status"
-        # the Admin Panel page: a status word, its address while it's on, and item 5 follows the state
+        # the Admin Panel page: a status word, its address while it's on, and item 6 follows the state
         # (no item where GL's firmware can't host it - NOT SUPPORTED is the whole story)
         local wb_state wb_label=""; wb_state=$(webui_state)
         case "$wb_state" in
@@ -11414,22 +11479,22 @@ manage_toolkit() {
         printf "%s%s%s\n" "$N2" "$NSEP" "$persist_label"
         printf "%s%sDisplay Settings\n"          "$N3" "$NSEP"
         printf "%s%s%s\n"                        "$N4" "$NSEP" "$update_label"
-        [ -n "$wb_label" ] && printf "%s%s%s\n"  "$N5" "$NSEP" "$wb_label"
+        printf "%s%sReset Toolkit Settings\n"    "$N5" "$NSEP"
+        [ -n "$wb_label" ] && printf "%s%s%s\n"  "$N6" "$NSEP" "$wb_label"   # last: the one item firmware can rule out
         printf "%s%sBack\n"                      "$N0" "$NSEP"
         printf "%s Help\n"                       "$NQ"
-        if [ -n "$wb_label" ]; then printf "\nChoose [1-5/0/?]: "; else printf "\nChoose [1-4/0/?]: "; fi
+        if [ -n "$wb_label" ]; then printf "\nChoose [1-6/0/?]: "; else printf "\nChoose [1-5/0/?]: "; fi
         read -r tk_choice
         printf "\n"
 
         case "$tk_choice" in
             1)
-                if toolkit_is_installed; then
-                    # Uninstall path
-                    print_warning "This will remove $INSTALL_PATH from the system"
-                    if [ "$SCRIPT_PATH" = "$INSTALL_PATH" ]; then
-                        print_warning "You are currently running the installed copy"
-                        printf "   After removal, run the script directly from its local path.\n"
-                    fi
+                if toolkit_is_installed && [ "$SCRIPT_PATH" != "$INSTALL_PATH" ]; then
+                    _toolkit_switch_installed "$@"
+                elif toolkit_is_installed; then
+                    # Uninstall path (only offered in the installed copy - the one you're running)
+                    print_warning "This will remove $INSTALL_PATH from the system - the running copy"
+                    print_info "After removal, run a saved copy of the toolkit, or download it again"
                     printf "Remove the toolkit? [y/N]: "; read -r c; printf "\n"
                     case "$c" in
                         y|Y)
@@ -11473,7 +11538,16 @@ manage_toolkit() {
                 fi
                 CL_EXIT_LABEL=""
                 ;;
-            5) if [ -n "$wb_label" ]; then webui_toggle; else print_error "Invalid option"; sleep 1; fi ;;
+            5)
+                print_info "Resets the toolkit's settings: the system command and Admin Panel page offers, and the display mode"
+                printf "Reset the toolkit's settings and restart it? [y/N]: "; read -r c; printf "\n"
+                case "$c" in
+                    y|Y) if _toolkit_reset_settings; then print_success "Toolkit settings reset"; _toolkit_restart "$@"
+                         else print_error "Some copies of the toolkit couldn't be reset - check that they're writable"; fi ;;
+                    *) print_info "No change" ;;
+                esac
+                press_any_key ;;
+            6) if [ -n "$wb_label" ]; then webui_toggle; else print_error "Invalid option"; sleep 1; fi ;;
             \?|h|H|❓) show_toolkit_help ;;
             0) return ;;
             *) print_error "Invalid option"; sleep 1 ;;
@@ -11498,8 +11572,11 @@ WEBUI_BUILD=/usr/lib/glutils/build                        # checksum of the tool
 # The screens in the Admin Panel's "ROUTER TOOLKIT" group, in the toolkit main menu's order: "id|title|index",
 # one per line (titles have spaces). Adding a screen to the web = one line here + its _ws_<id>_* screen functions
 # (Hardware Information keeps its own live page). Not here, on purpose: the toolkit's own terminal settings.
+# id|title|order[|sidebar label] - the sidebar label only where the title won't fit on one line of GL's sidebar
+# (its items are a fixed 40 px: "AdGuardHome Control Center" wrapped and crowded its neighbours). The page's own
+# heading keeps the title. ("AdGuard Control Center" still wrapped in Safari, which draws the font wider.)
 _webui_screens() {
-    printf '%s\n' "hardware|Hardware Information|10" "agh|AdGuardHome Control Center|20" "tweaks|System Tweaks|30" \
+    printf '%s\n' "hardware|Hardware Information|10" "agh|AdGuardHome Control Center|20|AGH Control Center" "tweaks|System Tweaks|30" \
         "bench|System Benchmarks|40" "net|Network and VPN Tools|50" "uci|System Configuration|60"
 }
 _webui_screen_ids() { _webui_screens | cut -d'|' -f1; }
@@ -11519,8 +11596,12 @@ _webui_files() {
     for id in $(_webui_screen_ids); do echo "$WEBUI_MENU_DIR/glutils-$id.json $WEBUI_VIEW_DIR/gl-sdk4-ui-glutils-$id.common.js.gz"; done
 }
 webui_url() { printf 'http://%s/glu/' "$(get_lan_ip)"; }
-# the page answers locally (oui-access lets 127.0.0.1 through without the HTTPS redirect)
-_webui_serving() { wget -q -T 5 -O /dev/null http://127.0.0.1/glu/ 2>/dev/null; }
+# the page answers locally (oui-access lets 127.0.0.1 through without the HTTPS redirect). It must be OUR page:
+# for a path it doesn't have, GL's nginx answers 127.0.0.1 with its own Admin Panel index (200 OK), so "it
+# answered" alone said the page was still there after every removal (2026-10-19) - look for the page's marker.
+# grep reads the WHOLE page (-c, not -q): a grep that stops at the first match leaves busybox wget blocked on the
+# closed pipe until its 5 s timeout, and every screen showing the page's state paused (60 ms vs 5,060 ms on .8.1)
+_webui_serving() { [ "$(wget -q -T 5 -O - http://127.0.0.1/glu/ 2>/dev/null | grep -c 'name="application-name" content="glinet-utils"')" -gt 0 ]; }
 # a copy of the toolkit that the page can run: installed, or a saved file that isn't in /tmp
 _webui_toolkit_ok() {
     toolkit_is_installed && return 0
@@ -11858,6 +11939,7 @@ _webui_write_page() {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GL.iNet Router Toolkit</title>
+<meta name="application-name" content="glinet-utils">
 <style>
 /* Palette = GL's. Every token is GL's own colour variable (the same names in all of GL's themes), with a
    fallback for a firmware that renames one. Light or dark follows the theme chosen in the Admin Panel
@@ -12182,6 +12264,8 @@ const URLP = new URLSearchParams(location.search);
 let SCREEN = URLP.get("s") || "hardware";
 
 class SignedOut extends Error {}
+class PageGone extends Error {}   // GL's /rpc no longer has the toolkit: the page was turned off (here or in a terminal)
+let leaving = false;              // on the way to GL's home after turning the page off - nothing else to say
 // GL's /rpc decodes and re-encodes the toolkit's JSON, which turns an empty array into {}
 const list = (x) => (Array.isArray(x) ? x : []);
 
@@ -12262,6 +12346,7 @@ async function rpc(method, params) {
   const j = await r.json();
   if (j.error) {
     if (j.error.code === ACCESS_DENIED) throw new SignedOut();
+    if (j.error.code === -32601) throw new PageGone();   // "Method not found": the toolkit's /rpc module is gone
     throw new Error(j.error.message || "The router refused the request");
   }
   return j.result;
@@ -12483,6 +12568,8 @@ function banner(msg) {
   if (msg.link) {
     const a = el("a", "", msg.link.text);
     a.href = msg.link.href; a.target = "_top";
+    // GL's home replaces this entry too (see goHome), so Back doesn't return to a page that just went away
+    if (msg.link.href === "/") a.addEventListener("click", (e) => { e.preventDefault(); goHome(); });
     b.append(a);
   }
   b.hidden = false;
@@ -12499,8 +12586,22 @@ function signedOut() {
   banner({ tone: "warning", text: "Sign in to the GL.iNet Admin Panel first, then reopen this page",
            link: { text: "Open the Admin Panel", href: "/" } });
 }
+// GL's whole window to its home page: a full load, so GL drops the Router Toolkit menu entries too
+// replace(), not a new entry: one Back press from GL's home must not land on a toolkit page that's gone (earlier
+// toolkit screens stay in the history - GL's app put them there and nothing can take them out)
+function goHome() { try { top.location.replace("/"); } catch (e) { location.replace("/"); } }
+function pageGone() {
+  if (leaving) return;
+  stopLive(); gen.stopLive(); loading(false);
+  $("content").replaceChildren();
+  // nothing on this page answers any more: its tabs and buttons go too, leaving the notice and the way out
+  $("tabwrap").hidden = true; $("panel").classList.remove("tabbed"); $("pageActions").hidden = true;
+  banner({ tone: "info", text: "The Router Toolkit page was turned off - turn it on again from Toolkit Management in a terminal",
+           link: { text: "Open the Admin Panel", href: "/" } });
+}
 function failed(e, what) {
   if (e instanceof SignedOut) return signedOut();
+  if (e instanceof PageGone) return pageGone();
   loading(false);
   banner({ tone: "error", text: (what || "The router didn't answer") + " - " + e.message });
 }
@@ -12848,6 +12949,10 @@ const gen = {
     feat: { cols: ["Feature", "Persist", "Planned Action"], sw: [null, "kept across firmware updates"], hide: [],
             cells: (r) => [r.name] },
   },
+  // every Planned Action word an editor can show (gen.plan) - the column is sized to the longest, so it never moves
+  planWords: { agh: ["No Change", "> Install + Enable", "> Install", "> Enable", "> Disable", "> Remove"],
+               pkg: ["No Change", "> Install + Persist", "> Install Package", "> Enable Persistence", "> Disable Persistence",
+                     "> Remove + Unpersist", "> Remove Package"] },
   plan(r, kind) {   // the menu's get_agh_action_text / get_action_text
     if (r.ti === r.oi && r.te === r.oe) return "No Change";
     const pk = kind === "pkg" || kind === "feat";
@@ -12913,6 +13018,18 @@ const gen = {
     });
     thead.append(hr); t.append(thead);
     t.append(tb); wrap.append(t); k.body.append(wrap);
+    // the Planned Action column takes the width of its LONGEST word up front: sized to what's showing, it grew when a
+    // row's plan got longer ("> Install" -> "> Install + Enable") and every column shifted left (2026-10-19)
+    const planTh = hr.lastElementChild, words = gen.planWords[kind === "feat" ? "pkg" : kind] || [];
+    requestAnimationFrame(() => {
+      try {
+        const cell = tb.querySelector("tr:not(.group) td:last-child"); if (!cell || !words.length) return;
+        const cs = getComputedStyle(cell), cx = document.createElement("canvas").getContext("2d");
+        cx.font = cs.fontWeight + " " + cs.fontSize + " " + cs.fontFamily;
+        const w = Math.max(...words.map((x) => cx.measureText(x).width));
+        planTh.style.minWidth = Math.ceil(w + parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight) + 2) + "px";
+      } catch (e) {}
+    });
     list(c.notes).forEach((n) => k.body.append(el("p", "note", n)));
     const sw = (on, label, fn) => {
       const l = el("label", "switch"), i = el("input"); i.type = "checkbox"; i.checked = on; i.setAttribute("role", "switch");
@@ -13095,7 +13212,7 @@ const gen = {
       const go = ovr.root.querySelector(".glu-ov-foot button:last-child");
       const now = () => fields.map((f) => form.elements[f.id]).filter(Boolean).map((i) => (i.type === "checkbox" ? String(i.checked) : i.value));
       const was = now();
-      const dirty = () => { const d = now().some((v, k) => v !== was[k]); go.disabled = !d; go.title = d ? "" : "No changes"; };
+      const dirty = () => { const d = now().some((v, k) => v !== was[k]); go.disabled = !d; go.title = d ? "" : "No changes to apply"; };
       form.addEventListener("input", dirty); form.addEventListener("change", dirty); dirty();
     }
   },
@@ -13281,6 +13398,10 @@ const gen = {
       busy = false;
       if (res.ok === false && !res.cards) { banner(res.message); document.querySelectorAll("#content button").forEach((b) => { b.disabled = false; }); return; }
       banner(res.message);
+      // the page just removed itself: go to GL's home (its menu reloads without the toolkit) instead of a dead page
+      if (a.id === "webui_off" && res.ok !== false && res.message && res.message.tone === "success") {
+        leaving = true; stopLive(); gen.stopLive(); setTimeout(goHome, 2000); return;
+      }
       // this action started a job: re-read the screen when it ends (a run action's screen still lists the LAST job,
       // finished long ago - that one is not ours, and re-reading for it wiped what the action just showed)
       if ((a.mode === "job" || a.mode === "ijob") && res.job && res.job.id) gen.mine = res.job.id;
@@ -13700,12 +13821,12 @@ GLUVIEW
 # The "ROUTER TOOLKIT" group (a caret group like GL's own): one level-2 entry per screen sharing the parent
 # "glutils" - GL's sidebar titles the group from parent_title and orders it by parent_index. Every network mode.
 _webui_write_menu() {
-    local id title idx
+    local id title idx side
     mkdir -p "$WEBUI_MENU_DIR"
     rm -f "$WEBUI_MENU_DIR/glutils.json"        # the single top-level entry the first version wrote
     _webui_screens > "$WEBUI_MENU_DIR/.glutils.$$"
-    while IFS='|' read -r id title idx; do
-        printf '%s\n' '{' "    \"index\": $idx," "    \"view\": \"glutils-$id\"," "    \"title\": \"$title\"," '    "level": 2,' \
+    while IFS='|' read -r id title idx side; do
+        printf '%s\n' '{' "    \"index\": $idx," "    \"view\": \"glutils-$id\"," "    \"title\": \"${side:-$title}\"," '    "level": 2,' \
             '    "parent": "glutils",' '    "parent_title": "Router Toolkit",' '    "parent_icon": "tools",' '    "parent_index": 95,' \
             '    "show_mode": ["router", "wds", "relay", "mesh", "ap", "agent"]' '}' > "$WEBUI_MENU_DIR/glutils-$id.json"
     done < "$WEBUI_MENU_DIR/.glutils.$$"
@@ -13773,6 +13894,7 @@ webui_disable() {   # remove every file, reload; 0 once the page is gone
 webui_toggle() {
     case "$(webui_state)" in
         ENABLED|SERVICE_DOWN)
+            _webui_remember_no   # turned off on purpose: the startup offer doesn't bring it back up (first: see the helper)
             if spin_run "Removing the toolkit from the Admin Panel" webui_disable; then
                 print_success "Admin Panel page disabled"
             else
@@ -13804,17 +13926,47 @@ _webui_refresh_if_stale() {
 
 # One-time offer at startup (like the install prompt): "n" points to Toolkit Management and isn't asked
 # again until the next update - the answer lives in this file (WEBUI_PROMPTED), which an update replaces
+# Every copy of the toolkit this router knows: the one running, the installed one, and the copies the Admin Panel
+# page was set up to run (its /rpc module lists them). Answers and settings live INSIDE each copy, so anything that
+# changes one ("no" to an offer, Reset Toolkit Settings) changes them all.
+_toolkit_copies() {
+    local f
+    { printf '%s\n' "$SCRIPT_PATH" "$INSTALL_PATH"
+      [ -f "$WEBUI_RPC" ] && grep -m1 '^local CANDIDATES' "$WEBUI_RPC" | grep -o '"/[^"]*"' | tr -d '"'; } \
+    | awk '!seen[$0]++' | while IFS= read -r f; do
+        [ -n "$f" ] && [ -f "$f" ] && _is_toolkit_file "$f" && printf '%s\n' "$f"
+    done
+}
+# A "no" to the page - answered at the offer, or a deliberate Disable (here or on the page) - is remembered until the
+# next update, in every copy: whichever starts next shouldn't ask again. Called BEFORE a Disable removes the /rpc
+# module that lists the page's copies.
+_webui_remember_no() {
+    local f
+    for f in $(_toolkit_copies); do sed -i 's/^WEBUI_PROMPTED=0/WEBUI_PROMPTED=1/' "$f"; done
+    WEBUI_PROMPTED=1
+}
+# Reset Toolkit Settings: the preferences each copy keeps in itself back to their defaults, in every copy - the
+# startup questions are asked again, and the display is detected again. 0 once every copy reads the defaults.
+_toolkit_reset_settings() {
+    local f bad=0
+    for f in $(_toolkit_copies); do
+        sed -i 's/^INSTALL_PROMPTED=[01]/INSTALL_PROMPTED=0/; s/^WEBUI_PROMPTED=[01]/WEBUI_PROMPTED=0/; s/^OUTPUT_PREF="[^"]*"/OUTPUT_PREF="auto"/; s/^KEYCAP_NSEP="[^"]*"/KEYCAP_NSEP="auto"/' "$f"
+        grep -q '^INSTALL_PROMPTED=0' "$f" && grep -q '^WEBUI_PROMPTED=0' "$f" && grep -q '^OUTPUT_PREF="auto"' "$f" \
+            && grep -q '^KEYCAP_NSEP="auto"' "$f" || bad=1
+    done
+    return $bad
+}
 check_webui_prompt() {
     local ans
     [ "${WEBUI_PROMPTED:-0}" = 1 ] && return 0
     webui_supported && _webui_toolkit_ok && ! webui_installed || return 0
+    printf "\n"   # its own block: a blank line from whatever startup printed before (the update check)
     print_info "The toolkit can add a Router Toolkit page to the GL.iNet Admin Panel menu"
     printf "Add it to the Admin Panel? [Y/n]: "; read -r ans; printf "\n"
     case "$ans" in
         n|N)
-            # (the line carries a comment, so match the start - a "=0$" match never fired)
-            sed -i 's/^WEBUI_PROMPTED=0/WEBUI_PROMPTED=1/' "$SCRIPT_PATH"
-            print_info "Skipping. You can add it later via System Tweaks → Toolkit Management." ;;
+            _webui_remember_no
+            print_info "Skipped - add it later in System Tweaks → Toolkit Management" ;;
         *)
             if spin_run "Adding the toolkit to the Admin Panel" webui_enable; then
                 print_success "Admin Panel page enabled - choose Router Toolkit in the Admin Panel menu"
@@ -13823,6 +13975,7 @@ check_webui_prompt() {
                     "Add it later via System Tweaks → Toolkit Management"
             fi ;;
     esac
+    _STARTUP_GAP=1   # the final step puts the blank line below it (two blocks in a row share one gap)
 }
 
 # =============================================================================
@@ -14186,14 +14339,14 @@ mtu_probe() {
     printf "\n %bWhat this does%b\n" "$CYAN" "$RESET"
     printf "   Sends test packets to find the biggest size this connection really carries,\n"
     printf "   then confirms or lowers the Recommended MTU and marks its Basis \"Verified\".\n"
-    printf "   Your Current MTU is not changed. If the probe measured size is bigger, it\n"
+    printf "   The current MTU is not changed. If the probe measured size is bigger, it\n"
     printf "   means the don't-fragment (DF) flag is being ignored on the path, resulting\n"
     printf "   in an oversized packet being split into two or more pieces, forwarded, and\n"
     printf "   reassembled at the receiving end, so it looks like it fit. The probe will\n"
     printf "   detect this and ignore the probed value, keeping the original Calculated\n"
     printf "   value as the Recommended value.\n"
     printf "\nRun the probe? [y/N]: "; read -r answer
-    case "$answer" in y|Y) ;; *) print_info "Cancelled"; press_any_key; return ;; esac
+    case "$answer" in y|Y) ;; *) print_info "No change"; press_any_key; return ;; esac
 
     # Find a don't-fragment-capable pinger. Busybox ping lacks -M do and shadows
     # iputils on PATH, so when the PATH ping can't do it, install iputils via the
@@ -15778,7 +15931,7 @@ rla_do_lever2() {
             printf '\n'
             printf ' Apply anyway? It reverts automatically in 30s unless confirmed [y/N]: '
             read -r _yn; printf '\n'
-            case "$_yn" in y|Y) ;; *) print_info "Cancelled - nothing changed"; press_any_key; return ;; esac
+            case "$_yn" in y|Y) ;; *) print_info "No change"; press_any_key; return ;; esac
         fi
         lv_apply "$A_IF" access "$_new" 30
         if lv_verify "$A_IF" access "$_new"; then
@@ -15820,13 +15973,13 @@ rla_do_lever3() {
         lv_risk_report "$A_IF"
         printf '\n Apply anyway? It reverts automatically in 30s unless confirmed [y/N]: '
         read -r _yn; printf '\n'
-        case "$_yn" in y|Y) ;; *) print_info "Cancelled - nothing changed"; press_any_key; return ;; esac
+        case "$_yn" in y|Y) ;; *) print_info "No change"; press_any_key; return ;; esac
     fi
     lv_apply "$A_IF" masq "$_new" 30
     if lv_verify "$A_IF" masq "$_new"; then
         lv_confirm "$A_IF" masq
-        if [ "$_new" = 0 ]; then print_success "Your devices now show their real addresses to the remote side"
-        else print_success "Your devices are now hidden behind $A_TUN"; fi
+        if [ "$_new" = 0 ]; then print_success "Devices now show their real addresses to the remote side"
+        else print_success "Devices are now hidden behind $A_TUN"; fi
     else
         print_error "The firewall did not follow the setting - it will revert"
     fi
@@ -16589,7 +16742,7 @@ pkg_db_delete() {
                     printf "\n"; print_error "No backups selected"; sleep 2; continue
                 fi
                 printf "\n"
-                print_warning "WARNING: You are about to permanently delete selected backups"
+                print_warning "The selected backups will be deleted permanently"
                 printf "Delete selected backups? [y/N]: "; read -r confirm
                 case "$confirm" in
                     y|Y)
@@ -16687,7 +16840,7 @@ _pkg_db_repair_flow() {
     # of the repair the user already confirmed rather than behind its own prompt.
     if [ "$(pkg_mgr)" = opkg ] && ls "$(pkg_db_info_dir)"/*.control >/dev/null 2>&1; then
         printf "\n"
-        print_info "Your installed packages are preserved"
+        print_info "Installed packages are kept"
         spin_run "Rebuilding the installed database from package metadata" pkg_db_reconstruct
         spin_run "Verifying the package index" pkg_update
         if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
@@ -16703,8 +16856,8 @@ _pkg_db_repair_flow() {
         printf "\n"
         print_warning "Neither repair could fix it. As a last resort, the FACTORY package database can be"
         printf "   restored from read-only firmware. This gets opkg working again, but resets its record of\n"
-        printf "   installed packages to the factory set - anything you added stays on disk, but opkg no longer\n"
-        printf "   tracks it (reinstall to re-register). Your data, settings and configs are untouched.\n\n"
+        printf "   installed packages to the factory set - anything added stays on disk, but opkg no longer\n"
+        printf "   tracks it (reinstall to re-register). Data, settings and configs are untouched.\n\n"
         printf "Restore the factory package database now? [y/N]: "; local _r; read_ans PKG_ANS_FACTORY; _r=$REPLY; printf "\n"
         case "$_r" in
             y|Y) cp "$(pkg_db_rom)" "$_db" 2>/dev/null
@@ -16712,7 +16865,7 @@ _pkg_db_repair_flow() {
                  if ! tail -n 80 "$SPIN_LOG" 2>/dev/null | pkg_parse_sig; then
                      rm -f "$SPIN_LOG" 2>/dev/null
                      print_success "Factory package database restored - opkg is working again"
-                     print_info "Packages you had installed remain on disk; reinstall any you want opkg to track again"
+                     print_info "Earlier packages stay on disk; reinstall any that opkg should track again"
                      return 0
                  fi
                  rm -f "$SPIN_LOG" 2>/dev/null ;;
@@ -16749,7 +16902,7 @@ _pkg_db_repair_apk() {
              spin_run "Refreshing the package index" pkg_update
              rm -f "$SPIN_LOG" 2>/dev/null
              print_success "Factory package database restored"
-             print_info "Packages you had installed remain on disk; reinstall any you want apk to track again" ;;
+             print_info "Earlier packages stay on disk; reinstall any that apk should track again" ;;
         *) print_info "Left as-is (apk fix applied)" ;;
     esac
 }
@@ -17022,7 +17175,7 @@ _fw_vercmp() { awk -v a="$1" -v b="$2" 'BEGIN{na=split(a,x,".");nb=split(b,y,"."
     for(i=1;i<=n;i++){p=x[i]+0;q=y[i]+0;if(p>q){print 1;exit}if(p<q){print -1;exit}}print 0}'; }
 # Where builds sit relative to the installed one - the ONE place the rules live (the menu's picker, the page's table, the
 # install's warnings all read it): direction UPGRADE / DOWNGRADE / SAME by version, then build number, then label; the
-# plan (what a picker calls it) UPDATE / DOWNGRADE in your channel, INSTALL for another, SAME for the installed build.
+# plan (what a picker calls it) UPDATE / DOWNGRADE in the current channel, INSTALL for another, SAME for the installed build.
 # One awk pass for a whole list (the page's table took a cut / awk per field per build: 0.7 s on MIPS).
 # < "idx|<row>" lines -> idx|PLAN|channel|label|released|MB|DIRECTION
 _fw_table_rows() {
@@ -17593,7 +17746,8 @@ _fw_bin_runs() {   # <binary>
 }
 _fw_post_check() {
     local st; st=$(_fw_hist_latest); [ -n "$st" ] || return 0
-    case "$(_fw_st "$st" status)" in flashing|pending) _fw_health "$st" show; FW_HEALTH_SHOWN=1 ;; esac
+    # at startup it's its own block: a blank line from the update check above (the final step adds the one below)
+    case "$(_fw_st "$st" status)" in flashing|pending) printf "\n"; _fw_health "$st" show; FW_HEALTH_SHOWN=1; _STARTUP_GAP=1 ;; esac
 }
 _fw_status_disp() {   # <status> -> coloured word for the Last Update row
     case "$1" in
@@ -18235,9 +18389,8 @@ Technical Details:
   'stress' package below kernel 6.6, stress-ng from 6.6 (stress-ng can hard-crash
   older kernels, so it's never used there). A firmware update that crosses 6.6
   switches the engine when the tool is re-installed.
-• Baselines: The VPN & Crypto Benchmark is a leaderboard - its "vs yours"
-  column compares saved devices to the one you are on. Disk and Memory tests
-  use a fixed Beryl 7 (0.0%) reference point.
+• Baselines: Each leaderboard ranks this router (marked >) among saved
+  GL.iNet routers; the "vs this router" column compares each one to it.
 • Timing: Disk and Memory tests use /proc/uptime millisecond offsets for 
   precise Speed (MB/s) calculations rather than relying on 'dd' output.
 
@@ -18391,7 +18544,7 @@ _ls_reinstall_flow() {
 _ls_uninstall_flow() {
     local ans
     printf "This removes the librespeed-go package and its config. Uninstall? [y/N]: "; read -r ans; printf "\n"
-    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed"; return ;; esac
+    case "$ans" in y|Y) : ;; *) print_info "No change"; return ;; esac
     spin_run "Uninstalling the librespeed-go package" _ls_uninstall
     print_success "LibreSpeed uninstalled"
 }
@@ -18623,7 +18776,7 @@ bench_render_cipher() {
     local title="$1" sc="$2" tc="$3" cc="$4" df="$5" id="$6" base
     base=$(awk -F'|' -v id="$id" -v c="$tc" '$1==id{print $c; exit}' "$df")
     printf '\n %b%s%b\n' "$CYAN" "$title" "$RESET"
-    printf '  %-10s %-7s %-10s  %-10s  %-10s %-8s  %-10s\n' "Device" "CPU" "64 B" "1420 B" "vs yours" "" "16 K"
+    printf '  %-10s %-7s %-10s  %-10s  %-19s  %-10s\n' "Device" "CPU" "64 B" "1420 B" "vs this router" "16 K"
     printf ' %s\n' "───────────────────────────────────────────────────────────────────────────"
     awk -F'|' -v c="$tc" '{print $c"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' \
         -v id="$id" -v sc="$sc" -v tc="$tc" -v cc="$cc" -v base="$base" \
@@ -18638,6 +18791,7 @@ bench_render_cipher() {
           mark=($1==id)?"> ":"  ";
           line=sprintf("%s%-10.10s %-7.7s %-10s  %-10s  %-10s %-8s  %-10s",mark,$2,$3,unit($sc),unit($tc),bar($tc,mx),d,unit($cc));
           if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
+    printf ' %b> = this router%b\n' "$GREY" "$RESET"   # the marked row, in words (the web says "(this router)")
 }
 
 # Render the RSA connection-setup table (sorted by sign/s). Args: datafile my_id.
@@ -18645,7 +18799,7 @@ bench_render_rsa() {
     local df="$1" id="$2" base
     base=$(awk -F'|' -v id="$id" '$1==id{print $10; exit}' "$df")
     printf '\n %b%s%b\n' "$CYAN" "Connection setup · RSA-2048" "$RESET"
-    printf '  %-10s %-7s %-10s  %-10s %-8s  %-10s\n' "Device" "CPU" "sign/s" "vs yours" "" "verify/s"
+    printf '  %-10s %-7s %-10s  %-19s  %-10s\n' "Device" "CPU" "sign/s" "vs this router" "verify/s"
     printf ' %s\n' "───────────────────────────────────────────────────────────────"
     awk -F'|' '{print $10"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' -v id="$id" -v base="$base" \
         -v cur="${BOLD}${BLUE}" -v res="$RESET" '
@@ -18657,6 +18811,7 @@ bench_render_rsa() {
           sv=($10+0>0)?sprintf("%.1f",$10):"---"; vv=($11+0>0)?sprintf("%.1f",$11):"---"   # not measured, not zero
           line=sprintf("%s%-10.10s %-7.7s %-10s  %-10s %-8s  %-10s",mark,$2,$3,sv,bar($10,mx),d,vv);
           if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
+    printf ' %b> = this router%b\n' "$GREY" "$RESET"   # the marked row, in words (the web says "(this router)")
 }
 
 # Render the Disk I/O leaderboard, sorted by Write (the cross-device-reliable
@@ -18666,7 +18821,7 @@ bench_render_disk() {
     local df="$1" id="$2" base
     base=$(awk -F'|' -v id="$id" '$1==id{print $4; exit}' "$df")
     printf '\n %b%s%b\n' "$CYAN" "Disk I/O (Sequential)" "$RESET"
-    printf '  %-10s %-7s %-10s  %-10s  %-10s %-8s\n' "Device" "CPU" "Write" "Read" "vs yours" ""
+    printf '  %-10s %-7s %-10s  %-10s  %-19s\n' "Device" "CPU" "Write" "Read" "vs this router"
     printf ' %s\n' "───────────────────────────────────────────────────────────────"
     awk -F'|' '{print $4"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' \
         -v id="$id" -v base="$base" -v cur="${BOLD}${BLUE}" -v res="$RESET" '
@@ -18680,6 +18835,7 @@ bench_render_disk() {
           mark=($1==id)?"> ":"  ";
           line=sprintf("%s%-10.10s %-7.7s %-10s  %-10s  %-10s %-8s",mark,$2,$3,unit($4),unit($5),bar($4,mx),d);
           if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
+    printf ' %b> = this router%b\n' "$GREY" "$RESET"   # the marked row, in words (the web says "(this router)")
 }
 
 # Render the Memory I/O leaderboard (single Read/Write throughput metric).
@@ -18688,7 +18844,7 @@ bench_render_mem() {
     local df="$1" id="$2" base
     base=$(awk -F'|' -v id="$id" '$1==id{print $4; exit}' "$df")
     printf '\n %b%s%b\n' "$CYAN" "Memory I/O (Read/Write)" "$RESET"
-    printf '  %-10s %-7s %-10s  %-10s %-8s\n' "Device" "CPU" "Speed" "vs yours" ""
+    printf '  %-10s %-7s %-10s  %-19s\n' "Device" "CPU" "Speed" "vs this router"
     printf ' %s\n' "───────────────────────────────────────────────────"
     awk -F'|' '{print $4"\t"$0}' "$df" | sort -rn | cut -f2- | awk -F'|' \
         -v id="$id" -v base="$base" -v cur="${BOLD}${BLUE}" -v res="$RESET" '
@@ -18702,6 +18858,7 @@ bench_render_mem() {
           mark=($1==id)?"> ":"  ";
           line=sprintf("%s%-10.10s %-7.7s %-10s  %-10s %-8s",mark,$2,$3,unit($4),bar($4,mx),d);
           if($1==id)printf "%s%s%s\n",cur,line,res; else print line }'
+    printf ' %b> = this router%b\n' "$GREY" "$RESET"   # the marked row, in words (the web says "(this router)")
 }
 
 # ---- the benchmarks, one function each: the menu (System Benchmarks) and the Admin Panel page (as a job) run the same code
@@ -19079,7 +19236,7 @@ bench_dns_latency() {
 
     # Pre-check: can we resolve anything at all?
     if ! spin_run "Checking DNS resolution" nslookup google.com; then
-        print_error "DNS is not responding - check your internet connection or DNS settings"
+        print_error "DNS is not responding - check the internet connection or DNS settings"
         press_any_key
         return 1
     fi
@@ -19164,7 +19321,7 @@ bench_speedtest() {
                 print_success "Speedtest completed"
             else
                 printf "\n%s\n" "$_stdiv"
-                print_error "Speedtest didn't complete - check your internet connection"
+                print_error "Speedtest didn't complete - check the internet connection"
             fi
             press_any_key
             ;;
@@ -19879,8 +20036,8 @@ _ost_space_check() {
 # init, start. Used by Install-and-enable (fresh) and by Reinstall (SERVICE_DOWN remediation).
 # No press_any_key - the menu loop owns the single pause after the action.
 _ost_do_install() {
+    _ost_choose_source || { print_info "No change"; return 1; }   # first: 0 here leaves nothing installed
     _ost_deps || return 1
-    _ost_choose_source || { print_info "Cancelled - nothing changed"; return 1; }
     _ost_space_check || return 1
     # Stop any running instance first (fresh install / reinstall).
     _ost_running && { "$OST_STARTUP_SCRIPT" stop >/dev/null 2>&1; }
@@ -19988,7 +20145,7 @@ _ost_uninstall_flow() {
     local ans
     print_warning "This removes OpenSpeedTest: the service, its nginx config, and $OST_INSTALL_DIR"
     printf "Uninstall OpenSpeedTest? [y/N]: "; read -r ans; printf "\n"
-    case "$ans" in y|Y) : ;; *) print_info "Cancelled - nothing changed"; return ;; esac
+    case "$ans" in y|Y) : ;; *) print_info "No change"; return ;; esac
     spin_run "Uninstalling OpenSpeedTest" _ost_remove
     print_success "OpenSpeedTest uninstalled"
 }
@@ -20929,7 +21086,7 @@ _ws_bench_run() {   # <title> <what it does> [run-label] - a benchmark tab: what
     _ws_job_alive "bench_$WS_TAB" || ws_act run "${3:-Run Benchmark}" primary "" "" job
 }
 _ws_bench_cpu() {
-    _ws_bench_run "CPU Thermal Stress Test" "Loads every CPU core for the time you choose, then shows the temperature and fan speed at the start, at the end and 3 seconds after - how well the router sheds heat under full load."
+    _ws_bench_run "CPU Thermal Stress Test" "Loads every CPU core for the chosen time, then shows the temperature and fan speed at the start, at the end and 3 seconds after - how well the router sheds heat under full load."
     _ws_job_alive bench_cpu || ws field duration "Duration (seconds)" number 60 10-600 "How long to keep every core at 100%"
 }
 _ws_bench_crypto() { _ws_bench_run "VPN & Crypto Benchmark" "Measures the cipher speeds VPNs depend on (WireGuard ChaCha20-Poly1305, OpenVPN/IPsec AES-256-GCM, RSA) with OpenSSL, and ranks this router on the leaderboard of GL.iNet routers."; }
@@ -21047,7 +21204,7 @@ _ws_tweaks_fan() {
     ws_act min "Set Minimum Setpoint"; ws_change;  ws_field val "Minimum (°C)" number "$u_min" "0-$u_cur" "0°C - $u_cur°C (the Fan-On setpoint)"
     ws_act fanon "Set Fan-On Setpoint"; ws_change; ws_field val "Fan-On (°C)" number "$u_cur" "$u_min-$ui_max" "$u_min°C - $ui_max°C"
     ws_act warn "Set Warning Setpoint"; ws_change; ws_field val "Warning (°C)" number "$u_wrn" "$u_min-$ui_max" "$u_min°C - $ui_max°C"
-    ws_act max "Set Maximum Setpoint" danger "Set a new maximum setpoint?" "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO YOUR DEVICE!"
+    ws_act max "Set Maximum Setpoint" danger "Set a new maximum setpoint?" "DANGER: EXTENDING AND SETTING THERMAL LIMITS PAST 90°C MAY CAUSE DAMAGE TO THE DEVICE!"
     ws_change
     ws_field val "Maximum (°C)" number "$ui_max" "$u_cur-120" "$u_cur°C - 120°C"
     ws_act reset "Reset to Factory Defaults"
@@ -21297,7 +21454,7 @@ _wa_tweaks_repair() {
     esac
 }
 _ws_pr_factory_field() {   # the last-resort step the repair asks about - opt-in, and said plainly
-    ws_field factory "If that isn't enough, restore the factory package database (packages added since are forgotten by the package manager; their files and your settings stay)" check 0
+    ws_field factory "If that isn't enough, restore the factory package database (packages added since are forgotten by the package manager; their files and settings stay)" check 0
 }
 _wj_tweaks_repair() {   # the dialog was the confirmation; its answers arrive as named args
     local ts n=0 ns fac=n
@@ -21369,7 +21526,7 @@ Earlier releases: https://github.com/phantasm22/GL-iNet_utils/blob/main/CHANGELO
                 r=$(grep -m1 '^# Version:' /tmp/glutils/.remote | awk '{print $3}' | tr -d '\r'); rm -f /tmp/glutils/.remote
                 printf '%s' "$r" > /tmp/glutils/update_state; ws_msg success "Checked - the latest version is $r"
             else rm -f /tmp/glutils/.remote; ws_msg warning "Unable to check for updates (network or GitHub issue)"; fi ;;
-        webui_off) if webui_disable >/dev/null 2>&1; then ws_msg success "Admin Panel page disabled"
+        webui_off) _webui_remember_no; if webui_disable >/dev/null 2>&1; then ws_msg success "Admin Panel page disabled"
                    else ws_msg error "The Admin Panel page could not be removed completely" "Retry, or reboot the router and retry"; fi ;;
     esac
 }
@@ -21454,7 +21611,7 @@ _ws_tweaks_firmware() {
         ws_card "After the Update"
         printf '%s\n' "$hrep" | sed "s/$(printf '\033')\[[0-9;?]*[A-Za-z]//g" | grep -v '^[┌│└]' | sed '/./,$!d' | while IFS= read -r t; do ws pre "$t"; done
     fi
-    [ "$need" -gt 0 ] && ws_note "Keep what's listed above on the Packages tab - or leave \"Persist the items under Not Persisted\" ticked when you install a build."
+    [ "$need" -gt 0 ] && ws_note "Keep what's listed above on the Packages tab - or leave \"Persist the items under Not Persisted\" ticked when installing a build."
     # Choose a Build: the same catalogue as the menu's picker; installing runs the menu's own update, its questions
     # answered in the output card (an interactive job)
     [ -s "$FW_TMP/cat" ] || return 0
@@ -21468,7 +21625,7 @@ _ws_tweaks_firmware() {
     [ -n "$def" ] || def=$(awk -F'|' '$7 == "SAME" { print $1; exit }' "$FW_TMP/web.rows")
     # every build, grouped by channel like the menu's picker, each channel under the Lists editor's section heading row
     awk -F'|' '!s[$3]++ { print $3 }' "$FW_TMP/web.rows" | while IFS= read -r chan; do
-        ws_tr "~group~$(_fw_pick_head "$chan")$([ "$chan" = "$FW_CUR_CHAN" ] && echo " · your channel")"
+        ws_tr "~group~$(_fw_pick_head "$chan")$([ "$chan" = "$FW_CUR_CHAN" ] && echo " (current channel)")"
         awk -F'|' -v c="$chan" '$3 == c' "$FW_TMP/web.rows" | _ws_fw_rows
     done
     rm -f "$FW_TMP/web.rows"
@@ -21713,7 +21870,7 @@ _ws_net_limiter() {
     [ -n "$ck" ] && { ws_act check "Check Router Access"; ws_field nw Network inline "" "1:$ck"; }
     [ -n "$pe" ] && { ws_act persist "Network Persistence"; ws_change
         ws_field nw Network inline "" "1:$pe"; ws_field keep "Keep this network's limits across firmware updates" check "~per~$pkeep" "" ""; }
-    [ -n "$ud" ] && { ws_act ifstate "Bring Interface Up / Down" "" "Change the interface state?" "Down stays down across reboots until you bring it up - devices on it lose their connection" job; ws_change
+    [ -n "$ud" ] && { ws_act ifstate "Bring Interface Up / Down" "" "Change the interface state?" "Down stays down across reboots until it's brought up - devices on it lose their connection" job; ws_change
         ws_field nw Network inline "" "1:$ud"; ws_field up "Interface up" check "~per~$pup" "" ""; }
     # a network with 2+ Wi-Fi bands is brought up / down per band (one switch each, on = up), like the menu's grid
     # behind the same "Bring Interfaces UP or DOWN" item - so it's the same button here: one per such network, all
@@ -21806,7 +21963,7 @@ _ws_net_ssh() {
     [ -f "$af" ] && n=$(grep -c "^ssh-" "$af")
     ws_card Status
     ws_row "Authorized Keys" "$n"
-    if grep -qFx "$af" "$up" 2>/dev/null; then ws_row Persistence ENABLED green; ws_act persist_off "Disable Persistence" "" "Disable persistence for SSH keys anyway?" "Your SSH keys would then be lost on the next firmware upgrade, with no way to recover them from the router"
+    if grep -qFx "$af" "$up" 2>/dev/null; then ws_row Persistence ENABLED green; ws_act persist_off "Disable Persistence" "" "Disable persistence for SSH keys anyway?" "The SSH keys would then be lost on the next firmware upgrade, with no way to recover them from the router"
     else ws_row Persistence DISABLED grey; ws_act persist_on "Enable Persistence"; fi
     ws_card "Authorized Keys"
     if [ -s "$af" ]; then
@@ -21816,7 +21973,7 @@ _ws_net_ssh() {
         n=1
     else ws_note "No keys yet"; n=0; fi
     ws_act add "Add a New SSH Key" primary
-    ws_field key "Public key" text "" "ssh-ed25519 AAAA... you@computer" "Paste the whole line (starts with ssh-rsa, ssh-ed25519, ...)"
+    ws_field key "Public key" text "" "ssh-ed25519 AAAA... user@computer" "Paste the whole line (starts with ssh-rsa, ssh-ed25519, ...)"
     # tick the keys in the table, then Delete Selected (enabled once one is ticked)
     [ "$n" = 1 ] && { ws_act delete "Delete Selected" danger "Delete the selected keys?" "Whoever holds their private keys can't sign in with them any more"; ws_field pk Keys inline "" 1+; }
 }
@@ -22191,7 +22348,7 @@ _wj_agh_direct() {   # enable | disable | login | remove - the dialog's answers 
     esac
 }
 
-# the leaderboards as web tables: the menus' ranking and "vs yours" (bench_render_*), this router first in the
+# the leaderboards as web tables: the menus' ranking and "vs this router" (bench_render_*), this router first in the
 # data file and marked; the bars are bar cells (~bar~<percent of the best>)
 _ws_board() {   # <data> <title> <rank col> <value cols "c:Header:unit,..."> - unit kb (crypto kB/s), mb (MB/s), n (number)
     local df="$1" title="$2" rc="$3" cols="$4"
@@ -22205,7 +22362,7 @@ _ws_board() {   # <data> <title> <rank col> <value cols "c:Header:unit,..."> - u
         { R[NR] = $0; K[NR] = $rc + 0; n = NR }
         END {
             nc = split(cols, C, ","); h = "th" T "Device" T "CPU"
-            for (i = 1; i <= nc; i++) { split(C[i], x, ":"); h = h T x[2]; if (x[1] == rc) h = h T "" T "vs yours" }
+            for (i = 1; i <= nc; i++) { split(C[i], x, ":"); h = h T x[2]; if (x[1] == rc) h = h T "" T "vs this router" }
             print h
             for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) if (K[j] > K[i]) { t = K[i]; K[i] = K[j]; K[j] = t; t = R[i]; R[i] = R[j]; R[j] = t }
             mx = K[1]
@@ -22522,5 +22679,8 @@ keycap_first_run_prompt       # one-time macOS Terminal keycap-gap calibration (
 # ALWAYS the last startup step: the menu clears the screen, so hold 2 s when any startup item printed a
 # message (print_* sets _STARTUP_MSG) - a clean start passes straight through. New startup items go ABOVE.
 _startup_hold() { [ "${_STARTUP_MSG:-0}" = 1 ] && sleep 2; return 0; }
+# a startup block (the firmware report, the Admin Panel offer) printed a blank line ABOVE itself only: one below the
+# last of them, so blocks in a row are one blank line apart and never two
+[ "${_STARTUP_GAP:-0}" = 1 ] && printf "\n"
 spin_run "Loading the main menu" _startup_hold
 show_menu

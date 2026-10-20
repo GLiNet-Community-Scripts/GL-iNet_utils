@@ -50,6 +50,7 @@
     authorisation into GL's own config so they appear in the web UI, and applies
     firewall changes under a 30-second auto-revert so a wrong toggle cannot lock
     you out.
+- 🧭 **Admin Panel Page:** Adds a Router Toolkit group to the GL.iNet Admin Panel's own menu, with the toolkit's screens as pages — the same checks and wording as the terminal menus, protected by the Admin Panel's login, and following its light or dark theme. Offered at startup, and switched on or off in System Tweaks → Toolkit Management.
 - 📋 **Secure UCI Viewer:** Quick, read-only access to your system config. Audit SSIDs, Wi-Fi keys, network and firewall settings, VPN tunnels, and GoodCloud settings without digging through the CLI.
 - 🔄 **Native Self-Updater:** Stay current with zero effort. The script checks GitHub on launch and can perform an in-place update.
 - 🆓 **GPL-3.0 Licensed:** Free, open, and community-driven.
@@ -83,6 +84,27 @@ wget -O glinet_utils.sh https://raw.githubusercontent.com/phantasm22/GL-iNet_uti
 ---
 
 ## 📸 Screenshots / Usage
+
+### Admin Panel page
+
+With the Admin Panel page on, the toolkit's screens sit in the GL.iNet Admin Panel under **Router Toolkit**:
+
+<table>
+  <tr>
+    <td><img src=".github/screenshots/01-hardware.png" alt="Hardware Information in the Admin Panel"><br><sub>Hardware Information (serial, MAC and device ID masked until Reveal)</sub></td>
+    <td><img src=".github/screenshots/02-agh-control-center.png" alt="AdGuardHome Control Center status"><br><sub>AdGuardHome Control Center</sub></td>
+  </tr>
+  <tr>
+    <td><img src=".github/screenshots/03-vpn-benchmark.png" alt="VPN and Crypto Benchmark leaderboard"><br><sub>VPN &amp; Crypto Benchmark leaderboard</sub></td>
+    <td><img src=".github/screenshots/04-bandwidth-limiter.png" alt="Network Bandwidth Limiter grid"><br><sub>Network Bandwidth Limiter</sub></td>
+  </tr>
+  <tr>
+    <td><img src=".github/screenshots/05-firmware-update.png" alt="Firmware Update status and available builds"><br><sub>Firmware Update</sub></td>
+    <td><img src=".github/screenshots/06-package-manager.png" alt="Package and Persistence Manager"><br><sub>Package and Persistence Manager</sub></td>
+  </tr>
+</table>
+
+### Terminal menus
 
 When launched, the script presents an interactive menu system.  
 Options may vary as new utilities are added, but generally include:

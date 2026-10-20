@@ -4,6 +4,67 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-10-19
+### What's New
+#### Toolkit Management
+- **Reset Toolkit Settings** (item 5) starts the toolkit's own settings over in every copy on the router,
+  then restarts the toolkit so the startup questions are asked straight away and the display is detected
+  again. What the toolkit set up on the router is left alone. Enable / Disable Admin Panel Page moves to
+  item 6.
+- **Switch to Installed Version**: run from another copy while the toolkit is installed, item 1 now
+  switches to the installed copy (asking first when the two are different versions - the installed
+  copy then offers its update as it starts). Uninstall is offered in the installed copy, the one it
+  removes.
+- **One toolkit on the router**: after installing as a system command, or switching to the installed
+  copy, the toolkit offers to remove the copy it came from - the installed copy keeps its settings.
+  Copies in /tmp or a git checkout are kept.
+
+### Bug Fixes
+#### Admin Panel Page
+- Disabling the Admin Panel page (in Toolkit Management or on the page itself) said it "could not be
+  removed completely" every time. The page was gone; the check after it took GL.iNet's own Admin Panel,
+  which answers in its place, for the toolkit's page. It now looks for the toolkit's page itself.
+- Disabled from the page, it now goes to the Admin Panel's home - the Router Toolkit menu goes too -
+  instead of staying on a page that no longer exists.
+- A page left open while it's disabled in a terminal now says it was turned off, with a link back to
+  the Admin Panel, instead of failing on every click.
+- After the page is turned off, Back from the Admin Panel's home no longer returns to the toolkit page
+  that just went away.
+- The sidebar entry for AdGuardHome reads "AGH Control Center", so it fits on one line like the others
+  - the full name wrapped and crowded the entries around it. Its page keeps the full name.
+- Allow/Blocklists and Packages: toggling a row no longer nudges the columns sideways. The Planned
+  Action column now keeps the width of its longest wording from the start.
+- Turning the page off - in Toolkit Management or on the page - counts as a "no" to the startup offer in
+  every copy of the toolkit, so the next start doesn't offer it back (until the next update).
+
+#### Toolkit Management
+- The screen paused about 5 seconds before drawing the Admin Panel row while the page was on. The check
+  for the page waited out its download timeout instead of reading the answer; it now takes a moment.
+
+#### OpenSpeedTest Server
+- Install now asks for the download source before installing anything. Cancelling there used to say
+  nothing had changed while leaving NGINX, unzip and wget installed.
+
+#### System Benchmarks
+- The leaderboards' comparison column reads "vs this router" (it was "vs yours"), in the menus and on
+  the Admin Panel page, and each menu table explains its marker: "> = this router". The help no longer
+  claims Disk and Memory compare against a fixed Beryl 7 - every leaderboard compares against the router
+  it runs on.
+
+#### Toolkit-wide
+- Declining a question now says "No change" everywhere (it said "Cancelled - nothing changed" in some
+  places and "No change" in others), naming what stays where that matters ("No change - HW acceleration
+  left on").
+- Messages and the Admin Panel page's screen text no longer address the reader as "you" / "your" ("The SSH
+  keys would then be lost", "check the internet connection"); menu paths in messages all use "→".
+
+- Process, fan, temperature and AdGuardHome update checks no longer print a stray "can't open ..." line
+  when a file vanishes mid-check (a process exiting during a scan, an update check that couldn't run).
+- Toolkit Management's "Running from" no longer shows a stray "./" when the toolkit was started as
+  ./glinet_utils.sh.
+- Startup: the Admin Panel offer and the after-update firmware report each sit in their own block, one
+  blank line apart from the update check and from each other, instead of directly under it.
+
 ## 2026-10-18
 ### What's New
 #### Admin Panel Page

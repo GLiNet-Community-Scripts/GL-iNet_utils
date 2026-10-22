@@ -4,6 +4,61 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-10-22
+### What's New
+#### Toolkit-wide
+- **Status notices**: anything that needs attention - a risk, something missing, something to do - is now
+  one notice at the top of what it's about: under the screen title in the menus; at the top of its card,
+  or above the cards, on the Admin Panel page (with a warning, error or info icon). Each opens with the
+  name of the row it explains ("AdGuardHome Persistence is off: ..."). Status rows keep the value and a
+  short fact in brackets; what a value means is in the screen's help, as a short glossary.
+- Times of day show the router's timezone (2026-10-20 17:41 EDT).
+
+#### Firmware Update
+- Update and Checked are separate rows, as are Last Update and Attempted. Not Persisted shows how many
+  items a firmware update will remove; menu item 3 Manage Persistence (on the page, the Packages tab)
+  lists them and keeps them.
+
+#### VPN MTU Optimizer
+- A probed MTU shows when it was probed and against what (Probed and Target, under Basis).
+
+#### Hardware Information
+- Network Interfaces names a second WAN (GL's secondwan - the Flint 4's WAN/LAN1, or a LAN port switched
+  to WAN) as WAN2, and lists an address line for each WAN; with more than one internet connection,
+  "active" marks the one in use. A tethered phone or USB adapter gets its own Tethering line.
+
+### Bug Fixes
+#### Hardware Information
+- Network Interfaces lists the WAN port on routers whose firmware has no GL port map (a Flint 2 on
+  4.9.1-op25 or 4.8.3 showed LAN1-LAN5 and no WAN): only the CPU's internal link to the switch is left
+  out now, and a USB network device is no longer listed as a port.
+
+#### Toolkit Management
+- Switch to Installed Version now takes this copy's settings with it - the startup-offer answers, the
+  display mode and the keycap spacing - so the installed copy doesn't ask them again, and removing the
+  local copy afterwards loses nothing. If they can't be copied, it says so and doesn't offer the removal.
+
+#### Admin Panel Page
+- Sub-rows are indented as in the menus (Version and Update under Channel, Probed and Target under Basis,
+  State under the switch's function).
+- The "not on this model" messages (fan, toggle switch, filter space limit, AdGuardHome) sit at the top
+  of their card instead of above the tabs or at the bottom of the card.
+- Firmware Update no longer leaves a stray line ("its config") at the bottom of its Status card.
+
+#### Toolkit-wide
+- Persistence reads a plain ENABLED / DISABLED on the fan and Bandwidth Limiter screens too, in the
+  menus and on the Admin Panel page - the extra "(survives firmware upgrades)" notes are gone; the help
+  explains it.
+- System Configuration shows GoodCloud's Status as NOT SET when it isn't set up (the menu printed a
+  warning instead).
+- 0 on a yes/no question now cancels: it used to count as Yes on [Y/n] questions. Where No goes on to
+  another step - wiping settings, enabling without a login, this session only - 0 stops and changes
+  nothing.
+- Messages, notices and help say what will happen ("a firmware update will restore ..."), not what
+  would - "would" is kept for what doesn't happen (a skipped or refused step).
+- In the Admin Panel's Web Terminal on ttyd 1.6.3, the warning, info and gear icons no longer touch the
+  words after them.
+
 ## 2026-10-19
 ### What's New
 #### Toolkit Management
@@ -30,8 +85,8 @@ for multiple releases on the same day.
   the Admin Panel, instead of failing on every click.
 - After the page is turned off, Back from the Admin Panel's home no longer returns to the toolkit page
   that just went away.
-- The sidebar entry for AdGuardHome reads "AGH Control Center", so it fits on one line like the others
-  - the full name wrapped and crowded the entries around it. Its page keeps the full name.
+- The sidebar entry for AdGuardHome reads "AGH Control Center", so it fits on one line like the
+  others; the full name wrapped and crowded the entries around it. Its page keeps the full name.
 - Allow/Blocklists and Packages: toggling a row no longer nudges the columns sideways. The Planned
   Action column now keeps the width of its longest wording from the start.
 - Turning the page off - in Toolkit Management or on the page - counts as a "no" to the startup offer in

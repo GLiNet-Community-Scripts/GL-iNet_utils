@@ -119,7 +119,7 @@ Main Menu
 5️⃣  Network and VPN Tools
 6️⃣  View System Configuration (UCI)
 0️⃣  Exit
-❓ Help
+❓  Help
 
 
 ```
@@ -132,9 +132,9 @@ AdGuardHome Control Center
 3️⃣  Advanced Settings
 4️⃣  Backup & Recovery Suite
 5️⃣  Logs & Maintenance
-🆑 Reset to Factory Settings (Start Over)
+🆑  Reset to Factory Settings (Start Over)
 0️⃣  Main Menu
-❓ Help
+❓  Help
 ```
 
 System Tweaks
@@ -149,7 +149,7 @@ System Tweaks
 7️⃣  Toolkit Management
 8️⃣  Firmware Update
 0️⃣  Main Menu
-❓ Help
+❓  Help
 ```
 
 System Benchmarks
@@ -165,7 +165,7 @@ System Benchmarks
 8️⃣  iPerf3 Network Speed Test Server
 9️⃣  OpenSpeedTest Server
 0️⃣  Main Menu
-❓ Help
+❓  Help
 
 
 ```
@@ -178,7 +178,7 @@ Network and VPN Tools
 3️⃣  Network Bandwidth Limiter
 4️⃣  SSH Key Management
 0️⃣  Main Menu
-❓ Help
+❓  Help
 ```
 
 VPN MTU Optimizer
@@ -209,7 +209,7 @@ System Configuration Viewer
 5️⃣  System Settings
 6️⃣  Cloud Services
 0️⃣  Main Menu
-❓ Help
+❓  Help
 ```
 
 

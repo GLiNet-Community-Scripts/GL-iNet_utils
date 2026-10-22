@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-10-19
+# Version: 2026-10-22
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -105,6 +105,9 @@
 #    the answer still gets its one blank per rule 10.) See _netlimit_offload_ok.
 # 2. Yes = the action; the capitalized default marks the safe side
 #    (destructive => [y/N], expected/safe => [Y/n]). Never invert (no Yes=no-op).
+#    Y = agree and go on, N = disagree and go on, 0 = No AND cancel the whole workflow (0 is cancel
+#    everywhere): where N already ends the flow they match; where N carries on (wipe, go ahead without,
+#    this session only), 0 stops instead with "No change" (or what's already done - never "Cancelled").
 # 3. Wording is the behavioral contract. Transition framing ("Enable it?") =>
 #    N is a no-op (keep current). Declarative framing ("Should this persist?")
 #    => N enforces the opposite (removes). Code MUST match the words. Prefer
@@ -736,6 +739,9 @@ detect_output_mode() {
             wide=$(probe_advance '✅')
             if [ "$wide" = "1" ]; then
                 _TERM_PROFILE="ttyd"            # xterm.js: all emoji adv=1
+                # ⚠️ ℹ️ ⚙️ (ambiguous + VS16) differ by xterm.js build: 2 cells in a current ttyd (1.7.x), ONE in
+                # ttyd 1.6.3 - which still paints them two wide, over a single following space. Measure it
+                _TTYD_AMBIG=$(probe_advance '⚠️')
                 # NOTE how narrow this key is: macOS Terminal answers DA2 1;95,
                 # differing only in the type digit, and Windows Terminal 0;10.
                 # Keying on the version alone would capture Terminal.app. Two
@@ -802,8 +808,11 @@ detect_output_mode() {
                 # PAINT two, so a single trailing space is drawn over the glyph's
                 # right half and the text butts against it. Two gives one visible
                 # gap. The ambiguous+VS16 set (⚠️ ℹ️ ⚙️) advances two and paints
-                # two, so those stay at one.
-                _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ "
+                # two in ttyd 1.7.x, so those stay at one - but ttyd 1.6.3's xterm.js
+                # advances them ONE and paints two (measured 2026-10-21 by the
+                # render check), so there they need two, like the mac profile.
+                if [ "${_TTYD_AMBIG:-2}" = 1 ]; then _S_WARN="⚠️  ";  _S_INFO="ℹ️  ";  _S_ACT="⚙️  "
+                else _S_WARN="⚠️ ";  _S_INFO="ℹ️ ";  _S_ACT="⚙️ "; fi
                 _S_OK="✅  ";   _S_ERR="❌  ";  _S_TIME="⏳  "
                 N1="1️⃣"; N2="2️⃣"; N3="3️⃣"; N4="4️⃣"; N5="5️⃣"
                 N6="6️⃣"; N7="7️⃣"; N8="8️⃣"; N9="9️⃣"; N0="0️⃣"
@@ -1039,7 +1048,7 @@ space_preflight() {   # <path> <incompressible_kb> <compressible_kb> <what> [alt
             ext=$(space_free_kb "$m"); [ "$ext" -ge "$(space_need_kb "$m" "$2" "$3")" ] || continue
             _space_short
             printf "Use the external drive %s (%s MB free) instead? [y/N]: " "$m" "$((ext / 1024))"; read -r ans; printf "\n"
-            case "$ans" in y|Y) SPACE_ALT="$m"; return 0 ;; esac
+            case "$ans" in y|Y) SPACE_ALT="$m"; return 0 ;; 0) print_info "No change"; return 1 ;; esac
         done ;;
     esac
     case "$alts" in *" tmp "*)
@@ -1047,7 +1056,7 @@ space_preflight() {   # <path> <incompressible_kb> <compressible_kb> <what> [alt
         if [ "$tfree" -ge $((tneed + ${SPACE_TMP_RESERVE_KB:-16384})) ]; then
             _space_short
             printf "Run it from RAM (/tmp) for this session instead? [y/N]: "; read -r ans; printf "\n"
-            case "$ans" in y|Y) SPACE_ALT=tmp; return 0 ;; esac
+            case "$ans" in y|Y) SPACE_ALT=tmp; return 0 ;; 0) print_info "No change"; return 1 ;; esac
         fi ;;
     esac
     fail_report "Not enough free space for $what, so nothing was changed" "" \
@@ -1800,7 +1809,7 @@ check_self_update() {
         read -r ans
         printf "\n"
         case "$ans" in
-            n|N) print_info "Skipping the change log and update — available in the Toolkit Management menu"; sleep 2 ;;
+            n|N|0) print_info "Skipping the change log and update — available in the Toolkit Management menu"; sleep 2 ;;
             *)   CL_EXIT_LABEL="Skip"; show_changelog "$@"; CL_EXIT_LABEL="" ;;
         esac
     else
@@ -2488,6 +2497,17 @@ hwnet_bridge() {                        # -> primary LAN bridge (br-lan, else fi
     for _p in /sys/class/net/br-*; do [ -e "$_p" ] && { echo "${_p##*/}"; return; }; done
 }
 hwnet_conduit() { ip -o link show "$1" 2>/dev/null | sed -n 's/^[0-9]*: [^@]*@\([^:]*\):.*/\1/p' | head -1; }
+# The WAN interfaces as their Role reads: GL's primary "wan" is WAN, its "secondwan" (a second WAN - the Flint 4's
+# WAN/LAN1, or a LAN port switched to WAN) is WAN2; plain OpenWrt's wan2 / wan3 likewise. "<role> <uci-interface>"
+hwnet_wan_ifaces() { printf '%s\n' "WAN wan" "WAN2 secondwan" "WAN2 wan2" "WAN3 wan3"; }
+hwnet_if_dev() { local d; d=$(uci -q get "network.$1.device"); [ -n "$d" ] || d=$(uci -q get "network.$1.ifname"); printf '%s' "${d%% *}"; }
+hwnet_wan_role() {   # <netdev> -> WAN / WAN2 / WAN3 when a WAN interface runs on it (or on its VLAN), else nothing
+    local r i d
+    hwnet_wan_ifaces | while read -r r i; do d=$(hwnet_if_dev "$i"); [ -n "$d" ] || continue
+        case "$d" in "$1"|"$1".*) echo "$r"; break ;; esac
+        case "$1" in "$d"|"${d%%.*}") echo "$r"; break ;; esac
+    done | head -1
+}
 hwnet_lan_vlandev() {                   # main_if -> the VLAN sub-netdev whose MAC == bridge MAC
     _mif="$1"; _bm=$(hwnet_mac "$(hwnet_bridge)"); [ -z "$_bm" ] && return 1
     for _p in /sys/class/net/"$_mif".*; do [ -e "$_p" ] || continue
@@ -2543,6 +2563,7 @@ hwnet_collect() {
                      else grp="direct"; hwnet_grp_meta direct "Direct SoC" ""; fi ;;
                 *)   rs="nd:$prt"; mapsto="$prt"; grp="direct"; hwnet_grp_meta direct "Direct SoC" "" ;;
             esac
+            [ "$role" = WAN ] && { _wr=$(hwnet_wan_role "$mapsto"); [ -n "$_wr" ] && role=$_wr; }
             printf '%s\t%s\t%s\t%s\t%s\n' "$grp" "$silk" "$role" "$rs" "$mapsto" >> "$NT"
         done
     elif [ -n "$(swconfig list 2>/dev/null)" ]; then
@@ -2551,14 +2572,14 @@ hwnet_collect() {
         # inter-switch trunks that aren't physical ports).
         SRC="network config"
         # WAN: each wan* interface's device, when it's a real netdev port.
-        for _wi in wan wan2 wan3; do
+        hwnet_wan_ifaces > "$NT.w"
+        while read -r _wl _wi; do
             _wd=$(uci -q get "network.$_wi.device"); [ -z "$_wd" ] && continue
             case "$_wd" in br-*|@*) continue ;; esac
             [ -e "/sys/class/net/$_wd" ] || continue
             hwnet_grp_meta wan "WAN" ""
-            _wl=WAN; [ "$_wi" != wan ] && _wl=$(printf '%s' "$_wi" | tr a-z A-Z)
-            printf 'wan\t%s\tWAN\tnd:%s\t%s\n' "$_wl" "$_wd" "$_wd" >> "$NT"
-        done
+            printf 'wan\t%s\t%s\tnd:%s\t%s\n' "$_wl" "$_wl" "$_wd" "$_wd" >> "$NT"
+        done < "$NT.w"; rm -f "$NT.w"
         # LAN: untagged port numbers in a *lan* switch_vlan are real ports; the "Nt"
         # tag is the CPU/uplink (== the switch's cpu port), excluded. The owning switch
         # is the one whose cpu port matches that tag.
@@ -2587,8 +2608,8 @@ hwnet_collect() {
         hwnet_grp_meta soc "SoC ports" ""
         bwan=$(jsonfilter -e '@.network.wan.device' -i /etc/board.json </dev/null 2>/dev/null)
         blan=$(jsonfilter -e '@.network.lan.device' -i /etc/board.json </dev/null 2>/dev/null)
-        [ -z "$bwan" ] && bwan=$(uci -q get network.wan.device)
-        [ -z "$bwan" ] && bwan=$(uci -q get network.wan.ifname)
+        bwan="$bwan $(uci -q get network.wan.device) $(uci -q get network.wan.ifname) $(hwnet_if_dev secondwan)"
+        for _w in $bwan; do case "$_w" in *.*) bwan="$bwan ${_w%%.*}" ;; esac; done   # a VLAN WAN (eth1.2) -> its port (eth1)
         [ -z "$blan" ] && blan=$(uci -q get network.lan.device)
         blan="$blan $(ls "/sys/class/net/$(hwnet_bridge)/brif/" 2>/dev/null | tr '\n' ' ')"
         _cand=""
@@ -2596,13 +2617,19 @@ hwnet_collect() {
             case "$_n" in lo|br-*|wlan*|wg*|ovpn*|apcli*|ra|rai|rax|ra[0-9]*|rai[0-9]*|rax[0-9]*|*.*|ifb*|tailscale*|teql*|wds*|mesh*|sit*|ip6*|gre*) continue ;; esac
             [ "$(cat "$_p/type" 2>/dev/null)" = 1 ] || continue
             [ -e "$_p/carrier" ] || continue
+            # a USB network device (a tethered phone, a USB adapter) isn't a port on the router - it gets its own
+            # line under the table (hwnet_addr_rows)
+            case "$(readlink -f "$_p/device" 2>/dev/null)" in */usb[0-9]*/*) continue ;; esac
             _cand="$_cand $_n"
         done
         _haslw=0; for _n in $_cand; do case "$_n" in lan[0-9]*|wan|wan[0-9]*) _haslw=1 ;; esac; done
         for _n in $_cand; do
-            [ "$_haslw" = 1 ] && case "$_n" in eth[0-9]*) continue ;; esac
+            # with DSA ports (lanN/wan) present, hide the CPU's link to the switch (the conduit, which carries a dsa/
+            # folder) - but never a WAN and never another ethN: on a Flint 2 eth1 IS the WAN port
+            [ "$_haslw" = 1 ] && [ -e "/sys/class/net/$_n/dsa" ] && case " $bwan " in *" $_n "*) ;; *) continue ;; esac
             case " $bwan " in
-                *" $_n "*) silk=WAN; role=WAN ;;
+                *" $_n "*) role=$(hwnet_wan_role "$_n"); : "${role:=WAN}"
+                           case "$_n" in lan[0-9]*) silk=$(printf '%s' "$_n" | tr a-z A-Z) ;; *) silk=$role ;; esac ;;
                 *) case " $blan " in
                     *" $_n "*) case "$_n" in lan[0-9]*) silk=$(printf '%s' "$_n" | tr a-z A-Z) ;; *) silk=LAN ;; esac; role=LAN ;;
                     *) case "$_n" in
@@ -2614,6 +2641,46 @@ hwnet_collect() {
             esac
             printf 'soc\t%s\t%s\tnd:%s\t%s\n' "$silk" "$role" "$_n" "$_n" >> "$NT"
         done
+    fi
+}
+# The lines under the port table, for the menus and the page alike: "<label>|<value>" - one per WAN that is set up
+# (WAN, WAN2, ...: its address, or "-"), Tethering when a phone / USB adapter is plugged in, then the LAN bridge.
+# With more than one internet connection listed, the one carrying the default route says "active".
+hwnet_addr_rows() {
+    local def r i d ip n=0 rows="" st
+    def=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
+    hwnet_wan_ifaces > "${TMPDIR:-/tmp}/.hwaddr.$$"
+    while read -r r i; do d=$(hwnet_if_dev "$i"); [ -n "$d" ] && [ -e "/sys/class/net/$d" ] || continue
+        case " $rows " in *"|$d|"*) continue ;; esac        # wan2 and secondwan naming the same device: list it once
+        ip=$(ip -4 -o addr show "$d" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+        rows="$rows
+$r address|$d|${ip:--}"; n=$((n+1))
+    done < "${TMPDIR:-/tmp}/.hwaddr.$$"
+    rm -f "${TMPDIR:-/tmp}/.hwaddr.$$"
+    # the WAN line(s) normally come from the routing table even when uci names no WAN device (a few GL models)
+    if [ "$n" = 0 ] && [ -n "$def" ]; then
+        ip=$(ip -4 -o addr show "$def" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+        [ -n "$ip" ] && { rows="
+WAN address|$def|$ip"; n=1; }
+    fi
+    d=$(hwnet_if_dev tethering)
+    if [ -n "$d" ] && [ -e "/sys/class/net/$d" ]; then
+        st=DOWN; [ "$(cat "/sys/class/net/$d/carrier" 2>/dev/null)" = 1 ] && st=UP
+        rows="$rows
+Tethering|$d|"; n=$((n+1)); TETHER_ST=$st
+    fi
+    printf '%s\n' "$rows" | while IFS='|' read -r r d ip; do [ -n "$r" ] || continue
+        a=""; [ "$n" -gt 1 ] && [ "$d" = "$def" ] && a=", active"
+        case "$r" in
+            Tethering) printf '%s|%s (%s, %s%s)\n' "$r" "$d" "$(case "$(readlink -f "/sys/class/net/$d/device" 2>/dev/null)" in */usb[0-9]*/*) echo USB ;; *) echo cable ;; esac)" "$TETHER_ST" "$a" ;;
+            *) if [ "$ip" = - ]; then printf '%s|-\n' "$r"; else printf '%s|%s (%s%s)\n' "$r" "$ip" "$d" "$a"; fi ;;
+        esac
+    done
+    local br bip mem; br=$(hwnet_bridge)
+    if [ -n "$br" ]; then
+        bip=$(ip -4 -o addr show "$br" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
+        mem=$(ls "/sys/class/net/$br/brif/" 2>/dev/null | grep -E '^(eth|lan|wan)' | tr '\n' ' ' | sed 's/ *$//')
+        printf 'LAN bridge|%s%s%s\n' "$br" "${bip:+ ($bip)}" "${mem:+ = $mem}"
     fi
 }
 hwnet_render() {
@@ -2636,15 +2703,12 @@ hwnet_render() {
         done
     done < "$NG"
     printf '\n'
-    _wandev=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
-    _wanip=$(ip -4 -o addr show "$_wandev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
-    [ -n "$_wanip" ] && printf ' %bWAN address:%b %s%s\n' "$CYAN" "$RESET" "$_wanip" "${_wandev:+ ($_wandev)}"
-    _br=$(hwnet_bridge)
-    if [ -n "$_br" ]; then
-        _ip=$(ip -4 -o addr show "$_br" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
-        _mem=$(ls "/sys/class/net/$_br/brif/" 2>/dev/null | grep -E '^(eth|lan|wan)' | tr '\n' ' ' | sed 's/ *$//')
-        printf ' %bLAN bridge:%b  %s%s%s\n' "$CYAN" "$RESET" "$_br" "${_ip:+ ($_ip)}" "${_mem:+ = $_mem}"
-    fi
+    # the address lines, values in one column (the widest label + its colon + a space)
+    hwnet_addr_rows > "$NT.a"
+    _aw=$(awk -F'|' '{ if (length($1) > w) w = length($1) } END { print w + 2 }' "$NT.a")
+    while IFS='|' read -r _al _av; do
+        printf ' %b%-*s%b%s\n' "$CYAN" "$_aw" "$_al:" "$RESET" "$_av"
+    done < "$NT.a"; rm -f "$NT.a"
     printf '\n %bLegend:%b %bUP%b link   %bDOWN%b no-link\n' "$BOLD" "$RESET" "$GREEN" "$RESET" "$GREY" "$RESET"
     rm -f "$NT" "$NG"
 }
@@ -2682,6 +2746,7 @@ HELPEOF
    Every physical port, grouped by the chip it hangs off.
 
      Role     WAN or LAN - a WAN/LAN port shows its current job.
+              WAN2 = the second WAN (GL's "secondwan").
      Link     the speed it negotiated ( - when down ).
      Maps to  the Linux interface it appears as (as in ifconfig).
               Switch ports share one VLAN netdev; DSA ports each get
@@ -2689,6 +2754,10 @@ HELPEOF
      uplink   the switch-to-SoC link and its speed - the pipe OUT of
               the switch, not a per-port limit. Ports on the same chip
               switch among themselves at full speed.
+     WAN address  one line per WAN; with more than one internet
+              connection, "active" marks the one in use.
+     Tethering    a phone or USB adapter sharing its connection - not
+              a port on the router, so it isn't in the table.
 {cli}
 
  On the Hardware Info screen: [P]/[N] or [1-4] change pages, [0] exits.
@@ -2956,7 +3025,7 @@ hw_wireless_rows() {
 # exactly as hwnet_render draws them for the menus: groups (a switch or the SoC) with their ports, then the
 # WAN address and the LAN bridge.
 hwnet_json() {
-    local grp glabel uplink uspeed g silk role rs mapsto st state mb link first gfirst _wandev _wanip _br _ip _mem
+    local grp glabel uplink uspeed g silk role rs mapsto st state mb link first gfirst _al _av
     hwnet_collect </dev/null
     printf '{"groups":['; gfirst=1
     while IFS="$TAB" read -r grp glabel uplink uspeed; do
@@ -2973,12 +3042,13 @@ hwnet_json() {
         done < "$NT.p"
         printf ']}'
     done < "$NG"
-    _wandev=$(ip -4 route show default 2>/dev/null | awk '{for(i=1;i<=NF;i++)if($i=="dev"){print $(i+1);exit}}')
-    _wanip=$(ip -4 -o addr show "$_wandev" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
-    _br=$(hwnet_bridge </dev/null)
-    [ -n "$_br" ] && { _ip=$(ip -4 -o addr show "$_br" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1)
-                      _mem=$(ls "/sys/class/net/$_br/brif/" 2>/dev/null | grep -E '^(eth|lan|wan)' | tr '\n' ' ' | sed 's/ *$//'); }
-    printf '],"wan":%s,"lan":%s}' "$(_json_str "${_wanip:+$_wanip${_wandev:+ ($_wandev)}}")" "$(_json_str "${_br:+$_br${_ip:+ ($_ip)}${_mem:+ = $_mem}}")"
+    printf '],"addresses":['; first=1
+    hwnet_addr_rows </dev/null > "$NT.a"
+    while IFS='|' read -r _al _av; do
+        [ "$first" = 1 ] || printf ','; first=0
+        printf '{"label":%s,"value":%s}' "$(_json_str "$_al")" "$(_json_str "$_av")"
+    done < "$NT.a"; rm -f "$NT.a"
+    printf ']}'
     rm -f "$NT" "$NG" "$NT.p"
 }
 
@@ -3349,7 +3419,7 @@ Status
   Version  → the AdGuardHome build installed now
   Update   → UP TO DATE, AVAILABLE (with the newer version), or UNKNOWN when the
              router can't reach AdGuard's update server. Checked once per session.
-• Persistence → ENABLED, or DISABLED - yellow when a firmware update would stop
+• Persistence → ENABLED, or DISABLED - yellow when a firmware update will stop
                 AdGuardHome (see Channel below)
 
 Updates via UI
@@ -3553,10 +3623,21 @@ _agh_fw_risk() {
 # yellow DISABLED when a firmware update would stop AdGuardHome.  -> value|tone|note
 _agh_persist_row() {
     if _agh_updates_persist; then echo "ENABLED|green|"
-    elif _agh_fw_risk; then echo "DISABLED|yellow|firmware update would stop AdGuardHome"
+    elif _agh_fw_risk; then echo "DISABLED|yellow|"
     else echo "DISABLED|grey|"; fi
 }
 _agh_persist_disp() { _row_value "Persistence|$(_agh_persist_row)"; }
+# config.yaml missing: what the red Config row means and the two ways back (menu: its items; page: its tab / button)
+_agh_config_notice() {
+    [ "${agh_config_missing:-0}" = 1 ] || return 0
+    if [ "$1" = web ]; then printf '%s\n' "error|AdGuardHome Config is missing: the Backup & Recovery tab restores a backup, or Reset to\nFactory Settings starts over"
+    else printf '%s\n' "error|AdGuardHome Config is missing: [4] Backup & Recovery Suite restores a backup, or [CL] Reset to\nFactory Settings starts over"; fi
+}
+# ...and what that yellow DISABLED means, as the screen's notice (menu + page)
+_agh_persist_notice() {
+    _agh_updates_persist && return 0
+    _agh_fw_risk && printf 'warning|%s' "AdGuardHome Persistence is off: a firmware update will restore GL's v$(_agh_rom_ver), which\ncan't read this version's settings, so AdGuardHome won't start"
+}
 # A named answer: the web page answers its questions up front (AGH_ANS_* in the job's environment), so a
 # flow reads the given answer - echoed like a typed one - and only asks the terminal when there is none.
 read_ans() {   # <VAR> -> REPLY
@@ -3571,7 +3652,7 @@ _agh_fw_prompt() {   # after a build change: offer persistence only when the ris
     print_warning "After a firmware update, AdGuardHome won't start: the firmware puts back\nGL.iNet's v$(_agh_rom_ver), which can't read this config.yaml"
     printf "Keep this version across firmware updates? [Y/n]: "; read_ans AGH_ANS_KEEP; c=$REPLY; printf "\n"
     case "$c" in
-        n|N) print_info "Choose Enable Persistence in Updates & Channel before any firmware update" ;;
+        n|N|0) print_info "Choose Enable Persistence in Updates & Channel before any firmware update" ;;
         *)   _agh_persist_set on; _persist_msg on "AdGuardHome updates" ;;
     esac
 }
@@ -3693,7 +3774,7 @@ manage_agh_ui_updates() {
     while true; do
         clear
         print_centered_header "AdGuardHome Updates & Channel"
-
+        _cli_notice "$(_agh_persist_notice)"
         _updrow() { printf "   %-16s%b\n" "$1" "$2"; }   # longest label ("Updates via UI:") + 1
         printf " %b\n" "${CYAN}STATUS${RESET}"
         local _lw _lc _ld="" _cc _cver _chan
@@ -3831,7 +3912,7 @@ Strong recommendation
 Enable zram swap first (Advanced Settings → Zram Swap → Install and Enable).
 Zram gives fast compressed swap in RAM, greatly reduces memory pressure,
 and is safe for most GL.iNet 512MB devices. The Lists Manager also offers to
-enable zram automatically when a selection would run memory high.
+enable zram automatically when a selection will run memory high.
 
 Only remove the limit after zram is active.
 
@@ -3992,6 +4073,8 @@ manage_agh_storage() {
             return
         fi
         
+        # no filter space limit on this firmware: said once, at the top (title, notice, STATUS, Back)
+        [ "$(_agh_fl_state)" = none ] && _cli_notice "$(_agh_fl_notice)"
         # the rows the page shows too (agh_storage_rows); a for loop, not a pipe, so nothing reads them as stdin
         printf " %b\n" "${CYAN}STATUS${RESET}"
         local _sr _srs _soifs; _srs=$(agh_storage_rows "$AGH_WORKDIR"); _soifs=$IFS; IFS='
@@ -4006,7 +4089,6 @@ manage_agh_storage() {
         local fl_state; fl_state=$(_agh_fl_state)
         printf "\n"
         if [ "$fl_state" = none ]; then
-            print_warning "GL.iNet's filter space limit doesn't apply to this model/firmware"
             printf "%s%sBack\n" "$N0" "$NSEP"
             printf "%s Help\n" "$NQ"
             printf "\nChoose [0/?]: "
@@ -4148,7 +4230,7 @@ Staying safe on small boxes
 ────────────────────────────────────────────────────────────────────────
 Before applying a heavy set, the manager can:
 
-  • offer to enable zram swap (compressed RAM headroom) when memory would run
+  • offer to enable zram swap (compressed RAM headroom) when memory will run
     high on a low-RAM router; and
   • warn - on models with a filter-storage cap - when the selection won't fit,
     offering to remove the cap (also under Advanced Settings).
@@ -4431,27 +4513,34 @@ EOF
     elif [ "$filled" -gt 14 ]; then status="  ${YELLOW}(high)${RESET}"; fi
     swaptxt=""; [ "$st" -gt 0 ] && swaptxt=" + ${st}MB zram"
     printf "%b\n" " ${CYAN}Memory Impact${RESET}   [${bar}]   $(agh_fmt_rules "$active") rules · ${mt}MB RAM${swaptxt}${status}"
-    # Only lists enabled NOW can be downloading or failed - a ticked-but-unconfirmed list is just
-    # a projection (its "~" Size already says so).
+}
+# The Lists Manager's notices (menu + page), at the top: AdGuardHome not running, and what the meter's counts mean while
+# lists download or fail. Only lists enabled NOW can be downloading or failed - a ticked-but-unconfirmed list is just
+# a projection (its "~" Size already says so).
+_agh_lists_state_notice() {   # <agh_run_state>
+    case "$1" in
+        down) printf '%s\n' "warning|AdGuardHome is stopped: list changes take effect once it starts" ;;
+        off)  printf '%s\n' "warning|AdGuardHome is disabled: list changes take effect once it's enabled" ;;
+    esac; return 0
+}
+_agh_meter_notices() {   # <lists data> <AdGuardHome up 1/0>
+    local dl fl fs _why
     read -r dl fl fs <<EOF
 $(awk -F'|' '$5==1 && $6==1 { if ($11==1) d++; else if ($11==2) f++; else if ($11==3) { f++; s++ } }
              END { print d+0, f+0, s+0 }' "$1" 2>/dev/null)
 EOF
-    if [ "${dl:-0}" -gt 0 ] && [ "${2:-1}" = 1 ]; then
-        if [ "$dl" = 1 ]; then print_info "1 list downloading - rule count estimated until finished"
-        else print_info "$dl lists downloading - rule count estimated until finished"; fi
-    fi
+    [ "${dl:-0}" -gt 0 ] && [ "${2:-1}" = 1 ] && printf '%s\n' "info|Filter lists: $dl downloading - rule counts are estimates until they finish"
     if [ "${fl:-0}" -gt 0 ]; then
         _why=""; [ "$fs" = "$fl" ] && _why=" (storage full)"
-        if [ "$fl" = 1 ]; then print_error "1 list failed to download${_why} - rules not loaded"
-        else print_error "$fl lists failed to download${_why} - rules not loaded"; fi
-    fi
+        printf '%s\n' "error|Filter lists: $fl failed to download$_why - $([ "$fl" = 1 ] && echo "its rules aren't" || echo "their rules aren't") loaded"
+    fi; return 0
 }
 
 # Prevention guard rails before applying.  $1 = LISTS_DATA.  Reuses the System
 # Tweaks zram + filter-limit actions so behavior never diverges.
 agh_lists_guard_rails() {
     local data="$1" active mt st cap filled workdir free_kb add_kb
+    _agh_lm_cancel=0      # global: 0 answered to a question here = cancel the list changes (Y/N carry on)
     _agh_storage_over=0   # global: set if the capped partition stays too small -> verify downloads after apply
     active=$(agh_proj_active_rules "$data")
     read -r mt st cap <<EOF
@@ -4469,6 +4558,7 @@ EOF
         fi
         print_info "zram swap adds compressed headroom and is strongly recommended before loading them"
         printf "Enable zram swap now? [Y/n]: "; if [ -n "${AGH_LM_TARGETS:-}" ]; then _zr=n; echo n; else read -r _zr; fi
+        [ "$_zr" = 0 ] && { _agh_lm_cancel=1; return 0; }
         if [ "$_zr" != "n" ] && [ "$_zr" != "N" ]; then
             printf "\n"
             zram_install_enable
@@ -4493,6 +4583,7 @@ EOF
             print_warning "The selected lists (~$((proj_kb/1024))MB) exceed the ~$((cap_kb/1024))MB filter storage limit"
             print_info "Removing the filter space limit lets them download"
             printf "Remove the filter storage limit now? [y/N]: "; if [ -n "${AGH_LM_TARGETS:-}" ]; then _sl=n; echo n; else read -r _sl; fi
+            [ "$_sl" = 0 ] && { _agh_lm_cancel=1; return 0; }
             if [ "$_sl" = "y" ] || [ "$_sl" = "Y" ]; then
                 printf "\n"
                 agh_remove_filter_limit && _agh_storage_over=0
@@ -4647,10 +4738,8 @@ EOF
             # Not running: entry is allowed (lists are config), but say what Confirm will do. The meter
             # stays (projected from the config); the "downloading" line goes until AdGuardHome is up.
             agh_st=$(agh_run_state); agh_up=1
-            case "$agh_st" in
-                down) agh_up=0; print_warning "AdGuardHome is stopped. Changes take effect once started."; printf "\n" ;;
-                off)  agh_up=0; print_warning "AdGuardHome is disabled. Changes will take effect once enabled."; printf "\n" ;;
-            esac
+            case "$agh_st" in down|off) agh_up=0 ;; esac
+            { _agh_lists_state_notice "$agh_st"; _agh_meter_notices "$LISTS_DATA" "$agh_up"; } | _cli_notices
             agh_memory_meter "$LISTS_DATA" "$agh_up"
             printf "\n"
             printf "       %-7s %-7s %-6s %-48s %-9s %s\n" "Install" "Enable" "Type" "Name" "Size" "Planned Action"
@@ -4727,6 +4816,7 @@ EOF
                     [ -n "$crem" ]  && printf "%bRemove:%b\n%s" "$RED" "$RESET" "$crem"
 
                     agh_lists_guard_rails "$LISTS_DATA"
+                    [ "$_agh_lm_cancel" = 1 ] && { printf "\n"; print_info "No change"; sleep 1; continue; }
 
                     printf "\nProceed with list changes? [y/N]: "; read -r confirm
                     [ "$confirm" != "y" ] && [ "$confirm" != "Y" ] && continue
@@ -4737,7 +4827,9 @@ EOF
                         down) agh_label="Starting AdGuardHome" ;;
                         off)
                             printf "Enable AdGuardHome to apply these lists? [Y/n]: "; read -r confirm
-                            case "$confirm" in n|N) agh_go=0 ;; *) agh_label="Enabling AdGuardHome" ;; esac
+                            case "$confirm" in
+                                0) printf "\n"; print_info "No change"; sleep 1; continue ;;
+                                n|N) agh_go=0 ;; *) agh_label="Enabling AdGuardHome" ;; esac
                             ;;
                     esac
 
@@ -4926,7 +5018,7 @@ _agh_creds_prompt() {
         printf "\n"
         print_warning "Username cannot be blank"
         printf "Try again? [Y/n]: "; read -r u_retry; printf "\n"
-        case "$u_retry" in n|N) print_info "Operation cancelled"; return 1 ;; esac
+        case "$u_retry" in n|N|0) print_info "Operation cancelled"; return 1 ;; esac
     done
 
     # Password with confirmation; blank or mismatch offers retry/cancel
@@ -4936,7 +5028,7 @@ _agh_creds_prompt() {
             printf "\n"
             print_warning "Password cannot be blank"
             printf "Try again? [Y/n]: "; read -r p_retry; printf "\n"
-            case "$p_retry" in n|N) print_info "Operation cancelled"; return 1 ;; esac
+            case "$p_retry" in n|N|0) print_info "Operation cancelled"; return 1 ;; esac
             continue
         fi
         user_pass_conf=$(get_password "Confirm Password: ")
@@ -4946,7 +5038,7 @@ _agh_creds_prompt() {
         printf "\n"
         print_warning "Passwords do not match"
         printf "Try again? [Y/n]: "; read -r p_retry; printf "\n"
-        case "$p_retry" in n|N) print_info "Operation cancelled"; return 1 ;; esac
+        case "$p_retry" in n|N|0) print_info "Operation cancelled"; return 1 ;; esac
     done
 
     BCRYPT_HASH=$(htpasswd -n -B -b "$user_name" "$user_pass" | cut -d: -f2)
@@ -5092,7 +5184,7 @@ manage_agh_direct_access() {
         _ws_agh_direct_state
         DIRECT_STATUS="❌"; [ "$_wd_on" = 1 ] && DIRECT_STATUS="✅"
         case "$_wd_login" in unknown) PASS_STATUS="?" ;; none) PASS_STATUS="❌" ;; *) PASS_STATUS="✅" ;; esac
-
+        _cli_notice "$(agh_direct_notice)"
         printf " ${CYAN}STATUS${RESET}\n"
         local _dr _drs _doifs; _drs=$(agh_direct_rows); _doifs=$IFS; IFS='
 '
@@ -5147,6 +5239,7 @@ manage_agh_direct_access() {
                     read -r set_pass
                     printf "\n"
                     case "$set_pass" in
+                        0) print_info "No change"; press_any_key; continue ;;
                         n|N) ;;
                         *)   if ! _agh_creds_prompt || ! _agh_creds_validate; then
                                  printf "\n"
@@ -5396,7 +5489,7 @@ agh_restore_backup() {   # <ts> <cfg Y|N> <bin Y|N> <init Y|N>
         if [ "$rc_bin" = N ] && [ -n "$bv" ] && [ "$bv" = "$(_agh_rom_ver)" ] && [ "$(_agh_cur_ver)" != "$bv" ] \
            && _agh_reads_cfg "$(_agh_rom_bin)" "$bcfg"; then
             printf "Also restore GL.iNet's build (v%s) from /rom? [Y/n]: " "$bv"; read_ans AGH_ANS_ROM; c=$REPLY; printf "\n"
-            case "$c" in n|N) ;; *) use_rom=1 ;; esac
+            case "$c" in 0) print_info "No change"; return 1 ;; n|N) ;; *) use_rom=1 ;; esac
         fi
         tbin=$(_agh_bin); [ "$rc_bin" = Y ] && tbin="$(bk_dir agh)/AdGuardHome.$ts"; [ "$use_rom" = 1 ] && tbin=$(_agh_rom_bin)
         if ! _agh_reads_cfg "$tbin" "$bcfg"; then
@@ -6033,6 +6126,20 @@ _tone_color() {   # <tone> -> the colour code the menus use for it
 }
 # one "label|value|tone|note" row -> the menus' coloured value (note = a lowercase qualifier in brackets)
 # a fact's detail is part of the fact -> blue with it ("1 (184,611 rules)"); a status word's isn't
+# A status notice, "tone|text" from one shared function, at the top of what it's about (status text standard,
+# 2026-10-20): the menu prints it under its title (+ one blank line), the page as a notice box in that card or tab.
+# A "\n" in the text is the menu's wrap point; the page joins it into one line.
+_cli_notices() {   # stdin: "tone|text" lines -> each one, then ONE blank line after the group (none when there are none)
+    # a for loop, not `read` - the screens' convention (nothing reads stdin); globbing off: notices name keys like [H]
+    local _all _n _k=0 _t _x _o; _all=$(cat); _o=$IFS; set -f; IFS='
+'
+    for _n in $_all; do IFS=$_o; [ -n "$_n" ] || continue; _t="${_n%%|*}"; _x="${_n#*|}"; _k=1
+        case "$_t" in error) print_error "$_x" ;; info) print_info "$_x" ;; *) print_warning "$_x" ;; esac; done
+    IFS=$_o; set +f; [ "$_k" = 1 ] && printf "\n"; return 0
+}
+_cli_notice() { [ -n "$1" ] && printf '%s\n' "$1" | _cli_notices; return 0; }
+_ws_notice_rec() { [ -n "$1" ] && ws_notice "${1%%|*}" "${1#*|}"; return 0; }
+
 _row_value() {
     local r="$1" v t n; r=${r#*|}; v=${r%%|*}; r=${r#*|}; t=${r%%|*}; n=${r#*|}
     if [ "$t" = fact ]; then printf '%s%s%s%s' "$(_tone_color "$t")" "$v" "${n:+ ($n)}" "$RESET"
@@ -6048,8 +6155,8 @@ agh_presence() {
 # the presence warning both interfaces show when AdGuardHome can't be used
 agh_presence_msg() {
     case "$1" in
-        missing)     printf '%s' "AdGuardHome's startup script is missing - Reset to Factory Settings restores it" ;;
-        unsupported) printf '%s' "This router's firmware doesn't include AdGuardHome" ;;
+        missing)     printf '%s' "AdGuardHome's startup script is missing: Reset to Factory Settings restores it" ;;
+        unsupported) printf '%s' "AdGuardHome isn't supported: this router's firmware doesn't include it" ;;
     esac
 }
 # The AdGuardHome lifecycle word for a run state (agh_run_state) or a presence -> AGH_WORD AGH_TONE AGH_NOTE
@@ -6152,17 +6259,18 @@ _agh_unavailable_screen() {
     local ch
     while true; do
         clear; print_centered_header "AdGuardHome Control Center"
+        # the reason is the screen's notice (title, notice, STATUS, menu); the row is just the status word
+        if [ "$AGH_DISABLED" = 2 ]; then _cli_notice "error|$(agh_presence_msg missing)"
+        else _cli_notice "warning|$(agh_presence_msg unsupported)"; fi
         printf " %b\n" "${CYAN}STATUS${RESET}"
         if [ "$AGH_DISABLED" = 2 ]; then
-            printf "   AdGuardHome:  %b\n\n" "$(_row_value "AdGuardHome|$(agh_life missing; echo "$AGH_WORD|$AGH_TONE|$AGH_NOTE")")"
-            print_warning "$(agh_presence_msg missing)"
+            printf "   AdGuardHome:  %b\n\n" "$(_row_value "AdGuardHome|$(agh_life missing; echo "$AGH_WORD|$AGH_TONE|")")"
             agh_action_text factory_reset; printf "%s%s%s\n" "$N1" "$NSEP" "$A_LABEL"
             printf "%s%sMain Menu\n" "$N0" "$NSEP"
             printf "%s Help\n" "$NQ"
             printf "\nChoose [1/0/?]: "
         else
-            printf "   AdGuardHome:  %b\n\n" "$(_row_value "AdGuardHome|$(agh_life unsupported; echo "$AGH_WORD|$AGH_TONE|$AGH_NOTE")")"
-            print_warning "$(agh_presence_msg unsupported)"
+            printf "   AdGuardHome:  %b\n\n" "$(_row_value "AdGuardHome|$(agh_life unsupported; echo "$AGH_WORD|$AGH_TONE|")")"
             printf "%s%sMain Menu\n" "$N0" "$NSEP"
             printf "%s Help\n" "$NQ"
             printf "\nChoose [0/?]: "
@@ -6188,6 +6296,7 @@ agh_control_center() {
         get_agh_stats
         clear
         print_centered_header "AdGuardHome Control Center"
+        { _agh_config_notice cli; _agh_persist_notice; printf '\n'; } | _cli_notices
         # ONE vertical STATUS block of "Label:  VALUE" rows - the app's STATUS pattern (Toolkit
         # Management, the lifecycle screens), one fact per row. Rows with a state or control get a
         # coloured CAPS word; plain facts (version, counts, sizes, dates) are blue; the URL is a
@@ -6525,6 +6634,14 @@ Persistence" (a setpoint or a static speed must be set first) and a small boot
 service re-applies both on the new firmware's first boot, reporting the result
 on the next launch. If the new panel changed so the patch no longer fits, it is
 left stock (never corrupted) and reported as unable to restore.
+
+Values explained
+────────────────
+  Control Mode = MANUAL (static 75%): GL's fan service is off and the fan holds
+                 that speed - kept across reboots
+  Control Mode = DYNAMIC (system): GL's own fan control sets the speed
+  Persistence = ENABLED: the fan settings are kept across firmware updates
+  Persistence = DISABLED: kept across reboots; a firmware update resets them
 HELPEOF
 }
 
@@ -6773,13 +6890,14 @@ manage_fan_settings() {
 
         printf '\033[H'
         print_centered_header "Fan Management"
-        
+        # fanless: said once at the top (title, notice, STATUS, Back); \033[K - this screen redraws in place
+        [ "$has_fan" = "false" ] && { print_warning "$(_fan_hw_notice | cut -d'|' -f2-)\033[K"; printf "\033[K\n"; }
         printf " %b\n" "${CYAN}STATUS${RESET}"
         if [ "$has_fan" = "false" ]; then
-            printf "   Hardware:          %bNOT DETECTED%b (fanless unit)\033[K\n" "${GREY}" "${RESET}"
+            printf "   Hardware:          %bNOT DETECTED%b\033[K\n" "${GREY}" "${RESET}"
         else
             _fsp=$(_fan_static_pct)
-            [ "$c_mode" = MANUAL ] && [ -n "$_fsp" ] && c_mode_note="(static ${_fsp}%, kept across reboots)"
+            [ "$c_mode" = MANUAL ] && [ -n "$_fsp" ] && c_mode_note="(static ${_fsp}%)"   # kept across reboots: the help says so
             [ "$c_mode" = MANUAL ] && [ -z "$_fsp" ] && c_mode_note="(static, this boot only)"
             printf "   Control Mode:      %b%s%b %s\033[K\n" "$c_mode_color" "$c_mode" "${RESET}" "$c_mode_note"
             printf "   Current Speed:     %b%d%% (%s RPM)%b\033[K\n" "$BLUE" "$c_speed_pct" "$c_fan_rpm" "$RESET"
@@ -6799,15 +6917,14 @@ manage_fan_settings() {
             printf "   Max Setpoint:      %b%s°C%b\033[K\n" "$BLUE" "$ui_max" "$RESET"
         fi
         if [ "$has_fan" = "true" ]; then
-            # the same meaning the Bandwidth Limiter spells out: reboots are always fine, this is about firmware
-            if glpersist_is_on fan; then fan_per="${GREEN}ENABLED${RESET}  (survives firmware upgrades)"
-            else fan_per="${GREY}DISABLED${RESET}  (reboot-safe; lost on firmware upgrade)"; fi
+            # a plain status word like every other Persistence row - what persistence means is the help's job
+            if glpersist_is_on fan; then fan_per="${GREEN}ENABLED${RESET}"
+            else fan_per="${GREY}DISABLED${RESET}"; fi
             printf "   Persistence:       %b\033[K\n" "$fan_per"
         fi
         printf "\033[K\n"
 
         if [ "$has_fan" = "false" ]; then
-            print_warning "Fan settings are disabled on fanless hardware\033[K"
             printf "%s%sBack\033[K\n" "$N0" "$NSEP"
             printf "\nChoose [0/?]: \033[K"
         else
@@ -7596,6 +7713,13 @@ netlimit_migrate_guest() {
 offload_platform() { [ -f /etc/config/ecm ] && { echo qualcomm-ecm; return; }; [ -f /etc/config/mtkhnat ] || [ -d /sys/kernel/debug/hnat ] && { echo mediatek-hnat; return; }; nft list ruleset 2>/dev/null | grep -q 'flowtable' && { echo flowtable; return; }; echo unknown; }
 # on|off, mechanism-aware: the toggle key differs by platform -
 # ecm.global.enabled (Qualcomm), mtkhnat.global.enable (MediaTek), else the firewall flowtable.
+# HW acceleration on while a limit exists: what that yellow ENABLED means, as the screen's notice (menu + page) - the
+# menu names its key, the page its button
+_nl_hw_notice() {
+    [ "$(offload_state)" = on ] && netlimit_any_limited || return 0
+    if [ "$1" = web ]; then printf 'warning|%s' "HW Acceleration is on: it bypasses every limit - Disable HW Acceleration to enforce them"
+    else printf 'warning|%s' "HW Acceleration is on: it bypasses every limit - [H] to enforce them"; fi
+}
 offload_state() {
     if [ -f /etc/config/ecm ]; then [ "$(uci -q get ecm.global.enabled)" = "1" ] && echo on || echo off; return; fi
     if [ -f /etc/config/mtkhnat ]; then [ "$(uci -q get mtkhnat.global.enable)" = "1" ] && echo on || echo off; return; fi
@@ -7699,7 +7823,7 @@ _netlimit_offload_ok() {
     local a; read -r a
     # The blank line before the apply gear is added by the caller (so it also appears when this
     # confirm is skipped - i.e. HW accel already off); here we only space the cancel message.
-    case "$a" in n|N) printf '\n'; print_info "No change - HW acceleration left on"; sleep 1; return 1 ;; *) return 0 ;; esac
+    case "$a" in n|N|0) printf '\n'; print_info "No change - HW acceleration left on"; sleep 1; return 1 ;; *) return 0 ;; esac
 }
 
 show_netlimit_help() {
@@ -7773,6 +7897,14 @@ Per-network options
     switched-off network offers only "Bring interface(s) UP", since limits and router access don't
     apply until it's up. The LAN and VPN tunnels are never toggled here. Turning bands on/off
     briefly re-applies Wi-Fi, so other wireless may drop for a moment.
+
+  Values explained
+  ────────────────
+  * HW Acceleration = ENABLED (yellow, with a notice): a limit exists, so the limits are
+    BYPASSED - [H] turns acceleration off and enforces them.
+  * Persist = YES: the limit is kept across firmware updates; NO: kept across reboots only.
+  * Router = REACHABLE / PARTIAL / BLOCKED: all / some / none of the router's own ports
+    (the legend under the table).
 HELPEOF
 }
 
@@ -7915,8 +8047,8 @@ EOF
         # Persist is a LIMIT attribute (does the limit survive a firmware upgrade) - meaningless and
         # confusing on a switched-off network, so suppress it there; the OFF note covers reboot state.
         if [ "$ifstate" != down ]; then
-            if [ "$ps" = 1 ]; then printf " %bPersistence:%b %s   (survives firmware upgrades)\n" "$CYAN" "$RESET" "$(_lc_value ENABLED)"
-            else printf " %bPersistence:%b %s  (reboot-safe; lost on firmware upgrade)\n" "$CYAN" "$RESET" "$(_lc_value DISABLED)"; fi
+            if [ "$ps" = 1 ]; then printf " %bPersistence:%b %s\n" "$CYAN" "$RESET" "$(_lc_value ENABLED)"
+            else printf " %bPersistence:%b %s\n" "$CYAN" "$RESET" "$(_lc_value DISABLED)"; fi
         fi
         printf "\n"
         if [ "$ifstate" = down ]; then
@@ -8104,6 +8236,7 @@ manage_netlimit() {
     while true; do
         clear
         print_centered_header "Network Bandwidth Limiter"
+        _cli_notice "$(_nl_hw_notice cli)"
         # HW acceleration is a router-wide GATE for shaping, auto-managed by netlimit_offload_sync
         # (offload follows limits). Report it HEALTH-aware, not by literal on/off: green = nominal
         # (nothing bypassed), yellow ONLY when it is ENABLED while a limit exists (that limit is then
@@ -8113,7 +8246,7 @@ manage_netlimit() {
         if [ "$hw" != on ]; then
             printf " %bHW Acceleration:%b %bDISABLED%b\n" "$CYAN" "$RESET" "$GREEN" "$RESET"
         elif netlimit_any_limited; then
-            printf " %bHW Acceleration:%b %bENABLED%b  limits are BYPASSED - [H] to enforce them\n" "$CYAN" "$RESET" "$YELLOW" "$RESET"
+            printf " %bHW Acceleration:%b %bENABLED%b\n" "$CYAN" "$RESET" "$YELLOW" "$RESET"
         else
             printf " %bHW Acceleration:%b %bENABLED%b\n" "$CYAN" "$RESET" "$GREEN" "$RESET"
         fi
@@ -8558,9 +8691,9 @@ The STATUS lines
   - ENABLED      - the overlay is injected and the background reader is live, so the
                    panel's indicator stays current when you flip the switch.
   - SERVICE DOWN - the overlay is on but the background reader died, so the panel
-                   would go stale. Use Reinstall to recover.
+                   will go stale. Use Reinstall to recover.
 • Persistence: whether the indicator is re-applied automatically after a firmware
-  update (ENABLED) or would need a manual re-enable (DISABLED).
+  update (ENABLED) or will need a manual re-enable (DISABLED).
 
 How it works
 ────────────
@@ -8616,10 +8749,10 @@ manage_switch_indicator() {
         if _switch_supported; then sup="${GREEN}DETECTED${RESET} (gpio-$(_switch_gpio))"; else sup="${GREY}NOT DETECTED${RESET}"; fi
 
         if ! _switch_supported; then
+            _cli_notice "$(_switch_hw_notice)"   # said once, at the top (title, notice, STATUS, Back)
             printf " %b\n" "${CYAN}STATUS${RESET}"
             printf "   %-18s %b\n" "Hardware:" "$sup"
             printf "\n"
-            print_warning "This model has no physical toggle switch, so a position indicator can't be shown"
             printf "%s%sBack\n" "$N0" "$NSEP"
             printf "%s Help\n" "$NQ"
             printf "\nChoose [0/?]: "
@@ -9586,7 +9719,7 @@ _ttyd_enable_flow() {
     else
         print_info "HTTP is simplest. HTTPS works too but needs a one-time browser certificate acceptance."
         printf "Use HTTPS? [y/N]: "; read -r ans; printf "\n"
-        case "$ans" in y|Y) proto=https ;; *) proto=http ;; esac
+        case "$ans" in y|Y) proto=https ;; 0) print_info "No change"; return ;; *) proto=http ;; esac
     fi
     if [ "$proto" = https ] && { [ ! -s /etc/ttyd.crt ] || [ ! -s /etc/ttyd.key ]; }; then
         if require_cmd openssl openssl-util "OpenSSL command-line tools" \
@@ -9646,8 +9779,10 @@ manage_web_terminal() {
     while true; do
         clear
         print_centered_header "Web-UI Terminal Interface"
-        if [ -z "$(glwebui_appjs)" ]; then
-            print_error "The admin-panel bundle was not found; can't manage the Web Terminal"
+        if [ -z "$(glwebui_appjs)" ]; then   # unsupported: title, notice, STATUS, Back - the words the page shows
+            _cli_notice "error|Web Terminal can't be managed: the Admin Panel bundle wasn't found"
+            printf " %b\n" "${CYAN}STATUS${RESET}"
+            printf "   Web Terminal:  %bUNKNOWN%b\n" "$RED" "$RESET"
             press_any_key; return
         fi
 
@@ -9934,8 +10069,8 @@ _pm_feat_rows() {
     # AdGuardHome: only an updated build (an overlay copy) - GL's own build comes back with the firmware
     if [ -f "${AGH_INIT:-/etc/init.d/adguardhome}" ] && { _agh_updates_persist 2>/dev/null || [ -f "$(_agh_upper 2>/dev/null)$(_agh_bin 2>/dev/null)" ]; }; then
         _agh_updates_persist 2>/dev/null && p=1 || p=0
-        if _agh_fw_risk 2>/dev/null; then d="v$(_agh_cur_ver) would be replaced by the firmware build, which can't read its config"
-        else d="v$(_agh_cur_ver) would be replaced by the firmware build"; fi
+        if _agh_fw_risk 2>/dev/null; then d="v$(_agh_cur_ver) will be replaced by the firmware build, which can't read its config"
+        else d="v$(_agh_cur_ver) will be replaced by the firmware build"; fi
         printf 'agh|AdGuardHome|%s|%s|%s\n' "$p" "$(_pm_kb "$(_agh_bin)" /etc/init.d/adguardhome "$(_agh_config_path 2>/dev/null)")" "$d"
     fi
     # SSH keys: listed only when the toolkit can change it (on the user keep list, or not kept at all) -
@@ -10279,7 +10414,7 @@ EOF
         clear
         print_centered_header "Package & Persistence Manager"
         # a message about the whole screen sits right under the title (as the Lists Manager's state warning)
-        [ "${PM_FW_STAGE:-0}" = 1 ] && { print_info "Items the firmware update would remove are pre-selected to persist"; printf "\n"; }
+        [ "${PM_FW_STAGE:-0}" = 1 ] && { print_info "Items the firmware update will remove are pre-selected to persist"; printf "\n"; }
         _pkg_storage_line          # print_centered_header already leaves one blank line above
         _pkg_keep_line
         printf "\n"
@@ -10766,7 +10901,7 @@ manage_ssh_keys() {
                 if grep -qFx "$auth_file" "$up_conf" 2>/dev/null; then
                     # Disabling here risks DATA loss (SSH keys are not recoverable if wiped),
                     # so warn + confirm first - unlike functionality-only persistence toggles.
-                    print_warning "The SSH keys would then be lost on the next firmware upgrade, with no way\nto recover them from the router."
+                    print_warning "The SSH keys will then be lost on the next firmware upgrade, with no way\nto recover them from the router."
                     printf "Disable persistence for SSH keys anyway? [y/N]: "; read -r confirm; printf "\n"
                     case "$confirm" in
                         y|Y) sed -i "\|$auth_file|d" "$up_conf"; _persist_msg off "SSH keys" ;;
@@ -10829,7 +10964,7 @@ Options
 8. Firmware Update
    Update the firmware from GL.iNet's catalogue - the latest build in
    the current channel, another channel, or an older build - showing
-   first what the update wouldn't keep.
+   first what the update won't keep.
 
 Web-UI overlays (3 and 4) plus the Fan slider range all paint the same
 admin-panel bundle. They share one injection registry, so installing or
@@ -10916,8 +11051,8 @@ Uninstall / Switch to Installed Version
 ───────────────────────────────────────
 Uninstall removes /usr/sbin/glinet_utils and its sysupgrade.conf entry.
 It's offered in the installed copy, the one it removes. Run from another
-copy, this item switches to the installed copy instead, and asks first
-when the two are different versions.
+copy, this item switches to the installed copy instead, taking this copy's
+settings with it, and asks first when the two are different versions.
 
 Reset Toolkit Settings
 ──────────────────────
@@ -10963,7 +11098,7 @@ check_install_prompt() {
     read -r ip_ans
     printf "\n"
     case "$ip_ans" in
-        n|N)
+        n|N|0)
             # remember the "no" until the next update replaces this file (the line carries a comment, so match
             # its start - the old "=0$" match never fired, so this was asked on every run)
             sed -i 's/^INSTALL_PROMPTED=0/INSTALL_PROMPTED=1/' "$SCRIPT_PATH"
@@ -11000,6 +11135,7 @@ do_install_to_sbin() {
         read -r persist_ans
         printf "\n"
         case "$persist_ans" in
+            0) print_info "Installed to $INSTALL_PATH, not persisted"; return 0 ;;
             n|N) print_warning "Not persisted — will be lost on next sysupgrade" ;;
             *)   set_toolkit_persistence 1 ;;
         esac
@@ -11022,7 +11158,7 @@ _toolkit_offer_remove_local() {
     [ -e "$(dirname "$SCRIPT_PATH")/.git" ] && return 2
     case "$SCRIPT_PATH" in /tmp/*) return 2 ;; esac
     printf "Remove the local copy at %s? [Y/n]: " "$SCRIPT_PATH"; read -r a; printf "\n"
-    case "$a" in n|N) return 1 ;; esac
+    case "$a" in n|N|0) return 1 ;; esac
     if rm -f "$SCRIPT_PATH" && [ ! -e "$SCRIPT_PATH" ]; then print_success "Removed $SCRIPT_PATH"
     else print_warning "Couldn't remove $SCRIPT_PATH"; fi
     return 0
@@ -11037,13 +11173,33 @@ _toolkit_switch_installed() {
     if [ -n "$iv" ] && [ "$iv" != "$tv" ]; then
         print_info "The installed copy is version $iv; this one is $tv"
         printf "Switch to the installed copy? [Y/n]: "; read -r c; printf "\n"
-        case "$c" in n|N) print_info "No change"; press_any_key; return 0 ;; esac
+        case "$c" in n|N|0) print_info "No change"; press_any_key; return 0 ;; esac
     fi
-    if _toolkit_offer_remove_local; then printf "\n"; fi
+    # the settings go with the switch (as an install's byte copy carries them); only then is this copy's removal
+    # lossless, so a failed carry skips the offer
+    if _toolkit_carry_settings; then
+        if _toolkit_offer_remove_local; then printf "\n"; fi
+    else
+        print_warning "Couldn't copy this copy's settings to $INSTALL_PATH - it keeps its own"; printf "\n"
+    fi
     print_action "Switching to installed copy"
     sleep 2
     stty sane 2>/dev/null </dev/tty
     exec sh "$INSTALL_PATH" "$@"
+}
+
+# Switch: write this copy's own settings (the startup-offer answers, display mode, keycap spacing) into the installed
+# copy, so it starts as this one was set. A setting either copy lacks (an older version) is left alone; every one
+# written is read back. 0 = all carried.
+_toolkit_carry_settings() {
+    local k v
+    for k in INSTALL_PROMPTED WEBUI_PROMPTED OUTPUT_PREF KEYCAP_NSEP; do
+        v=$(grep -m1 "^$k=" "$SCRIPT_PATH" 2>/dev/null | sed "s/^$k=\([^ ]*\).*/\1/")
+        [ -n "$v" ] && grep -q "^$k=" "$INSTALL_PATH" 2>/dev/null || continue
+        sed -i "s|^$k=[^ ]*|$k=$v|" "$INSTALL_PATH" 2>/dev/null
+        grep -qE "^$k=$v( |\$)" "$INSTALL_PATH" 2>/dev/null || return 1
+    done
+    return 0
 }
 
 # Reset Toolkit Settings: start this copy again, so the startup questions are asked now - not mid-session,
@@ -11107,6 +11263,7 @@ keycap_pick() {
     printf "Save Option %s as Mac Terminal default? [Y/n]: " "$kc_choice"   # one blank after the answer above
     read -r sv; printf "\n"
     case "$sv" in
+        0)   print_info "No change"; return 1 ;;
         n|N) keycap_apply_pref "$kc_choice";         print_info "Applied for this session only (not saved)" ;;
         *)   keycap_apply_pref "$kc_choice" persist; print_success "Saved as Mac Terminal default: Option $kc_choice" ;;
     esac
@@ -11232,7 +11389,7 @@ manage_display_settings() {
                 printf " %bPage 5 of %s — Auto%b (detect terminal on each launch)\n\n" "${BOLD}${CYAN}" "$total" "$_R"
                 printf "   Re-detects the terminal every time the toolkit\n"
                 printf "   starts and selects Full or Compatible automatically.\n\n"
-                printf "   Right now it would use:\n"
+                printf "   Right now it selects:\n"
                 printf "     %b%s%b\n" "$_G" "$detected" "$_R"
                 # macOS Terminal is the one terminal Auto can't fully resolve (the keycap gap is
                 # unmeasurable), so surface its state: prompted at startup, or the saved choice.
@@ -11354,6 +11511,7 @@ DS_EOF
                 read -r ds_save
                 printf "\n"
                 case "$ds_save" in
+                    0) print_info "No change"; sleep 1; continue ;;
                     n|N)
                         OUTPUT_PREF="$new_pref"
                         [ -n "$new_kc" ] && KEYCAP_NSEP="$new_kc"
@@ -11952,6 +12110,7 @@ _webui_write_page() {
   --green: var(--success, #17803d); --green-bg: var(--success-background, #e3f4e8);
   --yellow: var(--warning, #8a5a00); --yellow-bg: var(--warning-background, #fbf0d4);
   --red: var(--error, #c42b2b); --red-bg: var(--error-background, #fbe4e4);
+  --blue: var(--info, #1f4fa8); --blue-bg: var(--info-background, #e6eefb);
   --grey: var(--text-badge, #596273); --grey-bg: var(--background-badge, #eceff3);
   --info: var(--primary, #24589f); --info-bg: var(--primary-background, #e3edfb);
   --danger: var(--error, #c42b2b); --danger-text: #ffffff;
@@ -11969,6 +12128,7 @@ _webui_write_page() {
   --green: var(--success, #5fd38a); --green-bg: var(--success-background, #173523);
   --yellow: var(--warning, #f0c25a); --yellow-bg: var(--warning-background, #3a2e12);
   --red: var(--error, #ff7b7b); --red-bg: var(--error-background, #3d1a1c);
+  --blue: var(--info, #8fb4ff); --blue-bg: var(--info-background, #17243d);
   --grey: var(--text-badge, #a3acbb); --grey-bg: var(--background-badge, #262c37);
   --info: var(--primary, #8fb4f5); --info-bg: var(--primary-background, #1a2a45);
   --danger: var(--error, #ff6b6b);
@@ -12026,7 +12186,9 @@ button:disabled { opacity: .55; cursor: default; }
 .banner.warning { background: var(--yellow-bg); color: var(--yellow); }
 .banner.error   { background: var(--red-bg); color: var(--red); }
 .banner.info    { background: var(--info-bg); color: var(--info); }
-.banner .text { font-weight: 600; }
+.banner .text { font-weight: 600; display: flex; gap: 10px; align-items: flex-start; }
+.banner .text svg { flex: none; margin-top: 2px; }
+.banner.info { background: var(--blue-bg); color: var(--blue); }
 .banner ul { margin: 2px 0 0; padding-left: 18px; color: var(--text); font: 13px/1.45 var(--mono); }
 .banner .fix { color: var(--text); }
 
@@ -12078,6 +12240,14 @@ button:disabled { opacity: .55; cursor: default; }
 .rows > div:last-child { border-bottom: 0; }
 .rows dt { color: var(--text); }
 .rows dd { margin: 0; text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.rows dt.sub { padding-left: 18px; }   /* a sub-row (level 1), as the menus indent it */
+.notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 15px; border-radius: 5px; font-size: 14px; line-height: 1.5; }
+.notice svg { flex: none; margin-top: 2px; }
+.notice.warning { background: var(--yellow-bg); color: var(--yellow); }
+.notice.error   { background: var(--red-bg); color: var(--red); }
+.notice.info    { background: var(--blue-bg); color: var(--blue); }
+.body > .notices { display: grid; gap: 8px; padding: 16px 20px 4px; }
+.cards > .notices { display: grid; gap: 8px; grid-column: 1 / -1; }   /* about every card: the full row above them */
 .badge { display: inline-block; font-size: 12px; font-weight: 700; letter-spacing: .04em; padding: 2px 8px; border-radius: 999px; }
 .t-green  { color: var(--green);  background: var(--green-bg); }
 .t-yellow { color: var(--yellow); background: var(--yellow-bg); }
@@ -12558,7 +12728,7 @@ function banner(msg) {
   b.replaceChildren();
   if (!msg || !msg.text) { b.hidden = true; return; }
   b.className = "banner " + (msg.tone || "info");
-  b.append(el("div", "text", msg.text));
+  const t = el("div", "text"); t.append(noticeIcon(msg.tone || "info"), el("span", "", msg.text)); b.append(t);
   if (list(msg.details).length) {
     const ul = el("ul");
     list(msg.details).forEach((d) => ul.append(el("li", "", d)));
@@ -12634,12 +12804,27 @@ function valueNode(value, tone, note) {
   if (note) dd.append(el("span", "qual", "(" + note + ")"));
   return dd;
 }
+// a notice: GL's tips box - tinted, an icon and words (never colour alone), at the top of what it is about
+const NOTICE_ICON = { warning: '<path d="M12 3l9.5 17h-19z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v4M12 17v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  error: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M9 9l6 6M15 9l-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  info: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M12 11v6M12 7.5v.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+  success: '<circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="2"/><path d="M8 12.5l2.5 2.5L16 9.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>' };
+function noticeIcon(tone) {
+  const s = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  s.setAttribute("width", "18"); s.setAttribute("height", "18"); s.setAttribute("viewBox", "0 0 24 24"); s.setAttribute("aria-hidden", "true");
+  s.innerHTML = NOTICE_ICON[tone] || NOTICE_ICON.info; return s;
+}
+function noticeList(ns) {
+  const w = el("div", "notices");
+  list(ns).forEach((n) => { const b = el("div", "notice " + (n.tone || "info")); b.setAttribute("role", "note"); b.append(noticeIcon(n.tone), el("span", "", n.text)); w.append(b); });
+  return w;
+}
 // label/value rows, GL's Device Info style; a row with a key is updated in place by the live refresh
 function rowsList(rows) {
   const dl = el("dl", "rows");
   list(rows).forEach((r) => {
     const row = el("div");
-    row.append(el("dt", "", r.label));
+    row.append(el("dt", r.level ? "sub" : "", r.label));
     const dd = valueNode(r.value, r.tone, r.note);
     if (r.key) dd.dataset.key = r.key;
     row.append(dd);
@@ -12849,6 +13034,7 @@ const gen = {
     pa.querySelectorAll(".gen").forEach((b) => b.remove());
     list(st.actions).forEach((a) => { const b = gen.button(a); b.classList.add("gen"); pa.prepend(b); });
     const out = list(st.cards).map((c) => gen.card(c));
+    if (list(st.notices).length) out.unshift(noticeList(st.notices));   // about every card in the tab: above them
     if (st.job && st.job.id) out.push(gen.logCard(st.job));
     $("content").replaceChildren(...out);
     if (st.job && st.job.id && gen.logShown === st.job.id) gen.logOpen(true);
@@ -12863,7 +13049,8 @@ const gen = {
   card(c) {
     if (c.editor) return gen.editorCard(c);
     const k = card(c.title || "", { half: c.half, aside: c.aside });
-    // the menu's order: STATUS rows / tables, then what's said about them
+    // the menu's order: STATUS rows / tables, then what's said about them - a notice about the card comes first
+    if (list(c.notices).length) k.body.append(noticeList(c.notices));
     if (list(c.rows).length) k.body.append(rowsList(c.rows));
     if (list(c.headers).length || list(c.table).length) {
       k.body.append(tableBlock(list(c.headers), list(c.table).map((r) => list(r).map((x) => gen.cell(x)))));
@@ -12974,6 +13161,7 @@ const gen = {
     const bar = el("div", "meterbar"), mtext = el("span", "metertext");
     if (kind === "agh") { for (let i = 0; i < 20; i++) bar.append(el("span")); meter.append(el("span", "meterlabel", "Memory Impact"), bar, mtext); }
     else meter.append(el("span", "meterlabel", "Storage"), mtext);
+    if (list(c.notices).length) k.body.append(noticeList(c.notices));
     if (c.meter) k.body.append(meter);
     const ed = { rows, kind, bar, mtext, m: c.meter, bars: [] };
     const upd = () => gen.edUpdate(ed);
@@ -13718,9 +13906,7 @@ const hw = {
         [p.port, p.role, el("span", "badge t-" + p.tone, p.status), p.link, p.maps_to])));
       out.push(c);
     });
-    const rows = [];
-    if (n.wan) rows.push({ label: "WAN address", value: n.wan, tone: "fact" });
-    if (n.lan) rows.push({ label: "LAN bridge", value: n.lan, tone: "fact" });
+    const rows = list(n.addresses).map((a) => ({ label: a.label, value: a.value, tone: "fact" }));
     if (rows.length) { const c = card("Addresses"); c.body.append(rowsList(rows)); out.push(c); }
     $("content").replaceChildren(...out);
   },
@@ -13964,7 +14150,7 @@ check_webui_prompt() {
     print_info "The toolkit can add a Router Toolkit page to the GL.iNet Admin Panel menu"
     printf "Add it to the Admin Panel? [Y/n]: "; read -r ans; printf "\n"
     case "$ans" in
-        n|N)
+        n|N|0)
             _webui_remember_no
             print_info "Skipped - add it later in System Tweaks → Toolkit Management" ;;
         *)
@@ -14459,6 +14645,8 @@ mtu_reset() {
 # once. Uses literal [n]/[P]/[N] brackets like RLA so the two screens read alike.
 # The live link -> "underlay|underlay_mtu|calculated-recommendation" (one definition, used by the screen
 # and by Recalculate). _mtu_rec_now adds the rule that a fresh probe-verified value outranks it.
+# after _mtu_state: why Recommended is UNKNOWN, as the tunnel's notice (menu: its page; page: its card)
+_mtu_notice() { [ -z "$rec" ] && printf 'warning|%s' "$iface Recommended MTU is unknown: its endpoint couldn't be resolved"; return 0; }
 _mtu_calc() {   # <endpoint> <overhead>
     local u um r=""
     u=$(ip route get "$1" 2>/dev/null | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1)
@@ -14484,25 +14672,26 @@ _mtu_state() {
     # A fresh probe-verified value outranks the calculation - it measured the
     # actual path. mtu_v_get reports STALE when the link or endpoint changed
     # since the probe, and the display drops back to Calculated.
-    vline=""; v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+    # a probe's date and target are sub-rows under Basis (status text standard: one short bracket per row)
+    vline=""; vdate=""; vtgt=""; vkind=""; v=$(mtu_v_get "$iface" "$underlay_mtu" "$endpoint")
+    case "$v" in OK\|*|STALE\|*)
+        vkind=$(printf '%s' "$v" | cut -d'|' -f3); vtgt=$(printf '%s' "$v" | cut -d'|' -f4); vdate=$(printf '%s' "$v" | cut -d'|' -f5) ;; esac
     case "$v" in
         "OK|"*)
             rec=$(printf '%s' "$v" | cut -d'|' -f2)
-            vkind=$(printf '%s' "$v" | cut -d'|' -f3)
-            vtgt=$(printf '%s' "$v" | cut -d'|' -f4)
-            vdate=$(printf '%s' "$v" | cut -d'|' -f5)
-            vplain="VERIFIED (${vdate}, ${vkind} probe to ${vtgt})"; vline="${GREEN}VERIFIED${RESET} (${vdate}, ${vkind} probe to ${vtgt})" ;;
+            vplain="VERIFIED"; vline="${GREEN}VERIFIED${RESET}" ;;
         "STALE|"*)
-            vplain="STALE (link changed since the last probe)"; vline="${YELLOW}STALE${RESET} (link changed since the last probe)" ;;
+            vplain="STALE (link changed)"; vline="${YELLOW}STALE${RESET} (link changed)" ;;
         *)
-            vplain="CALCULATED (from the link MTU, not probed)"; vline="${GREY}CALCULATED${RESET} (from the link MTU, not probed)" ;;
+            vplain="CALCULATED (from link MTU)"; vline="${GREY}CALCULATED${RESET} (from link MTU)" ;;
     esac
+    case "$vkind" in public) vklabel="public endpoint" ;; "") vklabel="" ;; *) vklabel="$vkind" ;; esac
     if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then
         rec_display="${GREEN}${rec}${RESET}   (optimal)"
     elif [ -n "$rec" ]; then
         if [ "${cur:-0}" -lt "$rec" ] 2>/dev/null; then rec_display="${YELLOW}${rec}${RESET}   (can raise)"; else rec_display="${YELLOW}${rec}${RESET}   (should lower)"; fi
     else
-        rec_display="${YELLOW}UNKNOWN${RESET} (endpoint not resolved)"
+        rec_display="${YELLOW}UNKNOWN${RESET}"
     fi
     sec=$(mtu_gl_targets "$iface" "$type" | head -1); source_label=""
     if [ -n "$sec" ]; then
@@ -14520,7 +14709,7 @@ _mtu_state() {
 }
 manage_mtu() {
     local tf count pg pv nx line oldifs type role iface endpoint overhead family
-    local cur underlay underlay_mtu rec rec_display source_label sec vline vplain v vkind vtgt vdate
+    local cur underlay underlay_mtu rec rec_display source_label sec vline vplain v vkind vtgt vdate vklabel
     local _st stcol _idp _navp _w pick val answer hr
     tf="/tmp/.gl-mtu.$$"; pg=1
     while true; do
@@ -14540,18 +14729,24 @@ manage_mtu() {
         _mtu_state "$line"
         _navp="[P] Previous   Page $pg of $count   [N] Next   [$_m_keys]   [0] Back   [?] Help"
         _w=$(( 17 + ${#vplain} ))
+        [ -n "$vdate" ] && [ $(( 18 + ${#vtgt} + ${#vklabel} + 3 )) -gt "$_w" ] && _w=$(( 18 + ${#vtgt} + ${#vklabel} + 3 ))   # the Target sub-row
         [ $(( ${#_idp} + 1 )) -gt "$_w" ] && _w=$(( ${#_idp} + 1 ))
         [ $(( ${#_navp} + 1 )) -gt "$_w" ] && _w=$(( ${#_navp} + 1 ))
         if [ "$OUTPUT_MODE" = compat ]; then hr=$(rla_rep "-" "$_w"); else hr=$(rla_rep "─" "$_w"); fi
 
         clear
         print_centered_header "VPN MTU Optimizer"
+        _cli_notice "$(_mtu_notice)"
         printf " %b%s %s:%b %s     Status: %b%s%b\n" "$CYAN" "$type" "$role" "$RESET" "$iface" "$stcol" "$_st" "$RESET"
         printf "   Current MTU:  %b%s%b%s\n" "$BLUE" "${cur:-N/A}" "$RESET" "$source_label"
         printf "   Underlay:     %b%s (MTU %s)%b\n" "$BLUE" "${underlay:-N/A}" "${underlay_mtu:-N/A}" "$RESET"
         printf "   Overhead:     %b-%s (%s / %s)%b\n" "$BLUE" "$overhead" "$type" "$family" "$RESET"
         printf "   Recommended:  %b\n" "$rec_display"
         printf "   Basis:        %b\n" "$vline"
+        if [ -n "$vdate" ]; then
+            printf "     %-12s%b\n" "Probed:" "${BLUE}${vdate}${RESET}"
+            printf "     %-12s%b%s\n" "Target:" "${BLUE}${vtgt}${RESET}" "${vklabel:+ ($vklabel)}"
+        fi
         printf " %s\n" "$hr"
         # [1] never dead-ends: optimize when there's a better value, otherwise a real re-read of the
         # link; [4] (last) only while there's an override to remove
@@ -15964,7 +16159,7 @@ rla_do_lever3() {
         # w_set_masq refuses this too (rc 3); checked here as well so the
         # user gets an explanation instead of a silently skipped action.
         print_error "The firewall zone for $A_IF is disabled"
-        print_info "This setting would have no effect until the VPN is enabled properly"
+        print_info "This setting has no effect until the VPN is enabled properly"
         press_any_key; return
     fi
     _risk=$(guard_at_risk "$A_IF")
@@ -16044,6 +16239,7 @@ rla_do_detect() {
         print_success "Remote LAN is $_known  (from $_kdisp)"
         printf 'Keep this? [Y/n]: '; read_ans RLA_ANS_KEEP; _a=$REPLY; printf '\n'
         case "$_a" in
+            0) print_info "No change"; press_any_key; return ;;
             n|N) _known="" ;;
             *)   if [ -n "$_ktok" ] && ! d_store "$ifc" "$_known" "$_ktok" >/dev/null 2>&1; then
                      print_error "Could not store the remote LAN"
@@ -16317,6 +16513,7 @@ manage_remote_lan_access() {
 
         clear
         print_centered_header "Remote LAN Access"
+        [ "$rlan" = unknown ] && _cli_notice "$(_rla_lan_notice cli)"
         # Identity line (cyan label, default tunnel name - indent cascade): the tunnel and its role-aware state, promoted out of
         # the topology's first column so the diagram reads cleanly below it. Status
         # is ALL CAPS (UX std); client=CONNECTED/DISCONNECTED, server=UP/DOWN.
@@ -16450,7 +16647,7 @@ One tunnel per page; [P]/[N] move between tunnels. For the tunnel on screen:
   • Overhead     - the protocol's per-packet cost
   • Recommended  - the best MTU (Underlay minus Overhead)
   • Basis        - whether Recommended is Calculated from the link, or Verified
-                   by an active probe (with the date and target); STALE when
+                   by an active probe (Probed and Target rows under it); STALE when
                    the link changed since that probe
 
 The actions
@@ -16483,6 +16680,15 @@ Notes
   • The value is written where GL.iNet expects it, so it appears in the Admin
     Panel under the tunnel's Options and survives a reboot.
 
+
+Values explained
+────────────────
+  Basis = CALCULATED (from link MTU): worked out from the link MTU, not measured
+          - Verify with an Active Probe measures it
+  Basis = VERIFIED: measured by an active probe; Probed and Target under it
+          say when and against what
+  Basis = STALE (link changed): the link changed since the last probe - run
+          Verify again
 HELPEOF
 }
 
@@ -16556,7 +16762,7 @@ Size & storage
   • Storage is the free space you'll have if you Confirm - with nothing staged, what's free
     now. On a compressing overlay (ubifs/jffs2) a staged change makes it a conservative "≈"
     floor - real free space is usually a little higher; on f2fs/ext4 it is exact. It turns
-    amber when it would get low.
+    amber when it will get low.
   • Each install checks free space first and is skipped, with the shortfall shown, if
     the package won't fit - so a full overlay never leaves a half-installed package.
   • [S] Sort toggles largest-first (the default) and alphabetical, on both pages.
@@ -16581,7 +16787,7 @@ packages - uninstalling a tool also clears its persistence.
 
 Features
 ────────
-Page 2 lists the toolkit's own items that an update would otherwise remove:
+Page 2 lists the toolkit's own items that an update will otherwise remove:
 the toolkit itself, the Web Terminal, fan settings, the switch indicator,
 bandwidth limits, OpenSpeedTest, an updated AdGuardHome, SSH keys and backups.
 A row shows only while that thing is in use. Toggling one changes the same
@@ -16592,7 +16798,7 @@ Persist
 ───────
 The Persist line is how much a firmware update carries if you Confirm - with
 nothing staged, what it carries now. Opened from Firmware Update, everything the
-update would remove comes pre-staged as Enable Persistence, and the Update
+update will remove comes pre-staged as Enable Persistence, and the Update
 Memory meter shows whether the image plus what persists fits in the router's
 RAM (the kept files are packed, so they need less than the Persist line).
 On routers with zram swap it keeps 6 MB spare: (tight) under 6 MB, (won't fit)
@@ -17207,14 +17413,38 @@ _fw_update_state() {
 }
 # When GL.iNet's catalogue was read: the Update status is as of then (the page keeps it up to an hour; Check for
 # Updates reads it again) - so it says so, instead of an UP TO DATE that could be an hour old
-_fw_checked() { [ -s "$FW_TMP/cat" ] && date -r "$FW_TMP/cat" '+%Y-%m-%d %H:%M' 2>/dev/null; }
-_fw_upd_disp() {
-    local ck; ck=$(_fw_checked)
+_fw_checked() { [ -s "$FW_TMP/cat" ] && date -r "$FW_TMP/cat" '+%Y-%m-%d %H:%M %Z' 2>/dev/null; }
+# a stored "YYYY-MM-DD HH:MM" with the router's timezone OF THAT DATE (DST-aware), e.g. 2026-10-14 16:09 EDT
+_fw_ts_tz() { date -d "$1" '+%Y-%m-%d %H:%M %Z' 2>/dev/null || printf '%s' "$1"; }
+_fw_build_plain() { printf '%s' "$1" | sed 's/ (/ /; s/)$//'; }   # "4.9.1 (release2)" -> "4.9.1 release2" (no bracket in a bracket)
+# The Firmware Update STATUS rows, once - the menu and the page draw these: Label|VALUE|tone|note|level (1 = a sub-row)
+_fw_status_rows() {   # <items not persisted> <latest history state file or "">
+    local ck t
+    echo "Model|${FW_NAME:-$(_fw_model | tr 'a-z' 'A-Z')}|fact||0"
+    echo "Channel|$FW_CUR_CHAN|$(ws_lc "$FW_CUR_CHAN")||0"
+    echo "Version|$FW_CUR_LABEL|fact||1"
     case "$FW_UPD" in
-        AVAILABLE) printf '%bAVAILABLE%b (%s%s)' "$YELLOW" "$RESET" "$(_fw_field "$FW_UPD_ROW" 2 | sed 's/ (/ /; s/)$//')" "${ck:+, checked $ck}" ;;
-        UPTODATE)  printf '%bUP TO DATE%b%s' "$GREEN" "$RESET" "${ck:+ (checked $ck)}" ;;
-        *)         printf '%bUNKNOWN%b (offline)' "$GREY" "$RESET" ;;
+        AVAILABLE) echo "Update|AVAILABLE|yellow|$(_fw_build_plain "$(_fw_field "$FW_UPD_ROW" 2)")|1" ;;
+        UPTODATE)  echo "Update|UP TO DATE|green||1" ;;
+        *)         echo "Update|UNKNOWN|grey|offline|1" ;;
     esac
+    ck=$(_fw_checked); [ -n "$ck" ] && echo "Checked|$ck|fact||1"
+    if [ "${1:-0}" -gt 0 ]; then echo "Not Persisted|$1 ITEM$([ "$1" = 1 ] || echo S)|yellow||0"
+    else echo "Not Persisted|NONE|green||0"; fi
+    if [ -n "$2" ]; then
+        t=$(_fw_status_disp "$(_fw_st "$2" status)" | sed "s/$(printf '\033')\[[0-9;]*m//g")
+        echo "Last Update|$t|$(ws_lc "$t")|$(_fw_build_plain "$(_fw_st "$2" to)")|0"
+        echo "Attempted|$(_fw_ts_tz "$(_fw_st "$2" when | cut -c1-16)")|fact||1"
+    fi
+}
+# ...and its notices (top of the Status card / the menu screen): missing tools, what a firmware update would break or
+# remove. <items not persisted> <tools ok 1/0> <cli|web> - the menu names its item, the page its tab
+_fw_status_notices() {
+    [ "$2" = 1 ] || { printf '%s\n' "warning|Firmware Update can't run here: this firmware lacks the tools to flash safely\n(sysupgrade, sha256sum, jsonfilter)"; return 0; }
+    _agh_persist_notice; printf '\n'
+    [ "${1:-0}" -gt 0 ] || return 0
+    if [ "$3" = web ]; then printf '%s\n' "warning|Not Persisted is $1 ITEM$([ "$1" = 1 ] || echo S): a firmware update will remove them - keep them on the Packages\ntab, or leave Persist ticked when installing a build"
+    else printf '%s\n' "warning|Not Persisted is $1 ITEM$([ "$1" = 1 ] || echo S): a firmware update will remove them - [3] Manage Persistence keeps them"; fi
 }
 
 # What a firmware update would NOT keep, measured against the router's own keep list (`sysupgrade -l`).
@@ -17899,6 +18129,7 @@ _fw_install() {   # <row> [reinstall]
     # Keep settings is the default; wiping takes a second, explicit confirmation.
     printf "Keep settings? [Y/n]: "; read_ans FW_ANS_KEEP; ans=$REPLY; printf "\n"
     case "$ans" in
+        0) print_info "No change"; return ;;
         n|N) keep=wipe
              _fw_at_risk wipe > "$FW_TMP/risk"
              print_warning "Wiping returns the router to GL.iNet's first-time setup and erases:"
@@ -17913,6 +18144,7 @@ _fw_install() {   # <row> [reinstall]
                  # the fix, not just the warning: the Package & Persistence Manager with these staged
                  printf "Persist them across the update? [Y/n]: "; read_ans FW_ANS_PERSIST; ans=$REPLY; printf "\n"
                  case "$ans" in
+                     0) print_info "No change"; return ;;
                      n|N) : ;;
                      *) _fw_open_persistence "$(( (size + 1023) / 1024 ))"
                         clear; print_centered_header "Firmware Update"; _fw_summary "$row"
@@ -18177,24 +18409,19 @@ manage_firmware() {
         # Package Manager changes the persisted set) - a no-op when the set is already measured or measuring
         [ "$fw_ok" = 1 ] && _fw_arch_bg_start
         clear; print_centered_header "Firmware Update"
-        _fwrow() { printf "   %-17s%b\n" "$1" "$2"; }   # sub-rows below share the value column
-        printf " %b\n" "${CYAN}STATUS${RESET}"
-        _fwrow "Model:" "${BLUE}${FW_NAME:-$(_fw_model | tr 'a-z' 'A-Z')}${RESET}"
-        _fwrow "Channel:" "$(printf '%b%s%b' "$(_fw_chan_color "$FW_CUR_CHAN")" "$FW_CUR_CHAN" "$RESET")"
-        printf "     %-15s%b\n" "Version:" "${BLUE}${FW_CUR_LABEL}${RESET}"
-        printf "     %-15s%b\n" "Update:" "$(_fw_upd_disp)"
         need=$(awk -F'|' '$1=="Packages" {n += split($2, a, ", "); next} NF {n++} END {print n+0}' "$FW_TMP/risk.keep" 2>/dev/null); : "${need:=0}"   # each package counts
-        if [ "$need" -gt 0 ]; then
-            _fwrow "Not Persisted:" "$(printf '%b%s ITEM%s%b' "$YELLOW" "$need" "$([ "$need" = 1 ] || echo S)" "$RESET")"
-            _fw_risk_rows "$FW_TMP/risk.keep"
-        else
-            _fwrow "Not Persisted:" "${GREEN}NONE${RESET}"
-        fi
         _ls=$(_fw_hist_latest)
-        [ -n "$_ls" ] && _fwrow "Last Update:" "$(_fw_status_disp "$(_fw_st "$_ls" status)") ($(_fw_st "$_ls" when | cut -c1-16), $(_fw_st "$_ls" to))"
+        # the screen's notices, then the STATUS rows the page shows too (_fw_status_rows) - a level-1 row is indented
+        _fw_status_notices "$need" "$fw_ok" cli | _cli_notices
+        printf " %b\n" "${CYAN}STATUS${RESET}"
+        local _fr _frs _foifs; _frs=$(_fw_status_rows "$need" "$_ls"); _foifs=$IFS; IFS='
+'
+        for _fr in $_frs; do IFS=$_foifs
+            if [ "${_fr##*|}" = 1 ]; then printf "     %-15s%b\n" "${_fr%%|*}:" "$(_row_value "${_fr%|*}")"
+            else printf "   %-17s%b\n" "${_fr%%|*}:" "$(_row_value "${_fr%|*}")"; fi
+        done; IFS=$_foifs
         printf "\n"
         if [ "$fw_ok" != 1 ]; then
-            print_warning "This firmware lacks the tools needed to flash safely (sysupgrade, sha256sum, jsonfilter)"
             printf "%s%sBack\n" "$N0" "$NSEP"; printf "%s Help\n" "$NQ"
             printf "\nChoose [0/?]: "; read -r ans; printf "\n"
             case "$ans" in \?|h|H|❓) show_firmware_help ;; *) rm -rf "$FW_TMP"; return ;; esac
@@ -18253,15 +18480,17 @@ The status block
   • Channel - the firmware track the router is on: STABLE, BETA, NIGHTLY,
     RC, OPENWRT 25 or OPENWRT 24. Version and Update belong to it.
   • Update - UP TO DATE, AVAILABLE (with the build), or UNKNOWN when GL.iNet's
-    server can't be reached, with when GL.iNet's list was checked (the page
-    keeps it up to an hour; Check for Updates reads it again).
-  • Not Persisted - what an update would remove, measured from the router's
-    own keep list: the toolkit, its features and settings (Web Terminal, fan,
-    switch indicator, limits, OpenSpeedTest, AdGuardHome, SSH keys, backups)
-    and Package Manager packages that aren't set to persist - including ones
-    the current firmware came with, since the next firmware may not. GL.iNet's
-    own add-ons, and helpers the toolkit re-installs by itself, aren't listed.
-  • Last Update - the result of the most recent update attempt.
+    server can't be reached. Checked, under it, is when GL.iNet's list was
+    read (the page keeps it up to an hour; Check for Updates reads it again).
+  • Not Persisted - how many items an update will remove, measured from the
+    router's own keep list: the toolkit, its features and settings (Web
+    Terminal, fan, switch indicator, limits, OpenSpeedTest, AdGuardHome, SSH
+    keys, backups) and Package Manager packages that aren't set to persist -
+    including ones the current firmware came with, since the next firmware may
+    not. Manage Persistence lists them and keeps them. GL.iNet's own add-ons,
+    and helpers the toolkit re-installs by itself, aren't counted.
+  • Last Update - the result of the most recent update attempt; Attempted,
+    under it, is when it ran. Times show the router's timezone.
 
 Actions
 ───────
@@ -18277,7 +18506,7 @@ Actions
     again makes it Reinstall - a re-flash of the same build, for a damaged
     firmware partition.
   • Manage Persistence - the Package & Persistence Manager, with everything
-    an update would remove staged to persist, and the Update Memory meter.
+    an update will remove staged to persist, and the Update Memory meter.
   • View Update History - every update attempt, newest first: what was
     true before it, each check and its result, and what came back after.
 
@@ -18285,7 +18514,7 @@ How an update runs
 ──────────────────
 Keep settings is the default; not keeping them wipes the router back to
 first-time setup and asks a second time. Then, each step checked before the
-next. First what the update would remove, with the choice to persist it (the
+next. First what the update will remove, with the choice to persist it (the
 Package & Persistence Manager, pre-staged). Then memory: the image and the
 persisted files both sit in RAM during the flash, and running services count
 against it - the Update Memory meter shows the fit. Amber cells mean it's
@@ -19428,6 +19657,14 @@ VPN adds Tailscale and ZeroTier when present.
 
 Wi-Fi passwords are shown (you own the router); VPN private keys and other
 cryptographic secrets are never displayed.
+
+Values explained
+────────────────
+  Role = Mesh backhaul: the link between mesh nodes - used only when mesh is
+         set up
+  Role = Mesh uplink: a satellite's link to its parent node
+  AstroWarp Status = NOT ACTIVE (no tunnel address): the AstroWarp tunnel
+         (mptun0) is missing or has no address
 HELPEOF
 }
 
@@ -19466,8 +19703,8 @@ _uci_view_wireless() {
         # network that also onboards new nodes - an ordinary network, so no label.
         mesh=$(uci -q get wireless.${iface}.multi_ap)
         case "$mesh:$mode" in
-            1:sta) printf "  Role: %bMesh uplink%b (a satellite's link to its parent node)\n" "$BLUE" "$RESET" ;;
-            1:*)   printf "  Role: %bMesh backhaul%b (links mesh nodes - used only when mesh is set up)\n" "$BLUE" "$RESET" ;;
+            1:sta) printf "  Role: %bMesh uplink%b\n" "$BLUE" "$RESET" ;;     # what each role means: the help
+            1:*)   printf "  Role: %bMesh backhaul%b\n" "$BLUE" "$RESET" ;;
         esac
         printf "  SSID: %b%s%b\n" "${BLUE}" "$ssid" "${RESET}"
         [ -n "$key" ] && printf "  Password: %b%s%b\n" "$BLUE" "$key" "$RESET"
@@ -19746,7 +19983,7 @@ _uci_view_cloud() {
             printf "  Token: %b%s...%b\n" "$BLUE" "$token_short" "$RESET"
         fi
     else
-        print_warning "GoodCloud not configured"
+        printf "  Status: %bNOT SET%b\n" "${GREY}" "${RESET}"   # not set up is a choice, not a fault: the status word alone
     fi
 
     printf "\n%b\n" "${CYAN}AstroWarp:${RESET}"
@@ -19755,8 +19992,7 @@ _uci_view_cloud() {
         mptun_ip=$(ip -4 addr show mptun0 | grep 'inet ' | awk '{print $2}')
         [ -n "$mptun_ip" ] && printf "  Interface: %bmptun0%b (%s)\n" "$BLUE" "$RESET" "$mptun_ip"
     else
-        printf "  Status: %bNOT ACTIVE%b\n" "${GREY}" "${RESET}"
-        printf "  (No mptun0 interface or no IP assigned)\n"
+        printf "  Status: %bNOT ACTIVE%b (no tunnel address)\n" "${GREY}" "${RESET}"
     fi
 }
 
@@ -20447,7 +20683,8 @@ ws_msg()   { ws msg "$1" "$2" "${3:-}"; }           # <tone> <text> [fix]
 ws_detail(){ ws detail "$1"; }
 ws_card()  { ws card "$1" "${2:-}" "${3:-}"; }    # <title> [half] [aside - a note at the header's right]
 ws_end()   { ws endcard; }
-ws_row()   { ws row "$1" "$2" "${3:-fact}" "${4:-}" "${5:-}"; }   # <label> <value> [tone] [key] [note]
+ws_row()   { ws row "$1" "$2" "${3:-fact}" "${4:-}" "${5:-}" "${6:-0}"; }   # <label> <value> [tone] [key] [note] [level: 1 = a sub-row]
+ws_notice() { [ -n "$2" ] && ws notice "$1" "$(printf '%s' "$2" | sed 's/\\n/ /g')"; }   # <warning|error|info> <text> - top of the card it's in, else of the tab
 ws_note()  { ws note "$1"; }
 ws_pre()   { printf '%s\n' "$1" | while IFS= read -r _wl; do ws pre "$_wl"; done; }
 ws_th()    { ws th "$@"; }
@@ -20482,8 +20719,8 @@ _ws_json() {   # <screen> <tab>
     function flushcard() { flushact(); if (!incard) return
         c = "{\"title\":" e(ct) ",\"half\":" (chalf ? "true" : "false") ",\"aside\":" e(caside) ",\"rows\":[" crows "],\"notes\":[" cnotes "],\"pre\":" e(cpre) ",\"headers\":[" cth "],\"table\":[" ctr "],\"actions\":[" cacts "]" \
             (ced != "" ? ",\"editor\":" e(ced) ",\"kind\":" e(ckind) ",\"meter\":" (cmeter == "" ? "null" : cmeter) ",\"erows\":[" cerows "]" : "") \
-            (ctiles != "" ? ",\"tiles\":[" ctiles "]" : "") "}"
-        cards = add(cards, c); incard = 0; crows = cnotes = cth = ctr = cacts = cpre = ced = cmeter = cerows = ctiles = ""; cpn = 0 }
+            (ctiles != "" ? ",\"tiles\":[" ctiles "]" : "") (cnot != "" ? ",\"notices\":[" cnot "]" : "") "}"
+        cards = add(cards, c); incard = 0; crows = cnotes = cth = ctr = cacts = cpre = ced = cmeter = cerows = ctiles = cnot = ""; cpn = 0 }
     $1 == "title"  { title = $2 }
     $1 == "tab"    { tabs = add(tabs, "{\"id\":" e($2) ",\"title\":" e($3) ",\"wait\":" e($4) "}") }
     $1 == "tabsel" { tsel = $2 }
@@ -20491,7 +20728,9 @@ _ws_json() {   # <screen> <tab>
     $1 == "detail" { if (msg == 1 && !mdone) md = add(md, e($2)) }
     $1 == "card"   { flushcard(); incard = 1; ct = $2; chalf = ($3 == "half"); caside = $4; if (msg == 1) mdone = 1 }
     $1 == "endcard"{ flushcard() }
-    $1 == "row"    { crows = add(crows, "{\"label\":" e($2) ",\"value\":" e($3) ",\"tone\":" e($4 == "" ? "fact" : $4) ",\"key\":" e($5) ",\"note\":" e($6) "}") }
+    $1 == "row"    { crows = add(crows, "{\"label\":" e($2) ",\"value\":" e($3) ",\"tone\":" e($4 == "" ? "fact" : $4) ",\"key\":" e($5) ",\"note\":" e($6) ",\"level\":" ($7 + 0) "}") }
+    # a notice sits at the top of what it is about: inside a card -> that card; before the first card -> the tab
+    $1 == "notice" { nt = "{\"tone\":" e($2) ",\"text\":" e($3) "}"; if (incard) cnot = add(cnot, nt); else snot = add(snot, nt) }
     $1 == "note"   { cnotes = add(cnotes, e($2)) }
     $1 == "pre"    { cpn++; cpre = (cpn == 1 ? $2 : cpre "\001" $2) }
     $1 == "th"     { r = ""; for (i = 2; i <= NF; i++) r = add(r, e($i)); cth = r }
@@ -20509,8 +20748,8 @@ _ws_json() {   # <screen> <tab>
     $1 == "reader" { reader = "{\"title\":" e($2) ",\"format\":" e($3) ",\"text\":" e($4) "}" }
     END { flushcard(); flushact()
         m = msg == 1 ? "{\"tone\":" e(mt) ",\"text\":" e(mx) ",\"details\":[" md "],\"fix\":" e(mf) "}" : "null"
-        printf "{\"ok\":true,\"screen\":%s,\"title\":%s,\"tab\":%s,\"tabs\":[%s],\"message\":%s,\"actions\":[%s],\"cards\":[%s],\"live\":%d,\"job\":%s,\"reader\":%s}\n", \
-            e(scr), e(title), e(tsel), tabs, m, pacts, cards, live, (job == "" ? "null" : job), (reader == "" ? "null" : reader) }'
+        printf "{\"ok\":true,\"screen\":%s,\"title\":%s,\"tab\":%s,\"tabs\":[%s],\"message\":%s,\"notices\":[%s],\"actions\":[%s],\"cards\":[%s],\"live\":%d,\"job\":%s,\"reader\":%s}\n", \
+            e(scr), e(title), e(tsel), tabs, m, snot, pacts, cards, live, (job == "" ? "null" : job), (reader == "" ? "null" : reader) }'
 }
 
 # A menu screen's own coloured text -> cards: a heading at column 0 starts a card; a section whose lines are all
@@ -20972,11 +21211,11 @@ _ws_uci_cloud() {
         [ -n "$mail" ] && ws_row Account "$mail"
         [ -n "$srv" ] && ws_row Server "$srv"
         [ -n "$tok" ] && ws_row Token "$(printf '%s' "$tok" | cut -c1-16)..."
-    else ws_row Status "NOT SET" grey "" "GoodCloud isn't configured"; fi
+    else ws_row Status "NOT SET" grey; fi
     ws_card AstroWarp
     ip=$(ip -4 addr show mptun0 2>/dev/null | awk '/inet / { print $2; exit }')
     if [ -n "$ip" ]; then ws_row Status ACTIVE green; ws_row Interface "mptun0 ($ip)"
-    else ws_row Status "NOT ACTIVE" grey "" "no mptun0 interface or no address"; fi
+    else ws_row Status "NOT ACTIVE" grey "" "no tunnel address"; fi
 }
 
 # ---- AdGuardHome Control Center --------------------------------------------------------------------------
@@ -20993,19 +21232,20 @@ _ws_agh_status() {   # the Control Center's STATUS + item 1 (the same model as t
     ws_card Status
     if [ "$p" = supported ]; then
         get_agh_stats >/dev/null 2>&1
-        agh_status_rows | while IFS='|' read -r l v t n; do ws_row "$l" "$v" "$t" "" "$n"; done   # the menu's rows, all of them
+        { _agh_config_notice web; _agh_persist_notice; printf '\n'; } | while IFS= read -r n; do _ws_notice_rec "$n"; done
+        agh_status_rows | while IFS='|' read -r l v t n; do   # the menu's rows, all of them; Version / Update indented as there
+            case "$l" in Version|Update) ws_row "$l" "$v" "$t" "" "$n" 1 ;; *) ws_row "$l" "$v" "$t" "" "$n" ;; esac; done
         act=$(agh_primary_action)
     else
-        agh_life "$p"; ws_row AdGuardHome "$AGH_WORD" "$AGH_TONE" "" "$AGH_NOTE"
+        agh_life "$p"; ws_row AdGuardHome "$AGH_WORD" "$AGH_TONE"   # the reason is the card's notice
         [ "$p" = missing ] && act=factory_reset
-        ws_msg warning "$(agh_presence_msg "$p")"
+        ws_notice "$([ "$p" = missing ] && echo error || echo warning)" "$(agh_presence_msg "$p")"
     fi
     if [ -n "$act" ] && agh_action_text "$act"; then
         case "$act" in   # the menus' step-by-step recoveries: a confirmed job each, or the two ways back
             reinstall) ws_act reinstall "$A_LABEL" danger "Reinstall AdGuardHome?" \
                            "The installed version can't read this config.yaml: this downloads AdGuard's current stable release (config.yaml is backed up first). Restoring a backup on the Backup & Recovery tab is the other way back." job ;;
-            recover)   ws_msg warning "AdGuardHome's config.yaml is missing or can't be read" \
-                           "Restore a backup on the Backup & Recovery tab, or use Reset to Factory Settings below" ;;
+            recover)   : ;;   # the card's notice says what's wrong and the two ways back (_agh_config_notice)
             factory_reset) ws_act factory_reset "$A_LABEL" danger "Reset to factory settings?" \
                            "This restores GL.iNet's AdGuardHome (binary, config.yaml, startup script) from /rom" job
                        ws_field enable "Turn AdGuardHome on afterwards" check 1 "" "" ;;
@@ -21174,16 +21414,18 @@ _wl_tweaks_repair()   { echo "Checking the package system - it refreshes the pac
 _wl_tweaks_firmware() { echo "Reading GL.iNet's firmware catalogue for this router"; }
 _wl_tweaks_packages() { echo "Reading the packages and their sizes"; }
 # Fan Management: the same readings, setpoints, limits and messages as the menu screen
+_fan_hw_notice() { printf 'warning|%s' "Fan hardware isn't detected: this model has no fan to control"; }
+_switch_hw_notice() { printf 'warning|%s' "Switch hardware isn't detected: this model has no toggle switch, so there's no position to show"; }
 _ws_tweaks_fan() {
     local fsp note per
     _fan_state
     ws_card Status
     if [ "$has_fan" = false ]; then
-        ws_row Hardware "NOT DETECTED" grey "" "fanless unit"; ws_row Temperature "${c_temp_fmt}°C"
-        ws_msg warning "Fan settings are disabled on fanless hardware"; return 0
+        _ws_notice_rec "$(_fan_hw_notice)"
+        ws_row Hardware "NOT DETECTED" grey; ws_row Temperature "${c_temp_fmt}°C"; return 0
     fi
     note=$c_mode_note; fsp=$(_fan_static_pct)
-    [ "$c_mode" = MANUAL ] && [ -n "$fsp" ] && note="(static ${fsp}%, kept across reboots)"
+    [ "$c_mode" = MANUAL ] && [ -n "$fsp" ] && note="(static ${fsp}%)"
     [ "$c_mode" = MANUAL ] && [ -z "$fsp" ] && note="(static, this boot only)"
     note=${note#(}; note=${note%)}
     ws_row "Control Mode" "$c_mode" "$([ "$c_mode" = DYNAMIC ] && echo green || echo yellow)" "" "$note"
@@ -21199,8 +21441,8 @@ _ws_tweaks_fan() {
     [ -n "${_fan_rom_max+x}" ] || _fan_rom_max=$(_fan_bundle_max "/rom$view_gz")
     if [ -n "$_fan_rom_max" ] && [ "$ui_max" -gt "$_fan_rom_max" ] 2>/dev/null; then ws_row "Max Setpoint" "${ui_max}°C" yellow "" "factory ${_fan_rom_max}°C"
     else ws_row "Max Setpoint" "${ui_max}°C"; fi
-    if glpersist_is_on fan; then ws_row Persistence ENABLED green "" "survives firmware upgrades"; per=on
-    else ws_row Persistence DISABLED grey "" "reboot-safe; lost on firmware upgrade"; per=off; fi
+    if glpersist_is_on fan; then ws_row Persistence ENABLED green; per=on
+    else ws_row Persistence DISABLED grey; per=off; fi
     ws_act min "Set Minimum Setpoint"; ws_change;  ws_field val "Minimum (°C)" number "$u_min" "0-$u_cur" "0°C - $u_cur°C (the Fan-On setpoint)"
     ws_act fanon "Set Fan-On Setpoint"; ws_change; ws_field val "Fan-On (°C)" number "$u_cur" "$u_min-$ui_max" "$u_min°C - $ui_max°C"
     ws_act warn "Set Warning Setpoint"; ws_change; ws_field val "Warning (°C)" number "$u_wrn" "$u_min-$ui_max" "$u_min°C - $ui_max°C"
@@ -21262,7 +21504,7 @@ _wj_tweaks_zram() { printf 'y\n' | _zram_do "$1"; }
 
 _ws_tweaks_terminal() {
     local st per url="" port proto
-    if [ -z "$(glwebui_appjs)" ]; then ws_card Status; ws_row "Web Terminal" UNKNOWN red; ws_msg error "The admin-panel bundle was not found; can't manage the Web Terminal"; return 0; fi
+    if [ -z "$(glwebui_appjs)" ]; then ws_card Status; ws_notice error "Web Terminal can't be managed: the Admin Panel bundle wasn't found"; ws_row "Web Terminal" UNKNOWN red; return 0; fi
     st=$(_lc_state 1 _ttyd_pkg_installed _ttyd_enabled _ttyd_service_up)
     glpersist_is_on ttyd && per=on || per=off
     if _ttyd_service_up; then
@@ -21285,8 +21527,8 @@ _ws_tweaks_switch() {
     local st per pos fn sw n=0 opts="" f sub lab grp cur
     ws_card Status
     if ! _switch_supported; then
-        ws_row Hardware "NOT DETECTED" grey
-        ws_msg warning "This model has no physical toggle switch, so a position indicator can't be shown"; return 0
+        _ws_notice_rec "$(_switch_hw_notice)"
+        ws_row Hardware "NOT DETECTED" grey; return 0
     fi
     st=$(_lc_state 0 : _switch_enabled _switch_service_running)
     glpersist_is_on switch && per=on || per=off
@@ -21295,7 +21537,7 @@ _ws_tweaks_switch() {
     if [ -n "$pos" ]; then ws_row Position "$pos"; else ws_row Position UNKNOWN yellow; fi
     fn=$(_switch_func); sw=$(_switch_state 2>/dev/null)
     if [ "$fn" = None ]; then ws_row "Toggle function" NONE grey; else ws_row "Toggle function" "$fn"; fi
-    [ "$fn" != None ] && case "$sw" in ON) ws_row State ON green ;; OFF) ws_row State OFF grey ;; esac
+    [ "$fn" != None ] && case "$sw" in ON) ws_row State ON green "" "" 1 ;; OFF) ws_row State OFF grey "" "" 1 ;; esac   # the function's sub-row
     _ws_lc_rows_and_acts "$st" "$per"
     # every choice in one list, the menu's labels, VPN / Wi-Fi under a group heading ("#<title>"); it opens on the current one
     local cf cs last="" sel=1
@@ -21581,29 +21823,16 @@ _ws_tweaks_firmware() {
     _fw_update_state >/dev/null 2>&1
     [ "$ok" = 1 ] && _fw_risk_scan keep >/dev/null 2>&1
     ws_card Status
-    ws_row Model "${FW_NAME:-$(_fw_model | tr 'a-z' 'A-Z')}"
-    ws_row Channel "$FW_CUR_CHAN" "$(ws_lc "$FW_CUR_CHAN")"
-    ws_row Version "$FW_CUR_LABEL"
-    case "$FW_UPD" in   # the word coloured, its detail beside it (the menu's "AVAILABLE (<build>)")
-        AVAILABLE) ws_row Update AVAILABLE yellow "" "$(_fw_field "$FW_UPD_ROW" 2 | sed 's/ (/ /; s/)$//')$(t=$(_fw_checked); [ -n "$t" ] && echo ", checked $t")" ;;
-        UPTODATE)  ws_row Update "UP TO DATE" green "" "$(t=$(_fw_checked); [ -n "$t" ] && echo "checked $t")" ;;
-        *)         ws_row Update UNKNOWN grey "" offline ;;
-    esac
     need=$(awk -F'|' '$1=="Packages" {n += split($2, a, ", "); next} NF {n++} END {print n+0}' "$FW_TMP/risk.keep" 2>/dev/null); : "${need:=0}"
-    if [ "$need" -gt 0 ]; then
-        ws_row "Not Persisted" "$need ITEM$([ "$need" = 1 ] || echo S)" yellow
-        # what isn't persisted, one row per kind under it - the menu's sub-rows ("Packages:  apache, speedtest")
-        _fw_risk_rows "$FW_TMP/risk.keep" 2>/dev/null | sed "s/$(printf '\033')\[[0-9;]*m//g; s/^ *//" | while IFS= read -r t; do
-            case "$t" in *:*) ws_row "${t%%:*}" "$(printf '%s' "${t#*:}" | sed 's/^ *//')" ;; ?*) ws_note "$t" ;; esac
-        done
-    else ws_row "Not Persisted" NONE green; fi
     ls=$(_fw_hist_latest)
+    # the menu's notices and STATUS rows, from the same functions (_fw_status_notices, _fw_status_rows)
+    _fw_status_notices "$need" "$ok" web | while IFS= read -r t; do _ws_notice_rec "$t"; done
+    _fw_status_rows "$need" "$ls" | while IFS='|' read -r l v t n lv; do ws_row "$l" "$v" "$t" "" "$n" "$lv"; done
     # back from a flash: the same health re-check the menu runs when it opens
     # back from a flash: the same post-update check the toolkit runs at startup (_fw_post_check), its report shown once
     local hrep=""
     case "$(_fw_st "$ls" status 2>/dev/null)" in flashing|pending) [ -n "$ls" ] && hrep=$(_fw_health "$ls" show 2>&1 </dev/null) ;; esac
-    [ -n "$ls" ] && { t=$(_fw_status_disp "$(_fw_st "$ls" status)" | sed "s/$(printf '\033')\[[0-9;]*m//g"); ws_row "Last Update" "$t" "$(ws_lc "$t")" "" "$(_fw_st "$ls" when | cut -c1-16), $(_fw_st "$ls" to)"; }
-    if [ "$ok" != 1 ]; then ws_msg warning "This firmware lacks the tools needed to flash safely (sysupgrade, sha256sum, jsonfilter)"; return 0; fi
+    [ "$ok" = 1 ] || return 0
     ws_act recheck "Check for Updates"
     # the menu's View Update History - only while there is history (the menu leaves the item out too)
     [ -n "$ls" ] && ws_act history "View Update History" "" "" "" read
@@ -21611,7 +21840,6 @@ _ws_tweaks_firmware() {
         ws_card "After the Update"
         printf '%s\n' "$hrep" | sed "s/$(printf '\033')\[[0-9;?]*[A-Za-z]//g" | grep -v '^[┌│└]' | sed '/./,$!d' | while IFS= read -r t; do ws pre "$t"; done
     fi
-    [ "$need" -gt 0 ] && ws_note "Keep what's listed above on the Packages tab - or leave \"Persist the items under Not Persisted\" ticked when installing a build."
     # Choose a Build: the same catalogue as the menu's picker; installing runs the menu's own update, its questions
     # answered in the output card (an interactive job)
     [ -s "$FW_TMP/cat" ] || return 0
@@ -21679,10 +21907,11 @@ _wt_net() {
 _ws_net_mtu() {
     local tf=/tmp/glutils/mtu.$$ n=0 line word note t
     mkdir -p /tmp/glutils; mtu_detect > "$tf" 2>/dev/null
-    if [ ! -s "$tf" ]; then rm -f "$tf"; ws_card Status; ws_row Tunnels NONE grey; ws_msg warning "No active WireGuard or OpenVPN tunnels found"; return 0; fi
+    if [ ! -s "$tf" ]; then rm -f "$tf"; ws_card Status; ws_notice warning "Tunnels: none is active - start a WireGuard or OpenVPN client or server first"; ws_row Tunnels NONE grey; return 0; fi
     while IFS= read -r line <&3; do
         n=$((n + 1)); _mtu_state "$line"
         ws_card "$type $role: $iface"
+        _ws_notice_rec "$(_mtu_notice)"
         case "$_st" in CONNECTED*|UP*) t=green ;; *) t=red ;; esac
         case "$_st" in *"  "*) ws_row Status "${_st%%  *}" "$t" "" "$(printf '%s' "${_st#*  }" | sed 's/^ *//')" ;; *) ws_row Status "$_st" "$t" ;; esac
         ws_row "Current MTU" "${cur:-N/A}" fact "" "$(printf '%s' "$source_label" | tr -d ' ()')"
@@ -21690,10 +21919,11 @@ _ws_net_mtu() {
         ws_row Overhead "-$overhead ($type / $family)"
         if [ -n "$rec" ] && [ "$cur" = "$rec" ]; then ws_row Recommended "$rec" green "" optimal
         elif [ -n "$rec" ]; then ws_row Recommended "$rec" yellow "" "$([ "${cur:-0}" -lt "$rec" ] 2>/dev/null && echo "can raise" || echo "should lower")"
-        else ws_row Recommended UNKNOWN yellow "" "endpoint not resolved"; fi
-        word=${vplain%% *}; note=${vplain#* (}; note=${note%)}
+        else ws_row Recommended UNKNOWN yellow; fi
+        word=${vplain%% *}; note=""; case "$vplain" in *" ("*) note=${vplain#* (}; note=${note%)} ;; esac
         case "$word" in VERIFIED) t=green ;; STALE) t=yellow ;; *) t=grey ;; esac
         ws_row Basis "$word" "$t" "" "$note"
+        [ -n "$vdate" ] && { ws_row Probed "$vdate" fact "" "" 1; ws_row Target "$vtgt" fact "" "$vklabel" 1; }
         if [ "$_m_opt" = 1 ]; then ws_act "opt_$n" "Optimize Tunnel (Apply Recommended)" primary
         else ws_act "recalc_$n" "Recalculate Recommended MTU"; fi
         ws_act "set_$n" "Set MTU Manually"; ws_change   # the slider snaps to the Recommended tick
@@ -21732,13 +21962,18 @@ _ws_rla_tunnels() { rla_detect 2>/dev/null | awk -F'|' 'NF >= 3 && !seen[$3]++ {
 _ws_rla_change() {   # <text> <option 1's label> <option 3's label> - the menu's "opt N" -> the button's name on the page
     printf '%s' "$1" | sed "s/[Oo]pt 1/$2/; s/[Oo]pt 2/Detect or Set the Remote LAN/; s/[Oo]pt 3/$3/"
 }
+# the remote LAN subnet isn't known: the tunnel's notice (menu: its page; page: its card) - the menu names its key
+_rla_lan_notice() {
+    if [ "$1" = web ]; then printf 'info|%s' "Remote LAN is unknown: Detect or Set the Remote LAN finds or sets it"
+    else printf 'info|%s' "Remote LAN is unknown: [2] Detect or Set the Remote LAN finds or sets it"; fi
+}
 _ws_net_rla() {
     local n t r i tun peer lan lanip rlan rgw st tn rt k a b c d dir lev any=0
     RLA_MCACHE=$WS_RLA_CACHE; mkdir -p "${RLA_MCACHE%/*}"
     _ws_rla_tunnels > "/tmp/glutils/rla/list.$$"
     if [ ! -s "/tmp/glutils/rla/list.$$" ]; then
-        rm -f "/tmp/glutils/rla/list.$$"; ws_card Status; ws_row Tunnels NONE grey
-        ws_msg warning "No VPN tunnel is up on this router - start a WireGuard or OpenVPN client or server first"; return 0
+        rm -f "/tmp/glutils/rla/list.$$"; ws_card Status
+        ws_notice warning "Tunnels: none is up - start a WireGuard or OpenVPN client or server first"; ws_row Tunnels NONE grey; return 0
     fi
     ws_card "Reachability"
     ws_note "A live probe of who can reach whom across each tunnel - this LAN, this router, the remote router and the remote LAN. Changes re-check their own tunnel."
@@ -21757,7 +21992,7 @@ _ws_net_rla() {
         if [ -n "$rlan" ]; then
             rgw="${rlan%.*}.1"
             ws_row "Remote LAN" "$rlan" fact "" "$([ "$(d_get_src "$i")" = probe ] && echo "inferred - " )gateway $rgw"
-        else ws_row "Remote LAN" UNKNOWN yellow "" "detect or set it below"; fi
+        else _ws_notice_rec "$(_rla_lan_notice web)"; ws_row "Remote LAN" UNKNOWN yellow; fi
         local l1o l1i l3
         if [ -n "$rlan" ] && rla_routes_via "$rlan" "$i" 2>/dev/null; then l1o="Disable Routing to the Remote LAN"; else l1o="Enable Routing to the Remote LAN"; fi
         if [ "$(rla_access "$(rla_zone "$i")")" = on ]; then l1i="Disable Inbound Access from the Remote LAN"; else l1i="Enable Inbound Access from the Remote LAN"; fi
@@ -21824,11 +22059,13 @@ _ws_net_limiter() {
     local hw idx name iface type zone dl ul wb ps st ifstate rv opts=""
     _netlimit_build_map >/dev/null 2>&1; netlimit_sweep_orphans >/dev/null 2>&1
     hw=$(offload_state)
+    # no tc: every card is affected - the tab's notice, above the cards
+    command -v tc >/dev/null 2>&1 || ws_notice warning "Traffic control (tc) isn't available: limits can't be applied until it's installed"
     ws_card Status
+    _ws_notice_rec "$(_nl_hw_notice web)"
     if [ "$hw" != on ]; then ws_row "HW Acceleration" DISABLED green
-    elif netlimit_any_limited; then ws_row "HW Acceleration" ENABLED yellow "" "limits are BYPASSED - disable it to enforce them"
+    elif netlimit_any_limited; then ws_row "HW Acceleration" ENABLED yellow
     else ws_row "HW Acceleration" ENABLED green; fi
-    command -v tc >/dev/null 2>&1 || ws_msg warning "Traffic control (tc) isn't available - limits can't be applied until it's installed"
     if [ "$hw" = on ]; then
         if netlimit_any_limited; then ws_act hw_off "Disable HW Acceleration" primary
         else ws_act hw_off "Disable HW Acceleration"; fi
@@ -21856,6 +22093,7 @@ _ws_net_limiter() {
         case "$acts" in *" persist "*) pe="$pe${pe:+,}$name"; pkeep="$pkeep$name=${ps:-0};" ;; esac
         case "$acts" in *" toggle "*) ud="$ud${ud:+,}$name"; pup="$pup$name=$([ "$ifstate" = down ] && echo 0 || echo 1);" ;; esac
     done < "$NL_MAP"
+    ws_note "Router: REACHABLE = all ports, PARTIAL = some ports, BLOCKED = no access"   # the menu grid's legend
     [ -n "$all" ] || { rm -f "$NL_MAP"; return 0; }
     # a switched-off network can't be shaped - bring it up first (the menu's rule)
     [ -n "$lim" ] && { ws_act limits "Set Limits" primary "" "" job; ws_change
@@ -21963,7 +22201,7 @@ _ws_net_ssh() {
     [ -f "$af" ] && n=$(grep -c "^ssh-" "$af")
     ws_card Status
     ws_row "Authorized Keys" "$n"
-    if grep -qFx "$af" "$up" 2>/dev/null; then ws_row Persistence ENABLED green; ws_act persist_off "Disable Persistence" "" "Disable persistence for SSH keys anyway?" "The SSH keys would then be lost on the next firmware upgrade, with no way to recover them from the router"
+    if grep -qFx "$af" "$up" 2>/dev/null; then ws_row Persistence ENABLED green; ws_act persist_off "Disable Persistence" "" "Disable persistence for SSH keys anyway?" "The SSH keys will then be lost on the next firmware upgrade, with no way to recover them from the router"
     else ws_row Persistence DISABLED grey; ws_act persist_on "Enable Persistence"; fi
     ws_card "Authorized Keys"
     if [ -s "$af" ]; then
@@ -22015,8 +22253,7 @@ _ws_agh_lists() {   # the Lists Manager, edited in place: each list's two switch
     local rows i sec n ty oi oe ti te rules url est st mt sw cap dl=0 fl=0     # its Memory Impact meter, then Apply
     rows=$(_ws_agh_rows)
     st=$(agh_run_state 2>/dev/null)
-    case "$st" in down) ws_msg warning "AdGuardHome is stopped. Changes take effect once started." ;;
-                  off)  ws_msg warning "AdGuardHome is disabled. Changes will take effect once enabled." ;; esac
+    _agh_lists_state_notice "$st" | while IFS= read -r n; do _ws_notice_rec "$n"; done   # the tab's notice, above the card
     read -r mt sw cap <<CAPEOF
 $(agh_capacity_mb)
 CAPEOF
@@ -22031,8 +22268,9 @@ CAPEOF
     done <<LMROWS
 $rows
 LMROWS
-    [ "$dl" -gt 0 ] && [ "$st" != down ] && [ "$st" != off ] && ws_note "$dl list$([ "$dl" = 1 ] || echo s) downloading - rule count estimated until finished"
-    [ "$fl" -gt 0 ] && ws_note "$fl list$([ "$fl" = 1 ] || echo s) failed to download - rules not loaded"
+    mkdir -p /tmp/glutils; printf '%s\n' "$rows" > "/tmp/glutils/lm_rows.$$"   # the menu's data layout - its notices, the same words
+    _agh_meter_notices "/tmp/glutils/lm_rows.$$" "$([ "$st" = down ] || [ "$st" = off ] && echo 0 || echo 1)" | while IFS= read -r n; do _ws_notice_rec "$n"; done
+    rm -f "/tmp/glutils/lm_rows.$$"
     _ws_job_alive agh_lists && return 0
     ws_act apply "Apply Changes" primary "Apply these list changes?" "AdGuardHome restarts to load them (and is turned on if it's off)" job
 }
@@ -22055,14 +22293,16 @@ LMEOF
 # the rest of the Control Center mirrors its menu screens (STATUS + one button per item, run in the menu's code)
 # Storage, native: the menu's STATUS rows (agh_storage_rows), its one toggle as a button whose dialog says what the menu
 # warns before asking
+_agh_fl_notice() { printf 'warning|%s' "Filter Space Limit isn't supported: GL.iNet's filter space limit doesn't apply to this model\nor firmware"; }
 _ws_agh_storage() {
     local wd d fl lim w=""
     wd=$(get_agh_workdir)
-    [ -n "$wd" ] || { ws_msg error "Could not find AdGuardHome's working directory"; return 0; }
+    [ -n "$wd" ] || { ws_notice error "AdGuardHome's working directory wasn't found: Storage can't be shown"; return 0; }
     ws_card Status
-    agh_storage_rows "$wd" | while IFS='|' read -r l v t n; do ws_row "$l" "$v" "$t" "" "$n"; done   # the menu's rows
     fl=$(_agh_fl_state)
-    if [ "$fl" = none ]; then ws_note "GL.iNet's filter space limit doesn't apply to this model/firmware"; return 0; fi
+    [ "$fl" = none ] && _ws_notice_rec "$(_agh_fl_notice)"
+    agh_storage_rows "$wd" | while IFS='|' read -r l v t n; do ws_row "$l" "$v" "$t" "" "$n"; done   # the menu's rows
+    [ "$fl" = none ] && return 0
     _ws_job_alive agh_storage && return 0
     if [ "$fl" = on ]; then
         swapon -s 2>/dev/null | grep -q zram || w=" Zram swap is NOT enabled - it is strongly recommended to enable it (Zram Swap tab) before adding additional filter lists."
@@ -22099,16 +22339,17 @@ _ws_agh_updates() {
     ws_card Status
     ws_row AdGuardHome "$lw" "$lt" "" "$ld"
     ws_row Channel "$chan" "$([ "$chan" = BETA ] && echo yellow || echo green)"
-    ws_row Version "v${cver:-?}"
+    ws_row Version "v${cver:-?}" fact "" "" 1
     case "$AGH_UPD" in
-        AVAILABLE) ws_row Update AVAILABLE yellow "" "v$AGH_UPD_VER" ;;
-        UPTODATE)  ws_row Update "UP TO DATE" green ;;
-        *)         ws_row Update UNKNOWN grey "" offline ;;
+        AVAILABLE) ws_row Update AVAILABLE yellow "" "v$AGH_UPD_VER" 1 ;;
+        UPTODATE)  ws_row Update "UP TO DATE" green "" "" 1 ;;
+        *)         ws_row Update UNKNOWN grey "" offline 1 ;;
     esac
     if [ "$uion" = 1 ]; then ws_row "Updates via UI" ENABLED green; else ws_row "Updates via UI" DISABLED grey; fi
     if [ "$per" = 1 ]; then ws_row Persistence ENABLED green
-    elif _agh_fw_risk; then ws_row Persistence DISABLED yellow "" "firmware update would stop AdGuardHome"
+    elif _agh_fw_risk; then ws_row Persistence DISABLED yellow
     else ws_row Persistence DISABLED grey; fi
+    _ws_notice_rec "$(_agh_persist_notice)"
     _ws_job_alive agh_updates && return 0
     if [ "$AGH_UPD" = AVAILABLE ]; then
         ws_act update "Update to v$AGH_UPD_VER" primary "Update AdGuardHome to v$AGH_UPD_VER?" \
@@ -22277,11 +22518,18 @@ agh_direct_rows() {
     if [ "$_wd_on" = 1 ]; then echo "Direct UI Access|ENABLED|green|"; echo "Direct URL|$_wd_url|link|"
     else echo "Direct UI Access|DISABLED|grey|"; fi
     case "$_wd_login" in
-        unknown) echo "Web UI Login|UNKNOWN|red|config.yaml missing" ;;
-        none)    if [ "$_wd_on" = 1 ]; then echo "Web UI Login|NOT SET|yellow|dashboard open to the LAN"
+        unknown) echo "Web UI Login|UNKNOWN|red|" ;;
+        none)    if [ "$_wd_on" = 1 ]; then echo "Web UI Login|NOT SET|yellow|"
                  else echo "Web UI Login|NOT SET|grey|"; fi ;;
         *)       echo "Web UI Login|SET|green|" ;;
     esac
+}
+# ...and what the red / yellow login row means, as the screen's notice (menu + page)
+agh_direct_notice() {
+    case "$_wd_login" in
+        unknown) printf 'error|%s' "AdGuardHome Web UI Login can't be read: config.yaml is missing" ;;
+        none)    [ "$_wd_on" = 1 ] && printf 'warning|%s' "AdGuardHome Direct UI Access has no login: anyone on the LAN can open the dashboard" ;;
+    esac; return 0
 }
 _ws_agh_direct_state() {   # -> _wd_on (1 = standalone), _wd_login (set|none|unknown), _wd_url
     local conf; conf=$(get_agh_config)
@@ -22293,6 +22541,7 @@ _ws_agh_direct_state() {   # -> _wd_on (1 = standalone), _wd_login (set|none|unk
 _ws_agh_direct() {
     _ws_agh_direct_state
     ws_card Status
+    _ws_notice_rec "$(agh_direct_notice)"
     agh_direct_rows | while IFS='|' read -r l v t n; do ws_row "$l" "$v" "$t" "" "$n"; done   # the menu's rows
     _ws_job_alive agh_direct && return 0
     if [ "$_wd_on" = 1 ]; then

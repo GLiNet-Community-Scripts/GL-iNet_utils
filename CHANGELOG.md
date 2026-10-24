@@ -4,6 +4,12 @@ All notable changes to the GL.iNet Utilities toolkit. Newest first. Versions
 match the `# Version:` line in the script — `YYYY-MM-DD`, or `YYYY-MM-DD_HH:MM`
 for multiple releases on the same day.
 
+## 2026-10-23
+### Bug Fixes
+#### Hardware Information
+- Network Interfaces lists the LAN port on routers with a Qualcomm packet engine but no switch ports
+  behind it (a Slate 7 showed only WAN), and no longer lists virtual interfaces such as bond0 as ports.
+
 ## 2026-10-22
 ### What's New
 #### Toolkit-wide

@@ -2,7 +2,7 @@
 # GL.iNet Router Toolkit
 # Author: phantasm22
 # License: GPL-3.0
-# Version: 2026-10-22
+# Version: 2026-10-23
 #
 # ── Versioning (bump the line above before every push to GitHub) ─────────────
 # The self-updater compares this value as a plain string (test's \> operator),
@@ -2566,10 +2566,11 @@ hwnet_collect() {
             [ "$role" = WAN ] && { _wr=$(hwnet_wan_role "$mapsto"); [ -n "$_wr" ] && role=$_wr; }
             printf '%s\t%s\t%s\t%s\t%s\n' "$grp" "$silk" "$role" "$rs" "$mapsto" >> "$NT"
         done
-    elif [ -n "$(swconfig list 2>/dev/null)" ]; then
-        # No GL port map, but there IS a switch: derive the CHASSIS ports from the
+    elif [ -n "$(swconfig list 2>/dev/null)" ] && uci -q show network 2>/dev/null | grep -q '=switch_vlan$'; then
+        # No GL port map, but there IS a switch with its VLANs set up: derive the CHASSIS ports from the
         # network config, not by dumping every swconfig port (which includes CPU and
-        # inter-switch trunks that aren't physical ports).
+        # inter-switch trunks that aren't physical ports). A switch with no switch_vlan sections has no
+        # ports behind it here (Qualcomm's QCA MPPE engine on a Slate 7) - the netdev tier below lists them.
         SRC="network config"
         # WAN: each wan* interface's device, when it's a real netdev port.
         hwnet_wan_ifaces > "$NT.w"
@@ -2617,6 +2618,7 @@ hwnet_collect() {
             case "$_n" in lo|br-*|wlan*|wg*|ovpn*|apcli*|ra|rai|rax|ra[0-9]*|rai[0-9]*|rax[0-9]*|*.*|ifb*|tailscale*|teql*|wds*|mesh*|sit*|ip6*|gre*) continue ;; esac
             [ "$(cat "$_p/type" 2>/dev/null)" = 1 ] || continue
             [ -e "$_p/carrier" ] || continue
+            [ -e "$_p/device" ] || continue   # a port has hardware behind it; bond0, erspan0, mld-wifi0 ... don't
             # a USB network device (a tethered phone, a USB adapter) isn't a port on the router - it gets its own
             # line under the table (hwnet_addr_rows)
             case "$(readlink -f "$_p/device" 2>/dev/null)" in */usb[0-9]*/*) continue ;; esac
